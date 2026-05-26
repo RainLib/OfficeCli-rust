@@ -1,5 +1,6 @@
 pub mod handler;
 pub mod reader;
+pub mod content_stream;
 pub mod text_extract;
 pub mod modifier;
 pub mod view;

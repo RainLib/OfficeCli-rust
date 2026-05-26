@@ -22,19 +22,26 @@ impl PdfViewer {
 
     pub fn view_as_annotated(&self, opts: &ViewOptions) -> Result<String, HandlerError> {
         let mut result = String::new();
-        let mut line_num = 0;
+        let mut block_num = 0;
         let start = opts.start_line.unwrap_or(0);
         let end = opts.end_line.unwrap_or(usize::MAX);
         let max = opts.max_lines.unwrap_or(usize::MAX);
 
         for page_num in 1..=self.reader.page_count() {
             result.push_str(&format!("=== Page {} ===\n", page_num));
-            if let Some(page_text) = self.reader.extract_page_text(page_num) {
-                for line in page_text.lines() {
-                    line_num += 1;
-                    if line_num < start { continue; }
-                    if line_num > end || line_num >= start + max { break; }
-                    result.push_str(&format!("  {} | {}\n", line_num, line));
+            if let Some(parsed) = self.reader.parse_page_text_blocks(page_num) {
+                for block in &parsed.text_blocks {
+                    block_num += 1;
+                    if block_num < start { continue; }
+                    if block_num > end || block_num >= start + max { break; }
+                    let bbox = &block.bbox;
+                    let style = &block.style;
+                    let font_info = style.font_name.as_deref().unwrap_or("-");
+                    let size_info = style.font_size.map(|s| format!("{:.0}", s)).unwrap_or("-".to_string());
+                    result.push_str(&format!(
+                        "  {} | ({:.0},{:.0}) w={:.1} h={:.0} [{} {}] {}\n",
+                        block_num, bbox.x, bbox.y, bbox.width, bbox.height, font_info, size_info, block.text
+                    ));
                 }
             }
         }
@@ -46,13 +53,27 @@ impl PdfViewer {
         result.push_str("PDF Document\n");
         result.push_str(&format!("  Pages: {}\n", self.reader.page_count()));
         for page_num in 1..=self.reader.page_count() {
-            if let Some(page_text) = self.reader.extract_page_text(page_num) {
-                let char_count = page_text.chars().count();
-                let first_line = page_text.lines().next().unwrap_or("");
-                let preview = if first_line.chars().count() > 60 { format!("{}...", first_line.chars().take(60).collect::<String>()) } else { first_line.to_string() };
-                result.push_str(&format!("  page[{}]: {} chars, \"{}\"\n", page_num, char_count, preview));
+            result.push_str(&format!("  page[{}]:\n", page_num));
+            if let Some(parsed) = self.reader.parse_page_text_blocks(page_num) {
+                for block in &parsed.text_blocks {
+                    let preview = if block.text.chars().count() > 50 {
+                        format!("{}...", block.text.chars().take(50).collect::<String>())
+                    } else {
+                        block.text.clone()
+                    };
+                    let bbox = &block.bbox;
+                    let font = block.style.font_name.as_deref().unwrap_or("-");
+                    let size = block.style.font_size.map(|s| format!("{:.0}", s)).unwrap_or("-".to_string());
+                    result.push_str(&format!(
+                        "    text[{}]: ({:.0},{:.0}) {:.1}×{:.0} [{} {}] \"{}\"\n",
+                        block.index, bbox.x, bbox.y, bbox.width, bbox.height, font, size, preview
+                    ));
+                }
+                if parsed.text_blocks.is_empty() {
+                    result.push_str("    (no text blocks)\n");
+                }
             } else {
-                result.push_str(&format!("  page[{}]: (empty)\n", page_num));
+                result.push_str("    (empty)\n");
             }
         }
         Ok(result)

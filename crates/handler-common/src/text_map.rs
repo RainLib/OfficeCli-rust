@@ -1,5 +1,25 @@
 use serde::{Deserialize, Serialize};
 
+/// Bounding box in document coordinates (optional, PDF-specific).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BBoxSpan {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Style summary for a text span (optional, PDF-specific).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StyleSpan {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 /// Single offset mapping entry: a text range maps to a document path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OffsetSpan {
@@ -14,6 +34,12 @@ pub struct OffsetSpan {
     /// Element type: "run", "paragraph-separator", "paragraph-break",
     /// "cell", "shape", "text-block", etc.
     pub element_type: String,
+    /// Optional bounding box (PDF text blocks)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<BBoxSpan>,
+    /// Optional style summary (PDF text blocks)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<StyleSpan>,
 }
 
 /// Full document text + offset→path mapping.
@@ -80,6 +106,18 @@ impl TextOffsetMap {
 
     /// Add a span to the map, extending full_text.
     pub fn push_span(&mut self, text: &str, path: &str, element_type: &str) {
+        self.push_span_with_metadata(text, path, element_type, None, None);
+    }
+
+    /// Add a span with optional bbox and style metadata.
+    pub fn push_span_with_metadata(
+        &mut self,
+        text: &str,
+        path: &str,
+        element_type: &str,
+        bbox: Option<BBoxSpan>,
+        style: Option<StyleSpan>,
+    ) {
         let start = self.full_text.len();
         self.full_text.push_str(text);
         let end = self.full_text.len();
@@ -89,6 +127,8 @@ impl TextOffsetMap {
             path: path.to_string(),
             text: text.to_string(),
             element_type: element_type.to_string(),
+            bbox,
+            style,
         });
         self.meta.total_chars = self.full_text.len();
         self.meta.total_spans = self.spans.len();

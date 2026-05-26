@@ -14,7 +14,7 @@ pub use document_node::DocumentNode;
 pub use insert_position::InsertPosition;
 pub use path_aliases::PathAliases;
 pub use path_segment::PathSegment;
-pub use text_map::{TextOffsetMap, OffsetSpan, TextMapMeta};
+pub use text_map::{TextOffsetMap, OffsetSpan, TextMapMeta, BBoxSpan, StyleSpan};
 pub use validation_error::ValidationError;
 pub use document_issue::{DocumentIssue, IssueSeverity};
 pub use output_format::{OutputFormat, ViewOptions, RawOptions, BinaryInfo};

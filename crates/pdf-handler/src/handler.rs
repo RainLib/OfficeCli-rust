@@ -2,6 +2,7 @@ use crate::reader::PdfReader;
 use crate::navigation::PdfNavigator;
 use crate::view::PdfViewer;
 use crate::text_extract::PdfTextExtractor;
+use crate::content_stream::PdfColor;
 use handler_common::*;
 use handler_common::output_format::BinaryInfo;
 use std::cell::RefCell;
@@ -51,6 +52,11 @@ impl DocumentHandler for PdfHandler {
 
     fn view_as_html(&self) -> Result<String, HandlerError> {
         crate::html_preview::view_as_html(&self.reader.borrow())
+    }
+
+    fn view_as_svg(&self) -> Result<String, HandlerError> {
+        let reader = self.reader.borrow();
+        crate::render::PdfRenderer::render_page_to_svg(reader.file_path(), 1)
     }
 
     fn view_as_text_json(&self, opts: ViewOptions) -> Result<serde_json::Value, HandlerError> {
@@ -106,6 +112,39 @@ impl DocumentHandler for PdfHandler {
             return Ok(root_node);
         }
 
+        // Check if path targets a specific text block: /page[N]/text[M]
+        let text_path = parse_text_block_path(path);
+        if let Some((page_num, text_index)) = text_path {
+            let parsed = reader.parse_page_text_blocks(page_num)
+                .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
+
+            let block_idx = text_index - 1;
+            if block_idx >= parsed.text_blocks.len() {
+                return Err(HandlerError::PathNotFound(format!(
+                    "text[{}] not found (page {} has {} text blocks)",
+                    text_index, page_num, parsed.text_blocks.len()
+                )));
+            }
+
+            let block = &parsed.text_blocks[block_idx];
+            let node = DocumentNode::new(path, "text-block")
+                .with_text(&block.text)
+                .with_format("bbox_x", serde_json::json!(block.bbox.x))
+                .with_format("bbox_y", serde_json::json!(block.bbox.y))
+                .with_format("bbox_width", serde_json::json!(block.bbox.width))
+                .with_format("bbox_height", serde_json::json!(block.bbox.height));
+
+            let mut node = node;
+            if let Some(ref font) = block.style.font_name {
+                node = node.with_format("font", serde_json::json!(font));
+            }
+            if let Some(size) = block.style.font_size {
+                node = node.with_format("font_size", serde_json::json!(size));
+            }
+
+            return Ok(node);
+        }
+
         let nav = PdfNavigator::new(reader.page_count());
         nav.validate_path(path).map_err(|e| HandlerError::InvalidPath(e))?;
 
@@ -130,12 +169,29 @@ impl DocumentHandler for PdfHandler {
                         .with_text(reader.extract_page_text(i).unwrap_or_default());
                     results.push(node);
                 }
-            } else if element_type == "text" {
-                for i in 1..=reader.page_count() {
-                    let path = format!("/page[{}]/text[1]", i);
-                    let node = DocumentNode::new(&path, "text-block")
-                        .with_text(reader.extract_page_text(i).unwrap_or_default());
-                    results.push(node);
+            } else if element_type == "text" || element_type == "text-block" {
+                // Return individual text blocks with bbox and style
+                for page_num in 1..=reader.page_count() {
+                    if let Some(parsed_stream) = reader.parse_page_text_blocks(page_num) {
+                        for block in &parsed_stream.text_blocks {
+                            let path = format!("/page[{}]/text[{}]", page_num, block.index);
+                            let node = DocumentNode::new(&path, "text-block")
+                                .with_text(&block.text)
+                                .with_format("bbox_x", serde_json::json!(block.bbox.x))
+                                .with_format("bbox_y", serde_json::json!(block.bbox.y))
+                                .with_format("bbox_width", serde_json::json!(block.bbox.width))
+                                .with_format("bbox_height", serde_json::json!(block.bbox.height));
+
+                            let mut node = node;
+                            if let Some(ref font) = block.style.font_name {
+                                node = node.with_format("font", serde_json::json!(font));
+                            }
+                            if let Some(size) = block.style.font_size {
+                                node = node.with_format("font_size", serde_json::json!(size));
+                            }
+                            results.push(node);
+                        }
+                    }
                 }
             }
         }
@@ -149,7 +205,49 @@ impl DocumentHandler for PdfHandler {
 
         let mut unsupported = Vec::new();
 
-        // Parse path to determine page
+        // Check if path targets a specific text block: /page[N]/text[M]
+        let text_path = parse_text_block_path(path);
+        if let Some((page_num, text_index)) = text_path {
+            let text_val = properties.get("text").map(|s| s.as_str());
+            let font_val = properties.get("font").map(|s| s.as_str());
+            let size_val = properties.get("size").and_then(|s| s.parse::<f32>().ok());
+            let color_val = properties.get("color").and_then(|s| parse_color(s));
+            let char_spacing_val = properties.get("charSpacing").and_then(|s| s.parse::<f32>().ok());
+            let word_spacing_val = properties.get("wordSpacing").and_then(|s| s.parse::<f32>().ok());
+
+            let mut reader = self.reader.borrow_mut();
+
+            // If only text property, use simple targeted replacement
+            if text_val.is_some() && font_val.is_none() && size_val.is_none()
+                && color_val.is_none() && char_spacing_val.is_none() && word_spacing_val.is_none()
+            {
+                crate::modifier::replace_text_at_path(
+                    reader.document_mut(), page_num, text_index, text_val.unwrap(),
+                )?;
+            } else {
+                // Use style-aware replacement
+                crate::modifier::replace_text_with_style(
+                    reader.document_mut(), page_num, text_index,
+                    text_val,
+                    font_val,
+                    size_val,
+                    color_val.as_ref(),
+                    char_spacing_val,
+                    word_spacing_val,
+                )?;
+            }
+
+            // Collect unsupported properties
+            for (key, _) in properties {
+                if !matches!(key.as_str(), "text" | "content" | "font" | "size" | "color" | "charSpacing" | "wordSpacing") {
+                    unsupported.push(key.clone());
+                }
+            }
+
+            return Ok(unsupported);
+        }
+
+        // Page-level path: /page[N]
         let page_num = if path == "/" {
             None
         } else {
@@ -161,19 +259,17 @@ impl DocumentHandler for PdfHandler {
         for (key, value) in properties {
             match key.as_str() {
                 "text" | "content" => {
-                    // Replace text on the specified page (or all pages)
                     let mut reader = self.reader.borrow_mut();
                     if let Some(page) = page_num {
                         crate::modifier::replace_text_on_page(
                             reader.document_mut(), page, value,
                         )?;
                     } else {
-                        // Replace on all pages
                         let page_count = reader.page_count();
                         for page in 1..=page_count {
                             crate::modifier::replace_text_on_page(
                                 reader.document_mut(), page, value,
-                            ).ok(); // may fail on pages without text
+                            ).ok();
                         }
                     }
                 }
@@ -340,4 +436,53 @@ impl DocumentHandler for PdfHandler {
         let extractor = PdfTextExtractor::new(PdfReader::open(reader.file_path())?);
         Ok(extractor.extract_with_offsets())
     }
+}
+
+/// Parse a text block path like /page[1]/text[3] into (page_num, text_index).
+/// Returns None if the path doesn't contain a text[N] segment.
+fn parse_text_block_path(path: &str) -> Option<(usize, usize)> {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() != 2 { return None; }
+
+    // Parse page[N]
+    let page_part = parts[0];
+    if !page_part.starts_with("page") { return None; }
+    let page_num = page_part.strip_prefix("page[")
+        .and_then(|s| s.strip_suffix("]"))
+        .and_then(|s| s.parse::<usize>().ok())?;
+
+    // Parse text[M]
+    let text_part = parts[1];
+    if !text_part.starts_with("text") { return None; }
+    let text_index = text_part.strip_prefix("text[")
+        .and_then(|s| s.strip_suffix("]"))
+        .and_then(|s| s.parse::<usize>().ok())?;
+
+    Some((page_num, text_index))
+}
+
+/// Parse a color string into a PdfColor.
+/// Supports: "FF0000", "#FF0000", "rgb(255,0,0)", "1.0 0.0 0.0 rg"
+fn parse_color(s: &str) -> Option<PdfColor> {
+    let s = s.trim();
+
+    // Hex format: FF0000 or #FF0000
+    let hex = if s.starts_with('#') { &s[1..] } else { s };
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+        return Some(PdfColor::Rgb(r, g, b));
+    }
+
+    // rgb(r,g,b) format
+    if s.starts_with("rgb(") && s.ends_with(')') {
+        let inner = &s[4..s.len()-1];
+        let parts: Vec<f32> = inner.split(',')
+            .filter_map(|p| p.trim().parse::<f32>().ok())
+            .collect();
+        if parts.len() == 3 { return Some(PdfColor::Rgb(parts[0]/255.0, parts[1]/255.0, parts[2]/255.0)); }
+    }
+
+    None
 }
