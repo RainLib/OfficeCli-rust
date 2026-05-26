@@ -1,8 +1,9 @@
-name: Build
+name: Build & Release
 
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags:
       - 'v*'
   pull_request:
@@ -12,7 +13,41 @@ permissions:
   contents: read
 
 jobs:
+  # ── CI: lint + test (fast, runs on every push/PR) ────────────────────
+  ci:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-ci-
+
+      - name: Format check
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  # ── Build: cross-platform release binaries ───────────────────────────
   build:
+    needs: ci
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
         include:
@@ -21,7 +56,7 @@ jobs:
             os: macos-latest
           - target: x86_64-apple-darwin
             name: officecli-mac-x64
-            os: macos-13  # Intel macOS runner
+            os: macos-13
           - target: x86_64-unknown-linux-gnu
             name: officecli-linux-x64
             os: ubuntu-latest
@@ -50,6 +85,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-build-${{ matrix.target }}-
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -91,9 +136,12 @@ jobs:
           MSYS2_ARG_CONV_EXCL: '*'
         run: |
           chmod +x publish/${{ matrix.name }}
+          publish/${{ matrix.name }} --version
           publish/${{ matrix.name }} create test_smoke.docx
           publish/${{ matrix.name }} view test_smoke.docx --mode stats
-          rm -f test_smoke.docx
+          publish/${{ matrix.name }} create test_smoke.pdf
+          publish/${{ matrix.name }} view test_smoke.pdf --mode outline
+          rm -f test_smoke.docx test_smoke.pdf
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -101,6 +149,7 @@ jobs:
           name: ${{ matrix.name }}
           path: publish/${{ matrix.name }}
 
+  # ── Release: draft GitHub Release on v* tags ─────────────────────────
   release:
     needs: build
     runs-on: ubuntu-latest

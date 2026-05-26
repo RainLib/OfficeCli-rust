@@ -17,3 +17,4 @@ Thumbs.db
 # Binary outputs
 *.exe
 /officecli
+dist/
