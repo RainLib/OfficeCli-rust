@@ -78,8 +78,8 @@ impl DocumentHandler for WordHandler {
     }
 
     fn view_as_html(&self) -> Result<String, HandlerError> {
-        let dom = self.parse_dom()?;
-        crate::html_preview::view_as_html(&dom)
+        let package = self.package.borrow();
+        crate::html_preview::view_as_html(&package)
     }
 
     fn view_as_text_json(&self, opts: ViewOptions) -> Result<serde_json::Value, HandlerError> {
