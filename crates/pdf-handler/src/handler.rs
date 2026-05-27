@@ -242,23 +242,22 @@ impl DocumentHandler for PdfHandler {
 
             let mut reader = self.reader.borrow_mut();
 
-            // Optional: embed a user-provided TTF (or the bundled NotoSansSC) before text edit,
-            // so that font_val / fallback can resolve unencodable characters.
+            // Before the actual text edit, give the embedder a chance to add a
+            // fallback font for any character the existing page fonts can't render.
+            // The embedder itself scans page fonts and is a no-op when every char
+            // is already supported, so this is safe to call unconditionally.
+            // Skipping this check based on ASCII/CJK heuristics is wrong: PowerPoint
+            // exports use subsetted fonts that may omit even ASCII glyphs like '*'.
             if let Some(text_str) = text_val {
-                let needs_embed = font_val.is_some() && font_file_val.is_some();
-                let should_check_fallback = font_file_val.is_some()
-                    || (text_str.chars().any(|c| !c.is_ascii()) && font_val.is_none());
-
-                if needs_embed || should_check_fallback {
-                    let chars_needed: std::collections::HashSet<char> = text_str.chars().collect();
-                    let _ = crate::font_embedder::ensure_cjk_font_for_chars(
-                        reader.document_mut(),
-                        page_num,
-                        &chars_needed,
-                        font_val,
-                        font_file_val,
-                    );
-                }
+                let chars_needed: std::collections::HashSet<char> =
+                    text_str.chars().collect();
+                let _ = crate::font_embedder::ensure_cjk_font_for_chars(
+                    reader.document_mut(),
+                    page_num,
+                    &chars_needed,
+                    font_val,
+                    font_file_val,
+                );
             }
 
             if text_val.is_some()
