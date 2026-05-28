@@ -1201,13 +1201,14 @@ fn add_or_merge_text_block(
 
     let transform_bbox = |bb: &BBox| -> BBox {
         let c1x = bb.x;
-        let c1y = bb.y;
+        let text_scale_y = state.tm_d.signum() * bb.height;
+        let c1y = bb.y - 0.2 * text_scale_y;
         let c2x = bb.x + bb.width;
-        let c2y = bb.y;
+        let c2y = bb.y - 0.2 * text_scale_y;
         let c3x = bb.x;
-        let c3y = bb.y + bb.height;
+        let c3y = bb.y + 0.8 * text_scale_y;
         let c4x = bb.x + bb.width;
-        let c4y = bb.y + bb.height;
+        let c4y = bb.y + 0.8 * text_scale_y;
 
         let tx1 = c1x * state.ctm_a + c1y * state.ctm_c + state.ctm_e;
         let ty1 = c1x * state.ctm_b + c1y * state.ctm_d + state.ctm_f;

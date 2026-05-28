@@ -178,9 +178,9 @@ pub fn replace_text_with_style(
 
     if let Some(color) = fill_color {
         match color {
-            PdfColor::Gray(g) => style_lines.push(format!("{} g", g)),
-            PdfColor::Rgb(r, g, b) => style_lines.push(format!("{} {} {} rg", r, g, b)),
-            PdfColor::Cmyk(c, m, y, k) => style_lines.push(format!("{} {} {} {} k", c, m, y, k)),
+            PdfColor::Gray(g) => style_lines.push(format!("{} g {} G", g, g)),
+            PdfColor::Rgb(r, g, b) => style_lines.push(format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b)),
+            PdfColor::Cmyk(c, m, y, k) => style_lines.push(format!("{} {} {} {} k {} {} {} {} K", c, m, y, k, c, m, y, k)),
         }
     }
 
@@ -208,9 +208,9 @@ pub fn replace_text_with_style(
         if let Some(_color) = fill_color {
             if let Some(ref orig_color) = target_block.style.fill_color {
                 match orig_color {
-                    PdfColor::Gray(g) => restore_lines.push(format!("{} g", g)),
-                    PdfColor::Rgb(r, g, b) => restore_lines.push(format!("{} {} {} rg", r, g, b)),
-                    PdfColor::Cmyk(c, m, y, k) => restore_lines.push(format!("{} {} {} {} k", c, m, y, k)),
+                    PdfColor::Gray(g) => restore_lines.push(format!("{} g {} G", g, g)),
+                    PdfColor::Rgb(r, g, b) => restore_lines.push(format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b)),
+                    PdfColor::Cmyk(c, m, y, k) => restore_lines.push(format!("{} {} {} {} k {} {} {} {} K", c, m, y, k, c, m, y, k)),
                 }
             }
         }
@@ -238,6 +238,11 @@ pub fn replace_text_with_style(
 
     let new_tokens = build_segment_tokens(&segments, Some(&effective_font), effective_size);
 
+    let mut final_tokens = Vec::new();
+    final_tokens.extend(style_lines);
+    final_tokens.extend(new_tokens);
+    final_tokens.extend(restore_lines);
+
     let line = &modified_lines[target_block.text_line_index];
     let mut line_tokens = crate::content_stream::tokenize_pdf_line(line);
 
@@ -248,25 +253,10 @@ pub fn replace_text_with_style(
             Some("Tj") | Some("TJ")
         );
         let end = if consume_extra { op_idx + 2 } else { op_idx + 1 };
-        line_tokens.splice(op_idx..end, new_tokens);
+        line_tokens.splice(op_idx..end, final_tokens);
         modified_lines[target_block.text_line_index] = line_tokens.join(" ");
     } else {
-        modified_lines[target_block.text_line_index] = new_tokens.join(" ");
-    }
-
-    // Insert style lines before text line, restore lines after text line
-    if !style_lines.is_empty() || !restore_lines.is_empty() {
-        let insert_pos = target_block.text_line_index;
-        let mut new_lines = modified_lines[..insert_pos].to_vec();
-        for line in &style_lines {
-            new_lines.push(line.clone());
-        }
-        new_lines.push(modified_lines[insert_pos].clone());
-        for line in &restore_lines {
-            new_lines.push(line.clone());
-        }
-        new_lines.extend_from_slice(&modified_lines[insert_pos + 1..]);
-        modified_lines = new_lines;
+        modified_lines[target_block.text_line_index] = final_tokens.join(" ");
     }
 
     // Insert background-color rectangle BEFORE the BT block (outside text object)
@@ -459,12 +449,13 @@ pub fn apply_range_text_colors(
 ) -> Result<(), HandlerError> {
     use std::collections::HashMap;
 
-    // Helper to format color operator
+    // Helper to format color operators — sets BOTH fill (rg/g/k) and stroke (RG/G/K)
+    // so that Tr=2 (fill+stroke) text also gets the target color.
     let format_color_op = |col: &PdfColor| -> String {
         match col {
-            PdfColor::Gray(g) => format!("{} g", g),
-            PdfColor::Rgb(r, g, b) => format!("{} {} {} rg", r, g, b),
-            PdfColor::Cmyk(c, m, y, k) => format!("{} {} {} {} k", c, m, y, k),
+            PdfColor::Gray(g) => format!("{} g {} G", g, g),
+            PdfColor::Rgb(r, g, b) => format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b),
+            PdfColor::Cmyk(c, m, y, k) => format!("{} {} {} {} k {} {} {} {} K", c, m, y, k, c, m, y, k),
         }
     };
 
@@ -658,6 +649,9 @@ pub fn apply_range_highlights(
                     )
                 };
 
+                eprintln!("[DEBUG highlight] block.bbox=({},{},{},{}), sub_bbox_x={}, sub_bbox_width={}", 
+                    block.bbox.x, block.bbox.y, block.bbox.width, block.bbox.height,
+                    sub_bbox_x, sub_bbox_width);
                 rects.push(crate::content_stream::BBox {
                     x: sub_bbox_x,
                     y: block.bbox.y,
@@ -698,6 +692,7 @@ pub fn apply_range_highlights(
             let x_br = rect.x + rect.width;
             let y_br = rect.y;
 
+            // Standard PDF Spec QuadPoints order: top-left, top-right, bottom-left, bottom-right
             quad_points.push(lopdf::Object::Real(x_tl as f32));
             quad_points.push(lopdf::Object::Real(y_tl as f32));
             quad_points.push(lopdf::Object::Real(x_tr as f32));
