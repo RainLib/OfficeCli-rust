@@ -203,6 +203,24 @@ pub fn build_run_properties(props: &std::collections::HashMap<String, String>) -
                     .with_attribute("val", color_val);
                 children.push(color_node);
             }
+            "bgColor" | "highlight" | "bg" => {
+                let color_val = if value.starts_with('#') {
+                    &value[1..]
+                } else {
+                    value.as_str()
+                };
+                if matches!(color_val.to_lowercase().as_str(), "yellow" | "green" | "cyan" | "magenta" | "blue" | "red" | "darkblue" | "darkcyan" | "darkgreen" | "darkmagenta" | "darkred" | "darkyellow" | "white" | "lightgray" | "darkgray" | "black" | "none") {
+                    let hl_node = WordNode::new(WordElementType::Unknown("highlight".to_string()))
+                        .with_attribute("val", &color_val.to_lowercase());
+                    children.push(hl_node);
+                } else {
+                    let shd_node = WordNode::new(WordElementType::Unknown("shd".to_string()))
+                        .with_attribute("val", "clear")
+                        .with_attribute("color", "auto")
+                        .with_attribute("fill", color_val);
+                    children.push(shd_node);
+                }
+            }
             _ => {} // Ignore unknown properties
         }
     }

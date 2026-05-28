@@ -3,14 +3,8 @@
 //! When a user runs `officecli watch <file>`, an HTTP server starts on
 //! localhost:26315 that provides a live preview of the document in a browser.
 //!
-//! Endpoints:
-//!   GET /       — HTML preview page
-//!   GET /sse    — Server-Sent Events stream for incremental updates
-//!   GET /text   — Plain text view
-//!   POST /mark  — Select/highlight elements
-//!
-//! Since DocumentHandler implementations use RefCell (non-Sync), we run
-//! handler operations on a dedicated blocking thread via mpsc channels.
+//! If the server is already running on that port, the process registers the
+//! document under a unique `id` and blocks in the foreground.
 
 use axum::{
     extract::State,
@@ -25,6 +19,8 @@ use handler_common::{InsertPosition, ViewOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::net::TcpStream;
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::{mpsc, watch as tokio_watch, Mutex};
 use tower_http::cors::CorsLayer;
 
@@ -76,10 +72,27 @@ struct HandlerResult {
 
 // ─── Shared state (all Send+Sync safe) ──────────────────────────────────
 
-struct AppState {
+struct ActiveDocument {
     file_path: String,
-    op_tx: Mutex<mpsc::Sender<(HandlerOp, tokio::sync::oneshot::Sender<HandlerResult>)>>,
+    op_tx: mpsc::Sender<(HandlerOp, tokio::sync::oneshot::Sender<HandlerResult>)>,
     update_tx: tokio_watch::Sender<String>,
+    watcher_abort: mpsc::Sender<()>,
+}
+
+impl Drop for ActiveDocument {
+    fn drop(&mut self) {
+        tracing::info!("ActiveDocument dropped: {}", self.file_path);
+        // Aborting watcher task
+        let abort_tx = self.watcher_abort.clone();
+        tokio::spawn(async move {
+            let _ = abort_tx.send(()).await;
+        });
+    }
+}
+
+struct AppState {
+    port: u16,
+    registry: Arc<Mutex<HashMap<String, Arc<ActiveDocument>>>>,
 }
 
 // ─── JSON request/response types ───────────────────────────────────────
@@ -87,6 +100,18 @@ struct AppState {
 #[derive(Debug, Deserialize)]
 struct MarkRequest {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetRequest {
+    path: String,
+    properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    id: String,
+    file_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,49 +137,181 @@ impl ApiResponse {
 
 // ─── Run the watch HTTP server ─────────────────────────────────────────
 
-pub async fn run_server(file_path: &str, port: Option<u16>) -> Result<(), anyhow::Error> {
-    let handler = crate::open_handler(file_path, true)?;
+pub async fn run_server(
+    file_path: &str,
+    abs_path: &str,
+    port: Option<u16>,
+    id: Option<String>,
+) -> Result<(), anyhow::Error> {
+    let actual_port = port.unwrap_or(DEFAULT_PORT);
+    let doc_id = id.unwrap_or_else(|| get_default_id(file_path));
 
-    // Channel for sending operations to the handler thread
-    let (op_tx, op_rx) =
-        mpsc::channel::<(HandlerOp, tokio::sync::oneshot::Sender<HandlerResult>)>(32);
+    match tokio::net::TcpListener::bind(("127.0.0.1", actual_port)).await {
+        Ok(listener) => {
+            run_host_server(listener, actual_port, &doc_id, abs_path).await
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            register_client(actual_port, &doc_id, abs_path).await
+        }
+        Err(e) => Err(e.into()),
+    }
+}
 
-    // SSE update notification channel
+fn get_default_id(file_path: &str) -> String {
+    std::path::Path::new(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+// ─── TCP client registration ──────────────────────────────────────────
+
+async fn register_client(port: u16, id: &str, file_path: &str) -> Result<(), anyhow::Error> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+
+    let body = serde_json::json!({
+        "id": id,
+        "file_path": file_path,
+    }).to_string();
+
+    let request = format!(
+        "POST /register HTTP/1.1\r\n\
+         Host: 127.0.0.1:{}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: keep-alive\r\n\r\n{}",
+        port, body.len(), body
+    );
+
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    if !line.contains("200 OK") {
+        return Err(anyhow::anyhow!("Registration failed: {}", line.trim()));
+    }
+
+    println!("Watch server is already running on port {}.", port);
+    println!("Successfully registered document '{}' at:", id);
+    println!("👉 http://127.0.0.1:{}/{}/", port, id);
+    println!("Press Ctrl+C to unregister and stop");
+
+    let mut buffer = [0u8; 1024];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => {
+                println!("Connection to watch server closed.");
+                break;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("Socket error: {}", err);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─── Host server runner ────────────────────────────────────────────────
+
+async fn run_host_server(
+    listener: tokio::net::TcpListener,
+    port: u16,
+    initial_id: &str,
+    initial_file: &str,
+) -> Result<(), anyhow::Error> {
+    let registry = Arc::new(Mutex::new(HashMap::<String, Arc<ActiveDocument>>::new()));
+    let state = Arc::new(AppState {
+        port,
+        registry: registry.clone(),
+    });
+
+    register_document(&state, initial_id, initial_file).await.map_err(|e| anyhow::anyhow!(e))?;
+
+    let app = Router::new()
+        .route("/", get(handle_landing))
+        .route("/ping", get(handle_ping))
+        .route("/register", post(handle_register))
+        .route("/{id}", get(handle_redirect_slash))
+        .route("/{id}/", get(handle_index))
+        .route("/{id}/sse", get(handle_sse))
+        .route("/{id}/text", get(handle_text))
+        .route("/{id}/mark", post(handle_mark))
+        .route("/{id}/view", get(handle_view))
+        .route("/{id}/get", get(handle_get))
+        .route("/{id}/set", post(handle_set))
+        .layer(CorsLayer::permissive())
+        .with_state(state);
+
+    println!("Watch server started at http://127.0.0.1:{}/", port);
+    println!("Primary document '{}' registered at: http://127.0.0.1:{}/{}/", initial_id, port, initial_id);
+    println!("Press Ctrl+C to stop the watch server");
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+// ─── Document Registration Helper ──────────────────────────────────────
+
+async fn register_document(
+    state: &Arc<AppState>,
+    id: &str,
+    file_path: &str,
+) -> Result<Arc<ActiveDocument>, String> {
+    let mut reg = state.registry.lock().await;
+    if reg.contains_key(id) {
+        return Err(format!("Document with ID '{}' is already registered", id));
+    }
+
+    let handler = match crate::open_handler(file_path, true) {
+        Ok(h) => h,
+        Err(e) => return Err(format!("Failed to open document: {}", e)),
+    };
+
+    let (op_tx, op_rx) = mpsc::channel::<(HandlerOp, tokio::sync::oneshot::Sender<HandlerResult>)>(32);
     let (update_tx, _) = tokio_watch::channel("init".to_string());
+    let (watcher_abort_tx, mut watcher_abort_rx) = mpsc::channel::<()>(1);
 
-    // Spawn a dedicated thread for handler operations (non-Sync handler lives here)
     let file_path_str = file_path.to_string();
-    let handler_thread = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         run_handler_thread(file_path_str, true, handler, op_rx);
     });
 
-    let state = Arc::new(AppState {
-        file_path: file_path.to_string(),
-        op_tx: Mutex::new(op_tx),
-        update_tx,
-    });
-
-    // Spawn a background task to watch the file for changes
     let file_path_clone = file_path.to_string();
-    let state_clone = state.clone();
+    let update_tx_clone = update_tx.clone();
+    let op_tx_clone = op_tx.clone();
+
     tokio::spawn(async move {
         let mut last_modified = std::fs::metadata(&file_path_clone)
             .and_then(|m| m.modified())
             .ok();
 
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            if let Ok(metadata) = std::fs::metadata(&file_path_clone) {
-                if let Ok(modified) = metadata.modified() {
-                    if Some(modified) != last_modified {
-                        last_modified = Some(modified);
-                        tracing::info!("File changed on disk, reloading handler...");
-                        println!("File changed on disk, reloading...");
-                        let reload_res = send_op(&state_clone, HandlerOp::Reload).await;
-                        if reload_res.data.get("error").is_none() {
-                            let _ = state_clone.update_tx.send("change".to_string());
-                        } else {
-                            eprintln!("Error reloading file: {:?}", reload_res.data.get("error"));
+            tokio::select! {
+                _ = watcher_abort_rx.recv() => {
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {
+                    if let Ok(metadata) = std::fs::metadata(&file_path_clone) {
+                        if let Ok(modified) = metadata.modified() {
+                            if Some(modified) != last_modified {
+                                last_modified = Some(modified);
+                                tracing::info!("File changed on disk: {}", file_path_clone);
+                                println!("File changed on disk, reloading: {}", file_path_clone);
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                if op_tx_clone.send((HandlerOp::Reload, reply_tx)).await.is_ok() {
+                                    if let Ok(res) = reply_rx.await {
+                                        if res.data.get("error").is_none() {
+                                            let _ = update_tx_clone.send("change".to_string());
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -162,32 +319,15 @@ pub async fn run_server(file_path: &str, port: Option<u16>) -> Result<(), anyhow
         }
     });
 
-    let actual_port = port.unwrap_or(DEFAULT_PORT);
+    let doc = Arc::new(ActiveDocument {
+        file_path: file_path.to_string(),
+        op_tx,
+        update_tx,
+        watcher_abort: watcher_abort_tx,
+    });
 
-    let app = Router::new()
-        .route("/", get(handle_index))
-        .route("/sse", get(handle_sse))
-        .route("/text", get(handle_text))
-        .route("/mark", post(handle_mark))
-        .route("/view", get(handle_view))
-        .route("/get", get(handle_get))
-        .route("/set", post(handle_set))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", actual_port)).await?;
-    tracing::info!(
-        "Watch server listening on http://127.0.0.1:{}/",
-        actual_port
-    );
-    println!("Watch server started at http://127.0.0.1:{}/", actual_port);
-    println!("Press Ctrl+C to stop");
-
-    axum::serve(listener, app).await?;
-
-    // The handler thread will exit when op_rx is closed
-    drop(handler_thread);
-    Ok(())
+    reg.insert(id.to_string(), doc.clone());
+    Ok(doc)
 }
 
 // ─── Handler thread: processes operations on the non-Sync handler ──────
@@ -216,7 +356,6 @@ fn run_handler_thread(
             continue;
         }
         let result = execute_handler_op(&*handler, op);
-        // Send result back — ignore error if receiver was dropped
         let _ = reply_tx.send(result);
     }
 }
@@ -325,12 +464,11 @@ fn execute_handler_op(
     }
 }
 
-// ─── Helper: send an op to the handler thread and await result ─────────
+// ─── Helper: send an op to the doc handler thread and await result ─────
 
-async fn send_op(state: &Arc<AppState>, op: HandlerOp) -> HandlerResult {
+async fn send_op_for_doc(doc: &ActiveDocument, op: HandlerOp) -> HandlerResult {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let tx = state.op_tx.lock().await;
-    if tx.send((op, reply_tx)).await.is_err() {
+    if doc.op_tx.send((op, reply_tx)).await.is_err() {
         return HandlerResult {
             data: serde_json::json!({"error": "handler thread closed"}),
         };
@@ -343,22 +481,214 @@ async fn send_op(state: &Arc<AppState>, op: HandlerOp) -> HandlerResult {
     }
 }
 
-// ─── GET / — HTML preview page ─────────────────────────────────────────
+// ─── GET /ping — Check if watch server is active ───────────────────────
 
-async fn handle_index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let result = send_op(&state, HandlerOp::ViewHtml).await;
+async fn handle_ping() -> impl IntoResponse {
+    Json(ApiResponse::ok(serde_json::json!({"status": "alive"})))
+}
+
+// ─── POST /register — Register a new preview client ────────────────────
+
+struct RegisterStream {
+    id: String,
+    registry: Arc<Mutex<HashMap<String, Arc<ActiveDocument>>>>,
+}
+
+impl Drop for RegisterStream {
+    fn drop(&mut self) {
+        let id = self.id.clone();
+        let registry = self.registry.clone();
+        tokio::spawn(async move {
+            let mut reg = registry.lock().await;
+            if reg.remove(&id).is_some() {
+                println!("Client disconnected, unregistered document ID: {}", id);
+            }
+        });
+    }
+}
+
+async fn handle_register(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterRequest>,
+) -> impl IntoResponse {
+    let id = req.id.trim().to_string();
+    let file_path = req.file_path.trim().to_string();
+
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id == "register" || id == "ping" {
+        return (axum::http::StatusCode::BAD_REQUEST, Json(ApiResponse::err("Invalid document ID"))).into_response();
+    }
+
+    match register_document(&state, &id, &file_path).await {
+        Ok(_) => {
+            let registry_clone = state.registry.clone();
+
+            let stream_holder = RegisterStream {
+                id: id.clone(),
+                registry: registry_clone,
+            };
+
+            let response_stream = async_stream::stream! {
+                let _holder = stream_holder;
+                yield Ok::<Event, std::convert::Infallible>(Event::default().data(serde_json::json!({"status": "registered", "id": id}).to_string()));
+
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(serde_json::json!({"status": "ping"}).to_string()));
+                }
+            };
+
+            Sse::new(response_stream).keep_alive(KeepAlive::default()).into_response()
+        }
+        Err(e) => {
+            (axum::http::StatusCode::BAD_REQUEST, Json(ApiResponse::err(e))).into_response()
+        }
+    }
+}
+
+// ─── GET / — Server landing page ───────────────────────────────────────
+
+async fn handle_landing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let reg = state.registry.lock().await;
+    let mut list_html = String::new();
+
+    if reg.is_empty() {
+        list_html.push_str("<p class=\"no-docs\">No documents are currently being watched.</p>");
+    } else {
+        list_html.push_str("<ul class=\"doc-list\">");
+        for (id, doc) in reg.iter() {
+            let file_name = std::path::Path::new(&doc.file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("document");
+            list_html.push_str(&format!(
+                "<li><a href=\"/{}/\"><strong>{}</strong> <span class=\"file-path\">({})</span></a></li>",
+                id, id, file_name
+            ));
+        }
+        list_html.push_str("</ul>");
+    }
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OfficeCLI Watch Service</title>
+<style>
+body {{
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
+    margin: 0;
+    background: #eef2f5;
+    padding: 40px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}}
+.card {{
+    background: white;
+    padding: 30px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    max-width: 600px;
+    width: 100%;
+}}
+h1 {{
+    color: #2c3e50;
+    margin-top: 0;
+    margin-bottom: 20px;
+    font-size: 24px;
+}}
+.doc-list {{
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}}
+.doc-list li {{
+    padding: 12px 15px;
+    border-bottom: 1px solid #eee;
+}}
+.doc-list li:last-child {{
+    border-bottom: none;
+}}
+.doc-list a {{
+    text-decoration: none;
+    color: #3498db;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}}
+.doc-list a:hover {{
+    color: #2980b9;
+}}
+.file-path {{
+    color: #7f8c8d;
+    font-size: 12px;
+}}
+.no-docs {{
+    color: #7f8c8d;
+    font-style: italic;
+}}
+</style>
+</head>
+<body>
+<div class="card">
+    <h1>OfficeCLI Active Previews</h1>
+    {}
+</div>
+</body>
+</html>"#,
+        list_html
+    );
+
+    Html(html)
+}
+
+// ─── GET /:id — Redirect to /:id/ ──────────────────────────────────────
+
+async fn handle_redirect_slash(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    axum::response::Redirect::to(&format!("/{}/", id))
+}
+
+// ─── Shared document route helpers ─────────────────────────────────────
+
+async fn get_doc(state: &Arc<AppState>, id: &str) -> Result<Arc<ActiveDocument>, impl IntoResponse> {
+    let reg = state.registry.lock().await;
+    match reg.get(id).cloned() {
+        Some(doc) => Ok(doc),
+        None => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            Json(ApiResponse::err(format!("Document '{}' not found", id))),
+        ).into_response()),
+    }
+}
+
+// ─── GET /:id/ — HTML preview page ─────────────────────────────────────
+
+async fn handle_index(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let doc = match get_doc(&state, &id).await {
+        Ok(d) => d,
+        Err(r) => return r.into_response(),
+    };
+
+    let result = send_op_for_doc(&doc, HandlerOp::ViewHtml).await;
 
     if let Some(err) = result.data.get("error").and_then(|e| e.as_str()) {
-        // Fallback to text view
-        let text_res = send_op(
-            &state,
+        let text_res = send_op_for_doc(
+            &doc,
             HandlerOp::ViewText {
                 opts: ViewOptions::default(),
             },
         )
         .await;
         let text = text_res.data.as_str().unwrap_or("Error loading document");
-        let file_name = std::path::Path::new(&state.file_path)
+        let file_name = std::path::Path::new(&doc.file_path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("document");
@@ -385,34 +715,39 @@ body {{ font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d
             err = err,
             text_esc = html_escape(text),
         );
-        return Html(html);
+        return Html(html).into_response();
     }
 
     let html = result.data.as_str().unwrap_or("Error rendering HTML preview").to_string();
-    Html(inject_live_reload(&html))
+    Html(inject_live_reload(&html)).into_response()
 }
 
-// ─── GET /sse — Server-Sent Events stream ──────────────────────────────
+// ─── GET /:id/sse — Server-Sent Events stream ──────────────────────────
 
 async fn handle_sse(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl futures::stream::Stream<Item = Result<Event, std::convert::Infallible>> + Send> {
-    let mut rx = state.update_tx.subscribe();
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let doc = match get_doc(&state, &id).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
 
-    // Send initial content
-    let initial = send_op(
-        &state,
+    let mut rx = doc.update_tx.subscribe();
+
+    let initial = send_op_for_doc(
+        &doc,
         HandlerOp::ViewText {
             opts: ViewOptions::default(),
         },
     )
     .await;
 
+    let doc_clone = doc.clone();
     let stream = async_stream::stream! {
-        yield Ok(Event::default().data(serde_json::json!({"text": initial.data}).to_string()));
+        yield Ok::<Event, std::convert::Infallible>(Event::default().data(serde_json::json!({"text": initial.data}).to_string()));
 
         loop {
-            // Wait for update notification
             if rx.changed().await.is_err() {
                 break;
             }
@@ -421,20 +756,26 @@ async fn handle_sse(
                 continue;
             }
 
-            // Read current text via handler thread
-            let result = send_op(&state, HandlerOp::ViewText { opts: ViewOptions::default() }).await;
-            yield Ok(Event::default().data(serde_json::json!({"text": result.data, "reason": reason}).to_string()));
+            let result = send_op_for_doc(&doc_clone, HandlerOp::ViewText { opts: ViewOptions::default() }).await;
+            yield Ok::<Event, std::convert::Infallible>(Event::default().data(serde_json::json!({"text": result.data, "reason": reason}).to_string()));
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
-// ─── GET /text — Plain text view ───────────────────────────────────────
+// ─── GET /:id/text — Plain text view ───────────────────────────────────
 
-async fn handle_text(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let result = send_op(
-        &state,
+async fn handle_text(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let doc = match get_doc(&state, &id).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let result = send_op_for_doc(
+        &doc,
         HandlerOp::ViewText {
             opts: ViewOptions::default(),
         },
@@ -446,14 +787,19 @@ async fn handle_text(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }
 }
 
-// ─── POST /mark — Select/highlight elements ────────────────────────────
+// ─── POST /:id/mark — Select/highlight elements ────────────────────────
 
 async fn handle_mark(
     State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<MarkRequest>,
-) -> Json<ApiResponse> {
-    let result = send_op(
-        &state,
+) -> impl IntoResponse {
+    let doc = match get_doc(&state, &id).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let result = send_op_for_doc(
+        &doc,
         HandlerOp::GetMark {
             path: req.path.clone(),
         },
@@ -463,19 +809,24 @@ async fn handle_mark(
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        ))
+        )).into_response()
     } else {
-        let _ = state.update_tx.send(format!("mark:{}", req.path));
-        Json(ApiResponse::ok(result.data))
+        let _ = doc.update_tx.send(format!("mark:{}", req.path));
+        Json(ApiResponse::ok(result.data)).into_response()
     }
 }
 
-// ─── GET /view — View with mode parameter ──────────────────────────────
+// ─── GET /:id/view — View with mode parameter ──────────────────────────
 
 async fn handle_view(
     State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
-) -> Json<ApiResponse> {
+) -> impl IntoResponse {
+    let doc = match get_doc(&state, &id).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
     let mode = params
         .get("mode")
         .cloned()
@@ -499,26 +850,31 @@ async fn handle_view(
         "outline" => HandlerOp::ViewOutline,
         "stats" => HandlerOp::ViewStats,
         "html" => HandlerOp::ViewHtml,
-        _ => return Json(ApiResponse::err(format!("unsupported view mode: {}", mode))),
+        _ => return Json(ApiResponse::err(format!("unsupported view mode: {}", mode))).into_response(),
     };
 
-    let result = send_op(&state, op).await;
+    let result = send_op_for_doc(&doc, op).await;
 
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        ))
+        )).into_response()
     } else {
-        Json(ApiResponse::ok(result.data))
+        Json(ApiResponse::ok(result.data)).into_response()
     }
 }
 
-// ─── GET /get — Get document node ──────────────────────────────────────
+// ─── GET /:id/get — Get document node ──────────────────────────────────
 
 async fn handle_get(
     State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
-) -> Json<ApiResponse> {
+) -> impl IntoResponse {
+    let doc = match get_doc(&state, &id).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
     let path = params
         .get("path")
         .cloned()
@@ -528,31 +884,30 @@ async fn handle_get(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1);
 
-    let result = send_op(&state, HandlerOp::Get { path, depth }).await;
+    let result = send_op_for_doc(&doc, HandlerOp::Get { path, depth }).await;
 
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        ))
+        )).into_response()
     } else {
-        Json(ApiResponse::ok(result.data))
+        Json(ApiResponse::ok(result.data)).into_response()
     }
 }
 
-// ─── POST /set — Set properties on an element ──────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct SetRequest {
-    path: String,
-    properties: HashMap<String, String>,
-}
+// ─── POST /:id/set — Set properties on an element ──────────────────────
 
 async fn handle_set(
     State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SetRequest>,
-) -> Json<ApiResponse> {
-    let result = send_op(
-        &state,
+) -> impl IntoResponse {
+    let doc = match get_doc(&state, &id).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let result = send_op_for_doc(
+        &doc,
         HandlerOp::Set {
             path: req.path,
             properties: req.properties,
@@ -563,11 +918,10 @@ async fn handle_set(
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        ))
+        )).into_response()
     } else {
-        // Notify SSE subscribers that document changed
-        let _ = state.update_tx.send("set".to_string());
-        Json(ApiResponse::ok(result.data))
+        let _ = doc.update_tx.send("set".to_string());
+        Json(ApiResponse::ok(result.data)).into_response()
     }
 }
 
@@ -584,7 +938,8 @@ fn inject_live_reload(html: &str) -> String {
     let script = r#"
 <script>
 (function() {
-  const es = new EventSource('/sse');
+  const ssePath = window.location.pathname.endsWith('/') ? 'sse' : window.location.pathname + '/sse';
+  const es = new EventSource(ssePath);
   es.onmessage = function(ev) {
     try {
       const obj = JSON.parse(ev.data);

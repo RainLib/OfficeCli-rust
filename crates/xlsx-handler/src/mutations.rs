@@ -49,10 +49,12 @@ fn remove_cell(
     let xml = package.read_part_xml(&part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
+    let p = detect_namespace_prefix(&xml);
+
     // Find the cell element
-    let cell_pattern = format!("<c r=\"{}\"", ref_str);
+    let cell_pattern = format!("<{}c r=\"{}\"", p, ref_str);
     if let Some(cell_start) = xml.find(&cell_pattern) {
-        let cell_end = find_cell_element_end(&xml, cell_start)?;
+        let cell_end = find_cell_element_end(&xml, cell_start, &p)?;
         let mut result = xml[..cell_start].to_string();
         result.push_str(&xml[cell_end..]);
         package.write_part_xml(&part_path, &result)
@@ -248,25 +250,24 @@ pub fn set_cell_properties(
     let xml = package.read_part_xml(&part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
+    let p = detect_namespace_prefix(&xml);
+
     let mut modified_xml = xml.clone();
-    let mut changed_props = Vec::new();
+    let mut unsupported = Vec::new();
 
     for (key, value) in properties {
         match key.as_str() {
             "value" => {
-                modified_xml = set_cell_value(&modified_xml, &cell_ref_str, value, &model.shared_strings)?;
-                changed_props.push("value".to_string());
+                modified_xml = set_cell_value(&modified_xml, &cell_ref_str, value, &model.shared_strings, &p)?;
             }
             "formula" => {
-                modified_xml = set_cell_formula(&modified_xml, &cell_ref_str, value)?;
-                changed_props.push("formula".to_string());
+                modified_xml = set_cell_formula(&modified_xml, &cell_ref_str, value, &p)?;
             }
             "style" => {
-                modified_xml = set_cell_style(&modified_xml, &cell_ref_str, value)?;
-                changed_props.push("style".to_string());
+                modified_xml = set_cell_style(&modified_xml, &cell_ref_str, value, &p)?;
             }
             _ => {
-                return Err(HandlerError::UnsupportedProperty(key.clone()));
+                unsupported.push(key.clone());
             }
         }
     }
@@ -275,12 +276,25 @@ pub fn set_cell_properties(
     package.write_part_xml(&part_path, &modified_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
-    Ok(changed_props)
+    Ok(unsupported)
+}
+
+/// Helper to detect namespacing prefix (e.g., "x:") used in worksheet XML.
+fn detect_namespace_prefix(xml: &str) -> String {
+    if let Some(pos) = xml.find("worksheet") {
+        if let Some(lt_pos) = xml[..pos].rfind('<') {
+            let prefix = &xml[lt_pos + 1..pos];
+            if !prefix.is_empty() && prefix.ends_with(':') {
+                return prefix.to_string();
+            }
+        }
+    }
+    "".to_string()
 }
 
 /// Set the value of a cell in the worksheet XML.
 /// If the cell exists, update its <v> element. If not, insert a new <c> element.
-fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[String]) -> Result<String, HandlerError> {
+fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[String], p: &str) -> Result<String, HandlerError> {
     // Check if the value matches an existing shared string
     let ss_idx = shared_strings.iter().position(|s| s == value);
 
@@ -299,15 +313,15 @@ fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[Stri
     };
 
     // Try to find and update existing cell
-    let cell_pattern = format!("<c r=\"{}\"", cell_ref);
+    let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
     if let Some(cell_start) = xml.find(&cell_pattern) {
         // Find the end of this <c> element
-        let cell_end = find_cell_element_end(xml, cell_start)?;
+        let cell_end = find_cell_element_end(xml, cell_start, p)?;
 
         let cell_xml = &xml[cell_start..cell_end];
 
         // Build new cell XML
-        let new_cell = build_cell_xml(cell_ref, &t_attr, &v_content, None, &extract_existing_style(cell_xml));
+        let new_cell = build_cell_xml(cell_ref, &t_attr, &v_content, None, &extract_existing_style(cell_xml), p);
 
         let mut result = xml[..cell_start].to_string();
         result.push_str(&new_cell);
@@ -315,20 +329,20 @@ fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[Stri
         Ok(result)
     } else {
         // Insert new cell — find the <sheetData> element and insert
-        insert_new_cell(xml, cell_ref, &t_attr, &v_content, None, "")
+        insert_new_cell(xml, cell_ref, &t_attr, &v_content, None, "", p)
     }
 }
 
 /// Set the formula of a cell.
-fn set_cell_formula(xml: &str, cell_ref: &str, formula: &str) -> Result<String, HandlerError> {
-    let cell_pattern = format!("<c r=\"{}\"", cell_ref);
+fn set_cell_formula(xml: &str, cell_ref: &str, formula: &str, p: &str) -> Result<String, HandlerError> {
+    let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
     if let Some(cell_start) = xml.find(&cell_pattern) {
-        let cell_end = find_cell_element_end(xml, cell_start)?;
+        let cell_end = find_cell_element_end(xml, cell_start, p)?;
 
         let cell_xml = &xml[cell_start..cell_end];
         let existing_style = extract_existing_style(cell_xml);
         let existing_type = extract_existing_type(cell_xml);
-        let existing_value = extract_existing_value(cell_xml);
+        let existing_value = extract_existing_value(cell_xml, p);
 
         // Formula cells: type should be empty (calculated) or "str" if result is inline string
         let new_cell = build_cell_xml(
@@ -337,6 +351,7 @@ fn set_cell_formula(xml: &str, cell_ref: &str, formula: &str) -> Result<String, 
             &existing_value,
             Some(formula),
             &existing_style,
+            p,
         );
 
         let mut result = xml[..cell_start].to_string();
@@ -345,15 +360,15 @@ fn set_cell_formula(xml: &str, cell_ref: &str, formula: &str) -> Result<String, 
         Ok(result)
     } else {
         // Insert new cell with formula (type defaults to calculated)
-        insert_new_cell(xml, cell_ref, "", "", Some(formula), "")
+        insert_new_cell(xml, cell_ref, "", "", Some(formula), "", p)
     }
 }
 
 /// Set the style index of a cell.
-fn set_cell_style(xml: &str, cell_ref: &str, style_index: &str) -> Result<String, HandlerError> {
-    let cell_pattern = format!("<c r=\"{}\"", cell_ref);
+fn set_cell_style(xml: &str, cell_ref: &str, style_index: &str, p: &str) -> Result<String, HandlerError> {
+    let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
     if let Some(cell_start) = xml.find(&cell_pattern) {
-        let cell_end = find_cell_element_end(xml, cell_start)?;
+        let cell_end = find_cell_element_end(xml, cell_start, p)?;
         let cell_xml = &xml[cell_start..cell_end];
 
         // Modify the s= attribute in the cell opening tag
@@ -375,6 +390,7 @@ fn build_cell_xml(
     v_content: &str,
     formula: Option<&str>,
     style_attr: &str,
+    p: &str,
 ) -> String {
     let mut attrs = format!("r=\"{}\"", ref_str);
     if !t_attr.is_empty() {
@@ -386,26 +402,26 @@ fn build_cell_xml(
 
     if formula.is_none() && v_content.is_empty() {
         // Empty cell — self-closing
-        return format!("<c {}/>", attrs);
+        return format!("<{}c {}/>", p, attrs);
     }
 
-    let mut cell = format!("<c {}>", attrs);
+    let mut cell = format!("<{}c {}>", p, attrs);
 
     if let Some(f) = formula {
-        cell.push_str(&format!("<f>{}</f>", f));
+        cell.push_str(&format!("<{}f>{}</{}f>", p, f, p));
     }
 
     if !v_content.is_empty() {
-        cell.push_str(&format!("<v>{}</v>", v_content));
+        cell.push_str(&format!("<{}v>{}</{}v>", p, v_content, p));
     }
 
-    cell.push_str("</c>");
+    cell.push_str(&format!("</{}c>", p));
     cell
 }
 
 /// Find the end position of a <c> element in XML text.
 /// Handles both self-closing <c .../> and regular <c ...>...</c>.
-fn find_cell_element_end(xml: &str, start: usize) -> Result<usize, HandlerError> {
+fn find_cell_element_end(xml: &str, start: usize, p: &str) -> Result<usize, HandlerError> {
     // Check for regular closing tag — need to find matching </c>
     // Look for the next '>' after start to see if self-closing or not
     let first_gt = xml[start..].find('>')
@@ -418,10 +434,11 @@ fn find_cell_element_end(xml: &str, start: usize) -> Result<usize, HandlerError>
         Ok(first_gt + 1)
     } else {
         // Regular element: find </c>
-        let close_tag = xml[first_gt..].find("</c>")
-            .map(|pos| first_gt + pos + 4) // </c> = 4 chars
-            .ok_or_else(|| HandlerError::OperationFailed("malformed XML: no '</c>' closing tag".to_string()))?;
-        Ok(close_tag)
+        let close_tag = format!("</{}c>", p);
+        let close_tag_pos = xml[first_gt..].find(&close_tag)
+            .map(|pos| first_gt + pos + close_tag.len())
+            .ok_or_else(|| HandlerError::OperationFailed(format!("malformed XML: no '{}' closing tag", close_tag)))?;
+        Ok(close_tag_pos)
     }
 }
 
@@ -451,11 +468,12 @@ fn extract_existing_type(cell_xml: &str) -> String {
 }
 
 /// Extract the value from the <v> element in an existing cell.
-fn extract_existing_value(cell_xml: &str) -> String {
-    let v_start_pattern = "<v>";
-    if let Some(v_start) = cell_xml.find(v_start_pattern) {
+fn extract_existing_value(cell_xml: &str, p: &str) -> String {
+    let v_start_pattern = format!("<{}v>", p);
+    if let Some(v_start) = cell_xml.find(&v_start_pattern) {
         let content_start = v_start + v_start_pattern.len();
-        if let Some(v_end) = cell_xml.find("</v>") {
+        let v_end_pattern = format!("</{}v>", p);
+        if let Some(v_end) = cell_xml.find(&v_end_pattern) {
             if v_end > content_start {
                 return cell_xml[content_start..v_end].to_string();
             }
@@ -496,18 +514,19 @@ fn insert_new_cell(
     v_content: &str,
     formula: Option<&str>,
     style_attr: &str,
+    p: &str,
 ) -> Result<String, HandlerError> {
-    let new_cell = build_cell_xml(ref_str, t_attr, v_content, formula, style_attr);
+    let new_cell = build_cell_xml(ref_str, t_attr, v_content, formula, style_attr, p);
 
     // Find <sheetData> opening tag
-    let sd_start = xml.find("<sheetData")
-        .ok_or_else(|| HandlerError::OperationFailed("no <sheetData> element found".to_string()))?;
+    let sd_start = xml.find(&format!("<{}sheetData", p))
+        .ok_or_else(|| HandlerError::OperationFailed(format!("no <{}sheetData> element found", p)))?;
 
     // Find the first <row> inside sheetData, or the closing </sheetData>
     let after_sd = &xml[sd_start..];
     let sd_gt = after_sd.find('>')
         .map(|pos| sd_start + pos + 1)
-        .ok_or_else(|| HandlerError::OperationFailed("malformed <sheetData>".to_string()))?;
+        .ok_or_else(|| HandlerError::OperationFailed(format!("malformed <{}sheetData>", p)))?;
 
     // Determine the row number from the cell reference
     let row_num = CellRef::parse(ref_str)
@@ -515,14 +534,14 @@ fn insert_new_cell(
         .row;
 
     // Try to find the matching <row r="N"> element
-    let row_pattern = format!("<row r=\"{}\"", row_num);
+    let row_pattern = format!("<{}row r=\"{}\"", p, row_num);
     if let Some(row_start) = xml[sd_gt..].find(&row_pattern) {
         let abs_row_start = sd_gt + row_start;
 
         // Find end of row element
         let row_gt = xml[abs_row_start..].find('>')
             .map(|pos| abs_row_start + pos + 1)
-            .ok_or_else(|| HandlerError::OperationFailed("malformed <row>".to_string()))?;
+            .ok_or_else(|| HandlerError::OperationFailed(format!("malformed <{}row>", p)))?;
 
         // Insert cell after the row opening tag
         let mut result = xml[..row_gt].to_string();
@@ -531,11 +550,12 @@ fn insert_new_cell(
         Ok(result)
     } else {
         // No existing row — insert a new <row> with the cell
-        let new_row = format!("<row r=\"{}\">{}  </row>", row_num, new_cell);
+        let new_row = format!("<{}row r=\"{}\">{}  </{}row>", p, row_num, new_cell, p);
 
         // Insert before </sheetData>
-        let sd_end = xml.find("</sheetData>")
-            .ok_or_else(|| HandlerError::OperationFailed("no </sheetData> closing tag".to_string()))?;
+        let sd_end_pattern = format!("</{}sheetData>", p);
+        let sd_end = xml.find(&sd_end_pattern)
+            .ok_or_else(|| HandlerError::OperationFailed(format!("no {} closing tag", sd_end_pattern)))?;
 
         let mut result = xml[..sd_end].to_string();
         result.push_str(&new_row);

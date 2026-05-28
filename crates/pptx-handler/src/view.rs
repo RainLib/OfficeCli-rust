@@ -285,7 +285,13 @@ pub fn set_shape_text(
     package.write_part_xml(&slide.part_path, &modified_xml)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-    Ok(vec![format!("Updated /slide[{}]/shape[{}] text", slide_idx, shape_idx)])
+    let mut unsupported = Vec::new();
+    for key in properties.keys() {
+        if key != "text" {
+            unsupported.push(key.clone());
+        }
+    }
+    Ok(unsupported)
 }
 
 /// Replace text in the Nth shape of a slide XML document.
@@ -314,14 +320,16 @@ fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Res
             Ok(quick_xml::events::Event::Start(e)) => {
                 let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
 
-                if local_name == "sp" && !in_target_shape {
-                    current_shape_count += 1;
-                    if current_shape_count == shape_idx {
-                        in_target_shape = true;
-                        sp_depth = 1;
+                if local_name == "sp" {
+                    if !in_target_shape {
+                        current_shape_count += 1;
+                        if current_shape_count == shape_idx {
+                            in_target_shape = true;
+                            sp_depth = 1;
+                        }
+                    } else {
+                        sp_depth += 1;
                     }
-                } else if in_target_shape {
-                    sp_depth += 1;
                 }
 
                 if local_name == "txBody" && in_target_shape {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use handler_common::HandlerError;
 use lopdf::{Document as LopdfDocument, ObjectId, Object, Dictionary};
 
@@ -20,14 +20,30 @@ pub enum PdfColor {
     Cmyk(f32, f32, f32, f32),
 }
 
+/// Filled rectangle drawn in the graphics state (background highlight).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FilledRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: PdfColor,
+}
+
 /// Style properties extracted from PDF operators for a text block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TextStyle {
     pub font_name: Option<String>,
+    /// Effective rendered font size = raw Tf operand * |tm_d|. Used for bbox /
+    /// `get` output and same-size merging.
     pub font_size: Option<f32>,
+    /// Raw Tf operand (without Tm matrix scaling). Must be used when re-emitting
+    /// Tf operators in modified content so Tm scaling is not applied twice.
+    pub raw_font_size: Option<f32>,
     pub fill_color: Option<PdfColor>,
     pub char_spacing: f32,
     pub word_spacing: f32,
+    pub bg_color: Option<PdfColor>,
 }
 
 impl Default for TextStyle {
@@ -35,9 +51,11 @@ impl Default for TextStyle {
         Self {
             font_name: None,
             font_size: None,
+            raw_font_size: None,
             fill_color: None,
             char_spacing: 0.0,
             word_spacing: 0.0,
+            bg_color: None,
         }
     }
 }
@@ -51,6 +69,8 @@ pub struct PdfTextBlock {
     pub text: String,
     /// Bounding box computed from Tm position + text width + font size
     pub bbox: BBox,
+    /// Bounding box computed in raw user space before CTM is applied
+    pub user_bbox: BBox,
     /// Style properties active at the time of text rendering
     pub style: TextStyle,
     /// Starting line index of the BT section in the raw content stream
@@ -59,6 +79,8 @@ pub struct PdfTextBlock {
     pub bt_end_line: usize,
     /// Line index that contains the Tj/TJ string
     pub text_line_index: usize,
+    /// The index of the string/array operand token in the line's tokens list
+    pub line_token_index: usize,
     /// Whether the text comes from TJ (array with kerning) or Tj (simple)
     pub is_array_text: bool,
 }
@@ -71,6 +93,7 @@ pub struct FontInfo {
     pub is_cid_font: bool,
     pub char_widths: HashMap<u32, f32>,
     pub default_width: f32,
+    pub unicode_to_cid: HashMap<u32, u32>,
 }
 
 /// A structured image block extracted from a page's content stream.
@@ -112,7 +135,12 @@ pub fn estimate_text_width(
     let char_count = text.chars().count();
 
     for c in text.chars() {
-        let code = c as u32;
+        let mut code = c as u32;
+        if font_info.is_cid_font {
+            if let Some(&cid) = font_info.unicode_to_cid.get(&code) {
+                code = cid;
+            }
+        }
         let w = font_info.char_widths
             .get(&code)
             .copied()
@@ -184,12 +212,28 @@ fn build_font_info(doc: &LopdfDocument, font_dict: &Dictionary, pdf_name: &str) 
 
     let (char_widths, default_width) = extract_font_widths(doc, font_dict, &base_font, is_cid);
 
+    let mut unicode_to_cid = HashMap::new();
+    if let Ok(to_unicode) = font_dict.get(b"ToUnicode") {
+        if let Ok(ref_id) = to_unicode.as_reference() {
+            if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
+                let content = String::from_utf8_lossy(&stream.content);
+                let cmap = parse_to_unicode_cmap(&content);
+                for (cid, unicode_str) in cmap {
+                    if let Some(ch) = unicode_str.chars().next() {
+                        unicode_to_cid.insert(ch as u32, cid);
+                    }
+                }
+            }
+        }
+    }
+
     FontInfo {
         pdf_name: pdf_name.to_string(),
         base_font,
         is_cid_font: is_cid,
         char_widths,
         default_width,
+        unicode_to_cid,
     }
 }
 
@@ -341,19 +385,166 @@ fn decode_hex_string_bytes(hex: &str) -> Vec<u8> {
     result
 }
 
-/// Decode a single PDF string or hex string using the specified encoding.
-fn decode_pdf_string(s: &str, encoding: Option<&lopdf::Encoding>) -> Option<String> {
-    let extracted_bytes = extract_pdf_string_bytes(s)?;
-    if let Some(enc) = encoding {
-        if let Ok(decoded) = lopdf::Document::decode_text(enc, &extracted_bytes) {
-            return Some(decoded);
+pub fn parse_to_unicode_cmap(cmap_str: &str) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    let mut in_bfchar = false;
+    let mut in_bfrange = false;
+
+    for line in cmap_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("beginbfchar") {
+            in_bfchar = true;
+            continue;
+        }
+        if trimmed.contains("endbfchar") {
+            in_bfchar = false;
+            continue;
+        }
+        if trimmed.contains("beginbfrange") {
+            in_bfrange = true;
+            continue;
+        }
+        if trimmed.contains("endbfrange") {
+            in_bfrange = false;
+            continue;
+        }
+
+        if in_bfchar {
+            let parts: Vec<&str> = trimmed.split('<')
+                .filter_map(|p| p.split('>').next())
+                .filter(|p| !p.is_empty())
+                .collect();
+            if parts.len() >= 2 {
+                if let Ok(cid) = u32::from_str_radix(parts[0], 16) {
+                    if let Some(unicode_str) = hex_to_string(parts[1]) {
+                        map.insert(cid, unicode_str);
+                    }
+                }
+            }
+        }
+
+        if in_bfrange {
+            let has_array = trimmed.contains('[');
+            let parts: Vec<&str> = trimmed.split('<')
+                .filter_map(|p| p.split('>').next())
+                .filter(|p| !p.is_empty())
+                .collect();
+            if parts.len() >= 3 {
+                if let (Ok(start), Ok(end)) = (u32::from_str_radix(parts[0], 16), u32::from_str_radix(parts[1], 16)) {
+                    if has_array {
+                        for (idx, hex_val) in parts[2..].iter().enumerate() {
+                            let cid = start + idx as u32;
+                            if cid <= end {
+                                if let Some(unicode_str) = hex_to_string(hex_val) {
+                                    map.insert(cid, unicode_str);
+                                }
+                            }
+                        }
+                    } else {
+                        if let Ok(start_unicode) = u32::from_str_radix(parts[2], 16) {
+                            for offset in 0..=(end - start) {
+                                let cid = start + offset;
+                                let unicode_val = start_unicode + offset;
+                                if let Some(ch) = std::char::from_u32(unicode_val) {
+                                    map.insert(cid, ch.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-    Some(String::from_utf8_lossy(&extracted_bytes).to_string())
+    map
+}
+
+fn hex_to_string(hex: &str) -> Option<String> {
+    let mut u16_chars = Vec::new();
+    let mut i = 0;
+    while i + 4 <= hex.len() {
+        if let Ok(val) = u16::from_str_radix(&hex[i..i+4], 16) {
+            u16_chars.push(val);
+        } else {
+            return None;
+        }
+        i += 4;
+    }
+    if u16_chars.is_empty() && hex.len() == 2 {
+        if let Ok(val) = u16::from_str_radix(hex, 16) {
+            u16_chars.push(val);
+        }
+    }
+    Some(String::from_utf16_lossy(&u16_chars))
+}
+
+fn decode_bytes(
+    bytes: &[u8],
+    encoding: Option<&lopdf::Encoding>,
+    custom_to_unicode: Option<&HashMap<u32, String>>,
+    is_cid: bool,
+) -> String {
+    if is_cid {
+        let mut decoded = String::new();
+        let mut i = 0;
+        while i + 2 <= bytes.len() {
+            let cid = ((bytes[i] as u32) << 8) | (bytes[i+1] as u32);
+            if let Some(custom_map) = custom_to_unicode {
+                if let Some(mapped_str) = custom_map.get(&cid) {
+                    decoded.push_str(mapped_str);
+                    i += 2;
+                    continue;
+                }
+            }
+            if let Some(lopdf::Encoding::UnicodeMapEncoding(cmap)) = encoding {
+                if let Some(unicode_vec) = cmap.get(cid as u16) {
+                    decoded.push_str(&String::from_utf16_lossy(&unicode_vec));
+                    i += 2;
+                    continue;
+                }
+            }
+            if let Some(ch) = std::char::from_u32(cid) {
+                decoded.push(ch);
+            }
+            i += 2;
+        }
+        decoded
+    } else {
+        if let Some(custom_map) = custom_to_unicode {
+            let mut decoded = String::new();
+            for &b in bytes {
+                if let Some(mapped_str) = custom_map.get(&(b as u32)) {
+                    decoded.push_str(mapped_str);
+                } else {
+                    decoded.push(b as char);
+                }
+            }
+            decoded
+        } else if let Some(enc) = encoding {
+            lopdf::Document::decode_text(enc, bytes).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
+        } else {
+            String::from_utf8_lossy(bytes).to_string()
+        }
+    }
+}
+
+/// Decode a single PDF string or hex string using the specified encoding.
+fn decode_pdf_string(
+    s: &str,
+    encoding: Option<&lopdf::Encoding>,
+    custom_to_unicode: Option<&HashMap<u32, String>>,
+    is_cid: bool,
+) -> Option<String> {
+    let extracted_bytes = extract_pdf_string_bytes(s)?;
+    Some(decode_bytes(&extracted_bytes, encoding, custom_to_unicode, is_cid))
 }
 
 /// Decode text from a PDF array TJ operator, applying font encoding to each string segment.
-fn decode_pdf_array_text(s: &str, encoding: Option<&lopdf::Encoding>) -> Option<String> {
+fn decode_pdf_array_text(
+    s: &str,
+    encoding: Option<&lopdf::Encoding>,
+    custom_to_unicode: Option<&HashMap<u32, String>>,
+    is_cid: bool,
+) -> Option<String> {
     let s = s.trim();
     if !s.starts_with('[') || !s.ends_with(']') { return None; }
 
@@ -376,15 +567,8 @@ fn decode_pdf_array_text(s: &str, encoding: Option<&lopdf::Encoding>) -> Option<
             }
             let string_content = std::str::from_utf8(&bytes[start..i-1]).unwrap_or("");
             if let Some(extracted_bytes) = extract_pdf_string_bytes(&format!("({})", string_content)) {
-                if let Some(enc) = encoding {
-                    if let Ok(decoded) = lopdf::Document::decode_text(enc, &extracted_bytes) {
-                        result.push_str(&decoded);
-                    } else {
-                        result.push_str(&String::from_utf8_lossy(&extracted_bytes));
-                    }
-                } else {
-                    result.push_str(&String::from_utf8_lossy(&extracted_bytes));
-                }
+                let segment_text = decode_bytes(&extracted_bytes, encoding, custom_to_unicode, is_cid);
+                result.push_str(&segment_text);
             }
         } else if c == '<' {
             let start = i + 1;
@@ -392,15 +576,8 @@ fn decode_pdf_array_text(s: &str, encoding: Option<&lopdf::Encoding>) -> Option<
             while i < bytes.len() && bytes[i] as char != '>' { i += 1; }
             let hex_content = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
             let extracted_bytes = decode_hex_string_bytes(hex_content);
-            if let Some(enc) = encoding {
-                if let Ok(decoded) = lopdf::Document::decode_text(enc, &extracted_bytes) {
-                    result.push_str(&decoded);
-                } else {
-                    result.push_str(&String::from_utf8_lossy(&extracted_bytes));
-                }
-            } else {
-                result.push_str(&String::from_utf8_lossy(&extracted_bytes));
-            }
+            let segment_text = decode_bytes(&extracted_bytes, encoding, custom_to_unicode, is_cid);
+            result.push_str(&segment_text);
             i += 1;
         } else if c.is_ascii_digit() || c == '-' || c == '.' {
             i += 1;
@@ -430,6 +607,341 @@ pub fn encode_pdf_string(text: &str) -> String {
     }
     escaped.push(')');
     escaped
+}
+
+/// Format raw bytes as a PDF hex string operand.
+fn format_pdf_hex_bytes(bytes: &[u8]) -> String {
+    let mut hex_str = String::with_capacity(bytes.len() * 2 + 2);
+    hex_str.push('<');
+    for byte in bytes {
+        hex_str.push_str(&format!("{:02X}", byte));
+    }
+    hex_str.push('>');
+    hex_str
+}
+
+/// Build a unicode→CID map from a CID font encoding (ToUnicode CMap based).
+/// Returns None if the encoding is not a CID font.
+fn build_unicode_to_cid_map(encoding: &lopdf::Encoding) -> Option<HashMap<u32, u16>> {
+    let lopdf::Encoding::UnicodeMapEncoding(cmap) = encoding else {
+        return None;
+    };
+    let mut unicode_to_cid = HashMap::new();
+    for cid in 0u16..=65535 {
+        if let Some(unicode_vec) = cmap.get(cid) {
+            if unicode_vec.len() == 1 {
+                unicode_to_cid.entry(unicode_vec[0] as u32).or_insert(cid);
+            } else if !unicode_vec.is_empty() {
+                for ch in String::from_utf16_lossy(&unicode_vec).chars() {
+                    unicode_to_cid.entry(ch as u32).or_insert(cid);
+                }
+            }
+        }
+    }
+    Some(unicode_to_cid)
+}
+
+fn font_supports_char_via_encoding(encoding: &lopdf::Encoding, ch: char) -> bool {
+    if let Some(map) = build_unicode_to_cid_map(encoding) {
+        return map.contains_key(&(ch as u32));
+    }
+    let s = ch.to_string();
+    let bytes = LopdfDocument::encode_text(encoding, &s);
+    if bytes.is_empty() {
+        return false;
+    }
+    match encoding.bytes_to_string(&bytes) {
+        Ok(decoded) => decoded == s,
+        Err(_) => false,
+    }
+}
+
+/// A planned encoding segment: text bytes for a chosen font + the font's PDF name.
+#[derive(Debug, Clone)]
+pub struct FontSegment {
+    pub font_name: String,
+    pub text: String,
+    pub encoded_operand: String,
+}
+
+/// Encode a single text chunk using a specific font and return the proper PDF operand
+/// (hex string for CID fonts, literal/hex for one-byte fonts).
+pub fn encode_chunk_with_font(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    font_name: &str,
+    text: &str,
+) -> Result<String, HandlerError> {
+    if text.is_empty() {
+        return Ok("<>".to_string());
+    }
+
+    let Ok(fonts) = doc.get_page_fonts(page_id) else {
+        return Err(HandlerError::OperationFailed(format!(
+            "page has no font resources for '{}'",
+            font_name
+        )));
+    };
+
+    for (name, font) in fonts {
+        if String::from_utf8_lossy(&name) != font_name {
+            continue;
+        }
+
+        // Try our custom ToUnicode CMap mapping first!
+        let mut custom_cmap: Option<HashMap<u32, String>> = None;
+        if let Ok(to_unicode) = font.get(b"ToUnicode") {
+            if let Ok(ref_id) = to_unicode.as_reference() {
+                if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
+                    let content = String::from_utf8_lossy(&stream.content);
+                    let cmap = parse_to_unicode_cmap(&content);
+                    if !cmap.is_empty() {
+                        custom_cmap = Some(cmap);
+                    }
+                }
+            }
+        }
+
+        if let Some(ref cmap) = custom_cmap {
+            let mut bytes = Vec::with_capacity(text.len() * 2);
+            let mut missing = String::new();
+            for ch in text.chars() {
+                // Find CID that maps to ch
+                let found_cid = cmap.iter()
+                    .find(|(_, val)| val.contains(ch))
+                    .map(|(cid, _)| *cid);
+                if let Some(cid) = found_cid {
+                    bytes.push((cid >> 8) as u8);
+                    bytes.push((cid & 0xFF) as u8);
+                } else {
+                    missing.push(ch);
+                }
+            }
+            if !missing.is_empty() {
+                return Err(HandlerError::OperationFailed(format!(
+                    "characters not encodable in font '{}': {}",
+                    font_name, missing
+                )));
+            }
+            return Ok(format_pdf_hex_bytes(&bytes));
+        }
+
+        let encoding = font.get_font_encoding(doc).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to resolve encoding for '{}': {:?}", font_name, e))
+        })?;
+
+        if let Some(map) = build_unicode_to_cid_map(&encoding) {
+            let mut bytes = Vec::with_capacity(text.len() * 2);
+            let mut missing = String::new();
+            for ch in text.chars() {
+                if let Some(&cid) = map.get(&(ch as u32)) {
+                    bytes.push((cid >> 8) as u8);
+                    bytes.push((cid & 0xFF) as u8);
+                } else {
+                    missing.push(ch);
+                }
+            }
+            if !missing.is_empty() {
+                return Err(HandlerError::OperationFailed(format!(
+                    "characters not encodable in font '{}': {}",
+                    font_name, missing
+                )));
+            }
+            return Ok(format_pdf_hex_bytes(&bytes));
+        }
+
+        let bytes = LopdfDocument::encode_text(&encoding, text);
+        let decoded = encoding.bytes_to_string(&bytes).unwrap_or_default();
+        if decoded != text {
+            return Err(HandlerError::OperationFailed(format!(
+                "characters not encodable in font '{}': {}",
+                font_name, text
+            )));
+        }
+        if bytes
+            .iter()
+            .all(|&b| b.is_ascii() && b >= 0x20 && b != b'(' && b != b')' && b != b'\\')
+        {
+            return Ok(encode_pdf_string(text));
+        }
+        return Ok(format_pdf_hex_bytes(&bytes));
+    }
+
+    Err(HandlerError::OperationFailed(format!(
+        "font '{}' not found on page",
+        font_name
+    )))
+}
+
+/// Pick fonts for each character of `text` from the fonts available on the page.
+/// Priority order: `preferred_font` (if set) → other CID fonts on page → one-byte fonts on page.
+/// Returns a list of segments (font_name, chunk_text, encoded_operand).
+/// Characters that no page font can render are collected and returned via `missing_chars`.
+pub fn pick_fonts_for_text(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    preferred_font: Option<&str>,
+    text: &str,
+    missing_chars: &mut Vec<char>,
+) -> Result<Vec<FontSegment>, HandlerError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Collect page fonts and their properties
+    let mut custom_to_unicode = HashMap::new();
+    let mut font_original_chars: HashMap<String, HashSet<char>> = HashMap::new();
+    let mut is_subset_font: HashMap<String, bool> = HashMap::new();
+    let mut page_fonts: HashMap<String, &Dictionary> = HashMap::new();
+
+    // Parse content stream to gather original text characters for each font
+    if let Ok(content_bytes) = doc.get_page_content(page_id) {
+        if let Ok(parsed) = parse_page_content_stream(&content_bytes, page_id, doc) {
+            for block in &parsed.text_blocks {
+                if let Some(ref f_name) = block.style.font_name {
+                    let set = font_original_chars.entry(f_name.clone()).or_default();
+                    for ch in block.text.chars() {
+                        set.insert(ch);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(fonts) = doc.get_page_fonts(page_id) {
+        for (name, font) in fonts {
+            let font_name = String::from_utf8_lossy(&name).to_string();
+            let is_sub = font.get(b"BaseFont")
+                .ok()
+                .and_then(|v| v.as_name_str().ok())
+                .map(|s| s.contains('+'))
+                .unwrap_or(false);
+            is_subset_font.insert(font_name.clone(), is_sub);
+            page_fonts.insert(font_name.clone(), font);
+
+            if let Ok(to_unicode) = font.get(b"ToUnicode") {
+                if let Ok(ref_id) = to_unicode.as_reference() {
+                    if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
+                        let content = String::from_utf8_lossy(&stream.content);
+                        let cmap = parse_to_unicode_cmap(&content);
+                        if !cmap.is_empty() {
+                            custom_to_unicode.insert(font_name, cmap);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let font_supports_char = |font_name: &str, ch: char| -> bool {
+        // 1. Check custom ToUnicode CMap if present
+        if let Some(cmap) = custom_to_unicode.get(font_name) {
+            let found_cid = cmap.iter().find(|(_, val)| val.contains(ch));
+            if found_cid.is_some() {
+                return true;
+            }
+        }
+
+        // 2. If the font is subsetted, it only supports the character if it was originally in the original characters
+        let is_sub = is_subset_font.get(font_name).copied().unwrap_or(false);
+        if is_sub {
+            if let Some(set) = font_original_chars.get(font_name) {
+                if set.contains(&ch) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // 3. If not subsetted, check via standard encoding
+        if let Some(font_dict) = page_fonts.get(font_name) {
+            if let Ok(encoding) = font_dict.get_font_encoding(doc) {
+                if font_supports_char_via_encoding(&encoding, ch) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    };
+
+    // Determine the font that can render a single character, honoring preferred order.
+    let pick_font_for = |ch: char| -> Option<String> {
+        if let Some(pref) = preferred_font {
+            if page_fonts.contains_key(pref) && font_supports_char(pref, ch) {
+                return Some(pref.to_string());
+            }
+        }
+        
+        // Check other fonts on the page
+        for font_name in page_fonts.keys() {
+            if Some(font_name.as_str()) == preferred_font {
+                continue;
+            }
+            if font_supports_char(font_name, ch) {
+                return Some(font_name.clone());
+            }
+        }
+        None
+    };
+
+    // Build segments: coalesce consecutive same-font characters.
+    let mut segments: Vec<FontSegment> = Vec::new();
+    let mut current_font: Option<String> = None;
+    let mut current_text = String::new();
+
+    for ch in text.chars() {
+        let font_for_ch = pick_font_for(ch);
+        match font_for_ch {
+            Some(font_name) => {
+                if current_font.as_deref() == Some(font_name.as_str()) {
+                    current_text.push(ch);
+                } else {
+                    if let Some(prev) = current_font.take() {
+                        let encoded = encode_chunk_with_font(doc, page_id, &prev, &current_text)?;
+                        segments.push(FontSegment {
+                            font_name: prev,
+                            text: std::mem::take(&mut current_text),
+                            encoded_operand: encoded,
+                        });
+                    }
+                    current_font = Some(font_name);
+                    current_text.push(ch);
+                }
+            }
+            None => {
+                missing_chars.push(ch);
+            }
+        }
+    }
+
+    if let Some(prev) = current_font {
+        let encoded = encode_chunk_with_font(doc, page_id, &prev, &current_text)?;
+        segments.push(FontSegment {
+            font_name: prev,
+            text: current_text,
+            encoded_operand: encoded,
+        });
+    }
+
+    Ok(segments)
+}
+
+/// Convenience wrapper: encode text for a specific font on a page.
+/// Used when only one font is involved and the caller wants a single hex string back.
+pub fn encode_pdf_text_with_font(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    font_name: Option<&str>,
+    text: &str,
+) -> Result<String, HandlerError> {
+    if text.is_empty() {
+        return Ok("<>".to_string());
+    }
+    if let Some(name) = font_name {
+        return encode_chunk_with_font(doc, page_id, name, text);
+    }
+    Ok(encode_pdf_string(text))
 }
 
 /// Parse a numeric value from a PDF content stream operand string.
@@ -517,10 +1029,56 @@ pub fn tokenize_pdf_line(line: &str) -> Vec<String> {
             }
             let token: String = chars[start..i].iter().collect();
             tokens.push(token);
-        } else {
-            // Parse regular token (word, number, name, operator)
+        } else if chars[i] == '/' {
+            // PDF Name: read until next whitespace or any delimiter (including '/').
             let start = i;
-            while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '(' && chars[i] != '<' && chars[i] != '[' && chars[i] != ')' && chars[i] != '>' && chars[i] != ']' {
+            i += 1;
+            while i < chars.len() {
+                let c = chars[i];
+                if c.is_whitespace()
+                    || matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '{' | '}' | '/' | '%')
+                {
+                    break;
+                }
+                i += 1;
+            }
+            let token: String = chars[start..i].iter().collect();
+            tokens.push(token);
+        } else {
+            // Regular tokens (numbers and operators). PowerPoint/Pages PDFs frequently
+            // omit whitespace between adjacent tokens (e.g. `Tf0.05`, `q1`, `Tr10`,
+            // `j0.6006`, `RGq`). To split correctly we classify by the first character:
+            //
+            //   * digit / sign / '.'  -> number, continue while [0-9.] (sign only at start)
+            //   * letter              -> operator name, continue while [A-Za-z*'"]
+            //                          (PDF operators include `T*`, `f*`, `B*`, `'`, `"`)
+            //   * anything else       -> single character
+            let start = i;
+            let first = chars[i];
+            let starts_number = first.is_ascii_digit() || first == '+' || first == '-' || first == '.';
+            let starts_word = first.is_ascii_alphabetic();
+
+            if starts_number {
+                i += 1;
+                while i < chars.len() {
+                    let c = chars[i];
+                    if c.is_ascii_digit() || c == '.' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            } else if starts_word {
+                i += 1;
+                while i < chars.len() {
+                    let c = chars[i];
+                    if c.is_ascii_alphabetic() || c == '*' || c == '\'' || c == '"' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
                 i += 1;
             }
             let token: String = chars[start..i].iter().collect();
@@ -560,6 +1118,8 @@ struct TextState {
     ctm_e: f32,
     ctm_f: f32,
     ctm_stack: Vec<[f32; 6]>,
+    filled_rects: Vec<FilledRect>,
+    last_rect: Option<(f32, f32, f32, f32)>,
 }
 
 impl Default for TextState {
@@ -587,6 +1147,8 @@ impl Default for TextState {
             ctm_e: 0.0,
             ctm_f: 0.0,
             ctm_stack: Vec::new(),
+            filled_rects: Vec::new(),
+            last_rect: None,
         }
     }
 }
@@ -596,7 +1158,7 @@ impl Default for TextState {
 fn is_pdf_operator(token: &str) -> bool {
     matches!(
         token,
-        "BT" | "ET" | "Tm" | "Td" | "TD" | "T*" | "Tf" | "Tc" | "Tw" | "Tj" | "TJ" | "rg" | "g" | "k" | "q" | "Q" | "cm" | "Do"
+        "BT" | "ET" | "Tm" | "Td" | "TD" | "T*" | "Tf" | "Tc" | "Tw" | "Tj" | "TJ" | "rg" | "g" | "k" | "q" | "Q" | "cm" | "Do" | "re" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*"
     )
 }
 
@@ -625,16 +1187,70 @@ fn add_or_merge_text_block(
     line_idx: usize,
     block_counter: &mut usize,
     is_array_text: bool,
+    line_token_index: usize,
 ) {
     let (width, height) = compute_block_dimensions(&text, font_map, state);
     let effective_font_size = state.font_size * state.tm_d.abs();
 
-    let merged = if let Some(last) = text_blocks.last_mut() {
-        // Must be on the exact same vertical line
-        let same_y = (last.bbox.y - state.line_y).abs() < 0.1;
+    let user_bbox = BBox {
+        x: state.cursor_x,
+        y: state.line_y,
+        width,
+        height,
+    };
 
-        // And horizontally adjacent (within 2.0 characters of width)
-        let gap = state.cursor_x - (last.bbox.x + last.bbox.width);
+    let transform_bbox = |bb: &BBox| -> BBox {
+        let c1x = bb.x;
+        let text_scale_y = state.tm_d.signum() * bb.height;
+        let c1y = bb.y - 0.2 * text_scale_y;
+        let c2x = bb.x + bb.width;
+        let c2y = bb.y - 0.2 * text_scale_y;
+        let c3x = bb.x;
+        let c3y = bb.y + 0.8 * text_scale_y;
+        let c4x = bb.x + bb.width;
+        let c4y = bb.y + 0.8 * text_scale_y;
+
+        let tx1 = c1x * state.ctm_a + c1y * state.ctm_c + state.ctm_e;
+        let ty1 = c1x * state.ctm_b + c1y * state.ctm_d + state.ctm_f;
+        let tx2 = c2x * state.ctm_a + c2y * state.ctm_c + state.ctm_e;
+        let ty2 = c2x * state.ctm_b + c2y * state.ctm_d + state.ctm_f;
+        let tx3 = c3x * state.ctm_a + c3y * state.ctm_c + state.ctm_e;
+        let ty3 = c3x * state.ctm_b + c3y * state.ctm_d + state.ctm_f;
+        let tx4 = c4x * state.ctm_a + c4y * state.ctm_c + state.ctm_e;
+        let ty4 = c4x * state.ctm_b + c4y * state.ctm_d + state.ctm_f;
+
+        let min_x = tx1.min(tx2).min(tx3).min(tx4);
+        let max_x = tx1.max(tx2).max(tx3).max(tx4);
+        let min_y = ty1.min(ty2).min(ty3).min(ty4);
+        let max_y = ty1.max(ty2).max(ty3).max(ty4);
+
+        BBox {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        }
+    };
+
+    let find_bg_color = |bb: &BBox, rects: &[FilledRect]| -> Option<PdfColor> {
+        for rect in rects {
+            let x_ok = rect.x <= bb.x + 2.0 && rect.x >= bb.x - 20.0;
+            let y_ok = rect.y <= bb.y + 2.0 && rect.y >= bb.y - 10.0;
+            let w_ok = rect.width >= bb.width - 2.0 && rect.width <= bb.width + 100.0;
+            let h_ok = rect.height >= bb.height - 2.0 && rect.height <= bb.height + 20.0;
+            if x_ok && y_ok && w_ok && h_ok {
+                return Some(rect.color.clone());
+            }
+        }
+        None
+    };
+
+    let merged = if let Some(last) = text_blocks.last_mut() {
+        // Must be on the exact same vertical line in user space
+        let same_y = (last.user_bbox.y - state.line_y).abs() < 0.1;
+
+        // And horizontally adjacent in user space (within 2.0 characters of width)
+        let gap = state.cursor_x - (last.user_bbox.x + last.user_bbox.width);
         let close_x = gap.abs() < 2.0 * effective_font_size;
 
         // And must have the exact same style properties to prevent style loss (e.g. key words in different color/weight)
@@ -651,8 +1267,10 @@ fn add_or_merge_text_block(
                 last.text.push(' ');
             }
             last.text.push_str(&text);
-            last.bbox.width = state.cursor_x + width - last.bbox.x;
+            last.user_bbox.width = state.cursor_x + width - last.user_bbox.x;
+            last.bbox = transform_bbox(&last.user_bbox);
             last.bt_end_line = line_idx;
+            last.style.bg_color = find_bg_color(&last.user_bbox, &state.filled_rects);
             true
         } else {
             false
@@ -663,25 +1281,26 @@ fn add_or_merge_text_block(
 
     if !merged {
         *block_counter += 1;
+        let bbox = transform_bbox(&user_bbox);
+        let bg_color = find_bg_color(&user_bbox, &state.filled_rects);
         text_blocks.push(PdfTextBlock {
             index: *block_counter,
             text,
-            bbox: BBox {
-                x: state.cursor_x,
-                y: state.line_y,
-                width,
-                height,
-            },
+            bbox,
+            user_bbox,
             style: TextStyle {
                 font_name: state.font_name.clone(),
                 font_size: Some(effective_font_size),
+                raw_font_size: Some(state.font_size),
                 fill_color: state.fill_color.clone(),
                 char_spacing: state.char_spacing,
                 word_spacing: state.word_spacing,
+                bg_color,
             },
             bt_start_line: state.bt_start_line,
             bt_end_line: line_idx,
             text_line_index: line_idx,
+            line_token_index,
             is_array_text,
         });
     }
@@ -1127,11 +1746,23 @@ pub fn parse_page_content_stream(
 
     // Also load actual lopdf encodings for ToUnicode mapping
     let mut encodings = std::collections::HashMap::new();
+    let mut custom_to_unicode = std::collections::HashMap::new();
     if let Ok(fonts) = doc.get_page_fonts(page_id) {
         for (name, font) in fonts {
             let font_name = String::from_utf8_lossy(&name).to_string();
             if let Ok(encoding) = font.get_font_encoding(doc) {
-                encodings.insert(font_name, encoding);
+                encodings.insert(font_name.clone(), encoding);
+            }
+            if let Ok(to_unicode) = font.get(b"ToUnicode") {
+                if let Ok(ref_id) = to_unicode.as_reference() {
+                    if let Ok(lopdf::Object::Stream(stream)) = doc.get_object(ref_id) {
+                        let content = String::from_utf8_lossy(&stream.content);
+                        let cmap = parse_to_unicode_cmap(&content);
+                        if !cmap.is_empty() {
+                            custom_to_unicode.insert(font_name, cmap);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1151,8 +1782,8 @@ pub fn parse_page_content_stream(
         let tokens = tokenize_pdf_line(trimmed);
         let mut operands: Vec<String> = Vec::new();
 
-        for token in tokens {
-            if is_pdf_operator(&token) {
+        for (token_idx, token) in tokens.iter().enumerate() {
+            if is_pdf_operator(token) {
                 match token.as_str() {
                     "BT" => {
                         state.in_bt = true;
@@ -1166,29 +1797,32 @@ pub fn parse_page_content_stream(
                         state.tm_c = 0.0;
                         state.tm_d = 1.0;
                         bt_stack.push(line_idx);
+                        state.last_rect = None;
                     }
                     "ET" => {
                         state.in_bt = false;
                     }
                     "Tm" => {
-                        if operands.len() >= 6 {
-                            state.tm_a = parse_float(&operands[0]);
-                            state.tm_b = parse_float(&operands[1]);
-                            state.tm_c = parse_float(&operands[2]);
-                            state.tm_d = parse_float(&operands[3]);
-                            state.line_x = parse_float(&operands[4]);
-                            state.line_y = parse_float(&operands[5]);
+                        let len = operands.len();
+                        if len >= 6 {
+                            state.tm_a = parse_float(&operands[len - 6]);
+                            state.tm_b = parse_float(&operands[len - 5]);
+                            state.tm_c = parse_float(&operands[len - 4]);
+                            state.tm_d = parse_float(&operands[len - 3]);
+                            state.line_x = parse_float(&operands[len - 2]);
+                            state.line_y = parse_float(&operands[len - 1]);
                             state.cursor_x = state.line_x;
                             state.tm_set = true;
                         }
                     }
                     "Td" | "TD" => {
-                        if operands.len() >= 2 {
-                            let dx = parse_float(&operands[0]);
-                            let dy = parse_float(&operands[1]);
-                            // Displacements are scaled by both font_size and active matrix!
-                            state.line_x = dx * state.font_size * state.tm_a + dy * state.font_size * state.tm_c + state.line_x;
-                            state.line_y = dx * state.font_size * state.tm_b + dy * state.font_size * state.tm_d + state.line_y;
+                        let len = operands.len();
+                        if len >= 2 {
+                            let dx = parse_float(&operands[len - 2]);
+                            let dy = parse_float(&operands[len - 1]);
+                            // Displacements are transformed by the active text matrix!
+                            state.line_x = dx * state.tm_a + dy * state.tm_c + state.line_x;
+                            state.line_y = dx * state.tm_b + dy * state.tm_d + state.line_y;
                             state.cursor_x = state.line_x;
                             state.tm_set = true;
                         }
@@ -1198,48 +1832,54 @@ pub fn parse_page_content_stream(
                         state.cursor_x = state.line_x;
                     }
                     "Tf" => {
-                        if operands.len() >= 2 {
-                            let font_name_raw = operands[0].trim();
+                        let len = operands.len();
+                        if len >= 2 {
+                            let font_name_raw = operands[len - 2].trim();
                             let font_name = if font_name_raw.starts_with('/') {
                                 font_name_raw[1..].to_string()
                             } else {
                                 font_name_raw.to_string()
                             };
                             state.font_name = Some(font_name);
-                            state.font_size = parse_float(&operands[1]);
+                            state.font_size = parse_float(&operands[len - 1]);
                         }
                     }
                     "Tc" => {
-                        if !operands.is_empty() {
-                            state.char_spacing = parse_float(&operands[0]);
+                        let len = operands.len();
+                        if len >= 1 {
+                            state.char_spacing = parse_float(&operands[len - 1]);
                         }
                     }
                     "Tw" => {
-                        if !operands.is_empty() {
-                            state.word_spacing = parse_float(&operands[0]);
+                        let len = operands.len();
+                        if len >= 1 {
+                            state.word_spacing = parse_float(&operands[len - 1]);
                         }
                     }
                     "rg" => {
-                        if operands.len() >= 3 {
+                        let len = operands.len();
+                        if len >= 3 {
                             state.fill_color = Some(PdfColor::Rgb(
-                                parse_float(&operands[0]),
-                                parse_float(&operands[1]),
-                                parse_float(&operands[2]),
+                                parse_float(&operands[len - 3]),
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
                             ));
                         }
                     }
                     "g" => {
-                        if !operands.is_empty() {
-                            state.fill_color = Some(PdfColor::Gray(parse_float(&operands[0])));
+                        let len = operands.len();
+                        if len >= 1 {
+                            state.fill_color = Some(PdfColor::Gray(parse_float(&operands[len - 1])));
                         }
                     }
                     "k" => {
-                        if operands.len() >= 4 {
+                        let len = operands.len();
+                        if len >= 4 {
                             state.fill_color = Some(PdfColor::Cmyk(
-                                parse_float(&operands[0]),
-                                parse_float(&operands[1]),
-                                parse_float(&operands[2]),
-                                parse_float(&operands[3]),
+                                parse_float(&operands[len - 4]),
+                                parse_float(&operands[len - 3]),
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
                             ));
                         }
                     }
@@ -1252,6 +1892,7 @@ pub fn parse_page_content_stream(
                             state.ctm_e,
                             state.ctm_f,
                         ]);
+                        state.last_rect = None;
                     }
                     "Q" => {
                         if let Some(restored) = state.ctm_stack.pop() {
@@ -1262,15 +1903,17 @@ pub fn parse_page_content_stream(
                             state.ctm_e = restored[4];
                             state.ctm_f = restored[5];
                         }
+                        state.last_rect = None;
                     }
                     "cm" => {
-                        if operands.len() >= 6 {
-                            let ma = parse_float(&operands[0]);
-                            let mb = parse_float(&operands[1]);
-                            let mc = parse_float(&operands[2]);
-                            let md = parse_float(&operands[3]);
-                            let me = parse_float(&operands[4]);
-                            let mf = parse_float(&operands[5]);
+                        let len = operands.len();
+                        if len >= 6 {
+                            let ma = parse_float(&operands[len - 6]);
+                            let mb = parse_float(&operands[len - 5]);
+                            let mc = parse_float(&operands[len - 4]);
+                            let md = parse_float(&operands[len - 3]);
+                            let me = parse_float(&operands[len - 2]);
+                            let mf = parse_float(&operands[len - 1]);
                             
                             let new_a = ma * state.ctm_a + mb * state.ctm_c;
                             let new_b = ma * state.ctm_b + mb * state.ctm_d;
@@ -1285,6 +1928,28 @@ pub fn parse_page_content_stream(
                             state.ctm_d = new_d;
                             state.ctm_e = new_e;
                             state.ctm_f = new_f;
+                        }
+                        state.last_rect = None;
+                    }
+                    "re" => {
+                        let len = operands.len();
+                        if len >= 4 {
+                            let rx = parse_float(&operands[len - 4]);
+                            let ry = parse_float(&operands[len - 3]);
+                            let rw = parse_float(&operands[len - 2]);
+                            let rh = parse_float(&operands[len - 1]);
+                            state.last_rect = Some((rx, ry, rw, rh));
+                        }
+                    }
+                    "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                        if let Some((rx, ry, rw, rh)) = state.last_rect.take() {
+                            state.filled_rects.push(FilledRect {
+                                x: rx,
+                                y: ry,
+                                width: rw,
+                                height: rh,
+                                color: state.fill_color.clone().unwrap_or(PdfColor::Gray(0.0)),
+                            });
                         }
                     }
                     "Do" => {
@@ -1314,7 +1979,13 @@ pub fn parse_page_content_stream(
                         if state.in_bt {
                             if let Some(operand) = operands.last() {
                                 let active_encoding = state.font_name.as_ref().and_then(|name| encodings.get(name));
-                                if let Some(text) = decode_pdf_string(operand, active_encoding) {
+                                let is_cid = state.font_name.as_ref()
+                                    .and_then(|name| font_map.get(name))
+                                    .map(|info| info.is_cid_font)
+                                    .unwrap_or(false);
+                                let custom_cmap = state.font_name.as_ref()
+                                    .and_then(|name| custom_to_unicode.get(name));
+                                if let Some(text) = decode_pdf_string(operand, active_encoding, custom_cmap, is_cid) {
                                     if !text.is_empty() {
                                         add_or_merge_text_block(
                                             &mut text_blocks,
@@ -1324,6 +1995,7 @@ pub fn parse_page_content_stream(
                                             line_idx,
                                             &mut block_counter,
                                             false,
+                                            token_idx.saturating_sub(1),
                                         );
                                     }
                                 }
@@ -1334,7 +2006,13 @@ pub fn parse_page_content_stream(
                         if state.in_bt {
                             if let Some(operand) = operands.last() {
                                 let active_encoding = state.font_name.as_ref().and_then(|name| encodings.get(name));
-                                if let Some(text) = decode_pdf_array_text(operand, active_encoding) {
+                                let is_cid = state.font_name.as_ref()
+                                    .and_then(|name| font_map.get(name))
+                                    .map(|info| info.is_cid_font)
+                                    .unwrap_or(false);
+                                let custom_cmap = state.font_name.as_ref()
+                                    .and_then(|name| custom_to_unicode.get(name));
+                                if let Some(text) = decode_pdf_array_text(operand, active_encoding, custom_cmap, is_cid) {
                                     if !text.is_empty() {
                                         add_or_merge_text_block(
                                             &mut text_blocks,
@@ -1344,6 +2022,7 @@ pub fn parse_page_content_stream(
                                             line_idx,
                                             &mut block_counter,
                                             true,
+                                            token_idx.saturating_sub(1),
                                         );
                                     }
                                 }
@@ -1354,7 +2033,7 @@ pub fn parse_page_content_stream(
                 }
                 operands.clear();
             } else {
-                operands.push(token);
+                operands.push(token.clone());
             }
         }
     }
@@ -1408,6 +2087,7 @@ fn compute_block_dimensions(
                 is_cid_font: false,
                 char_widths: HashMap::new(),
                 default_width: standard_font_avg_width(font_name),
+                unicode_to_cid: HashMap::new(),
             });
         estimate_text_width(text, &font_info, effective_width_scale, state.char_spacing, state.word_spacing)
     } else {
@@ -1421,11 +2101,11 @@ mod tests {
     use super::*;
 
     fn extract_pdf_string(s: &str) -> Option<String> {
-        decode_pdf_string(s, None)
+        decode_pdf_string(s, None, None, false)
     }
 
     fn extract_pdf_array_text(s: &str) -> Option<String> {
-        decode_pdf_array_text(s, None)
+        decode_pdf_array_text(s, None, None, false)
     }
 
     #[test]
@@ -1463,6 +2143,16 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_cid_font_text_demo3() {
+        let pdf_path = "../../examples/pdf/demo3.pdf";
+        if let Ok(doc) = lopdf::Document::load(pdf_path) {
+            let page_id = *doc.get_pages().get(&1).unwrap();
+            let encoded = encode_pdf_text_with_font(&doc, page_id, Some("C2_0"), "刑事技术").unwrap();
+            assert_eq!(encoded, "<04AB03AB086109A2>");
+        }
+    }
+
+    #[test]
     fn test_tokenize_line() {
         let tokens = tokenize_pdf_line("72 0 0 72 100 200 Tm");
         assert_eq!(tokens, vec!["72", "0", "0", "72", "100", "200", "Tm"]);
@@ -1472,6 +2162,55 @@ mod tests {
 
         let tokens = tokenize_pdf_line("(Hello) Tj");
         assert_eq!(tokens, vec!["(Hello)", "Tj"]);
+    }
+
+    /// Cover the PowerPoint/Pages style PDFs where operators and operands are
+    /// packed without whitespace (the parser previously could not handle this).
+    #[test]
+    fn test_tokenize_compact_ppt_style() {
+        // Tf followed by next operand without space
+        let tokens = tokenize_pdf_line("/FT47 360 Tf0.05 0 0 -0.05 64 63.675 Tm");
+        assert_eq!(
+            tokens,
+            vec!["/FT47", "360", "Tf", "0.05", "0", "0", "-0.05", "64", "63.675", "Tm"]
+        );
+
+        // Single-letter operators packed with following numbers
+        let tokens = tokenize_pdf_line("q1 0 0 -1 0 405 cm");
+        assert_eq!(tokens, vec!["q", "1", "0", "0", "-1", "0", "405", "cm"]);
+
+        let tokens = tokenize_pdf_line("0.12 w2 M2 J2 j0.5148 w");
+        assert_eq!(
+            tokens,
+            vec!["0.12", "w", "2", "M", "2", "J", "2", "j", "0.5148", "w"]
+        );
+
+        // Color + state save run on
+        let tokens = tokenize_pdf_line("0 0 0 RG/GS8 gs");
+        assert_eq!(tokens, vec!["0", "0", "0", "RG", "/GS8", "gs"]);
+
+        // Tr with digit (text rendering mode)
+        let tokens = tokenize_pdf_line("2 Tr10 M0 J");
+        assert_eq!(tokens, vec!["2", "Tr", "10", "M", "0", "J"]);
+
+        // Hex string + Tj + TD chain
+        let tokens = tokenize_pdf_line("<0CE7>Tj 361 -0 TD<1029>Tj");
+        assert_eq!(
+            tokens,
+            vec!["<0CE7>", "Tj", "361", "-0", "TD", "<1029>", "Tj"]
+        );
+
+        // Operator suffix characters: T*, f*, B*
+        let tokens = tokenize_pdf_line("T* f* B*");
+        assert_eq!(tokens, vec!["T*", "f*", "B*"]);
+
+        // Name immediately followed by operator (no space)
+        let tokens = tokenize_pdf_line("/FT86 420 Tf");
+        assert_eq!(tokens, vec!["/FT86", "420", "Tf"]);
+
+        // Negative numbers stay grouped
+        let tokens = tokenize_pdf_line("-0.5 1.0 -.25 +3");
+        assert_eq!(tokens, vec!["-0.5", "1.0", "-.25", "+3"]);
     }
 
     #[test]
@@ -1606,6 +2345,27 @@ mod tests {
             }
         } else {
             println!("Could not load demo.pdf at {}", pdf_path);
+        }
+    }
+
+    #[test]
+    fn test_debug_pkulaw() {
+        let pdf_path = "../../examples/pdf/pkulaw_v6_test.pdf";
+        if let Ok(mut doc) = lopdf::Document::load(pdf_path) {
+            let _ = doc.decompress();
+            println!("Successfully loaded and decompressed pkulaw_v6_test.pdf");
+            let pages = doc.get_pages();
+            if let Some(&page_id) = pages.get(&2) {
+                let content = doc.get_page_content(page_id).unwrap();
+                let parsed = parse_page_content_stream(&content, page_id, &doc).unwrap();
+                println!("Page 2 text blocks:");
+                for block in parsed.text_blocks.iter().take(10) {
+                    println!("Text: '{}'", block.text);
+                    println!("  Style: {:?}", block.style);
+                }
+            }
+        } else {
+            println!("Could not load pkulaw_v6_test.pdf at {}", pdf_path);
         }
     }
 }

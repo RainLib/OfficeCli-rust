@@ -1,8 +1,8 @@
 mod commands;
+mod mcp;
 mod output;
 mod resident;
 mod watch;
-mod mcp;
 
 use clap::Parser;
 use handler_common::{DocumentHandler, HandlerError, OutputFormat};
@@ -15,14 +15,18 @@ use std::path::PathBuf;
 #[command(about = "Create, view, query, and modify Office documents and PDFs")]
 #[command(after_help = "\
 EXAMPLES:
-  officecli create demo.docx              Create a blank Word document
-  officecli view demo.docx                View document as plain text
-  officecli view demo.docx -m outline     View outline with metadata
-  officecli view demo.pdf -m annotated    View PDF with bbox coordinates
-  officecli get demo.docx '/body/p[1]'    Get a specific paragraph
+  officecli create demo.docx                  Create a blank Word document
+  officecli view demo.docx                    View document as plain text
+  officecli view demo.docx -m outline         View outline with metadata
+  officecli view demo.pdf -m annotated        View PDF with bbox coordinates
+  officecli view demo.pdf -m html             Generate HTML layout preview for browser
+  officecli get demo.docx '/body/p[1]'        Get a specific paragraph
   officecli set demo.docx '/body/p[1]' text='Hello'  Replace text
-  officecli query demo.docx paragraph     Find all paragraphs
-  officecli extract-text demo.docx        Extract text with offset→path mapping")]
+  officecli set demo.pdf '/page[1]/text[1]' text='Title' color='#FF0000' bgColor='#FFFF00'
+  officecli set demo.pdf '/page[1]/text[1]' fontFile='assets/MyFont.ttf' size=14.5
+  officecli query demo.docx paragraph         Find all paragraphs
+  officecli extract-text demo.docx            Extract text with offset→path mapping
+  officecli extract-text demo.pdf --with-offsets --json  Extract PDF text and offset mapping as JSON")]
 struct Cli {
     /// Internal flag: run as resident IPC server (do not use directly)
     #[arg(long, hide = true)]
@@ -68,7 +72,11 @@ fn main() {
         return;
     }
 
-    let format = if cli.json { OutputFormat::Json } else { OutputFormat::Text };
+    let format = if cli.json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Text
+    };
 
     let command = cli.command.unwrap_or_else(|| {
         // No subcommand → print full help and exit with error code
@@ -115,8 +123,7 @@ fn main() {
 // ─── Handler functions for resident, watch, and MCP commands ───────────
 
 fn handle_open(cmd: commands::OpenCommand) -> Result<String, HandlerError> {
-    resident::spawn_server(&cmd.file)
-        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    resident::spawn_server(&cmd.file).map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
     Ok(format!("Resident server started for: {}", cmd.file))
 }
 
@@ -139,7 +146,17 @@ fn handle_close(cmd: commands::CloseCommand) -> Result<String, HandlerError> {
 fn handle_watch(cmd: commands::WatchCommand) -> Result<String, HandlerError> {
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async {
-        watch::run_server(&cmd.file, cmd.port)
+        let abs_path = std::fs::canonicalize(&cmd.file)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| {
+                if let Ok(curr) = std::env::current_dir() {
+                    curr.join(&cmd.file).to_string_lossy().to_string()
+                } else {
+                    cmd.file.clone()
+                }
+            });
+
+        watch::run_server(&cmd.file, &abs_path, cmd.port, cmd.id)
             .await
             .map(|_| "Watch server stopped".to_string())
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))
@@ -149,7 +166,10 @@ fn handle_watch(cmd: commands::WatchCommand) -> Result<String, HandlerError> {
 fn handle_unwatch(cmd: commands::UnwatchCommand) -> Result<String, HandlerError> {
     // Currently the watch server blocks until Ctrl+C. Unwatch is a placeholder
     // that could send a shutdown signal in a future implementation.
-    Ok(format!("Unwatch not yet supported for: {} — use Ctrl+C to stop the watch server", cmd.file))
+    Ok(format!(
+        "Unwatch not yet supported for: {} — use Ctrl+C to stop the watch server",
+        cmd.file
+    ))
 }
 
 fn handle_mcp() -> Result<String, HandlerError> {
@@ -161,7 +181,8 @@ fn handle_mcp() -> Result<String, HandlerError> {
 /// Open a document handler based on file extension.
 fn open_handler(file: &str, editable: bool) -> Result<Box<dyn DocumentHandler>, HandlerError> {
     let path = PathBuf::from(file);
-    let ext = path.extension()
+    let ext = path
+        .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
@@ -183,6 +204,9 @@ fn open_handler(file: &str, editable: bool) -> Result<Box<dyn DocumentHandler>, 
             let handler = pdf_handler::PdfHandler::open(file, editable)?;
             Ok(Box::new(handler))
         }
-        other => Err(HandlerError::OpenError(format!("unsupported format: {}", other))),
+        other => Err(HandlerError::OpenError(format!(
+            "unsupported format: {}",
+            other
+        ))),
     }
 }

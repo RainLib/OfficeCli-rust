@@ -18,3 +18,7 @@ Thumbs.db
 *.exe
 /officecli
 dist/
+
+# Bundled font assets that need to ship with the binary (override any earlier *)
+!crates/pdf-handler/assets/
+!crates/pdf-handler/assets/**

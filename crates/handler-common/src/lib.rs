@@ -8,6 +8,7 @@ pub mod validation_error;
 pub mod document_issue;
 pub mod output_format;
 pub mod selector;
+pub mod path_range;
 
 pub use document_handler::{DocumentHandler, HandlerError};
 pub use document_node::DocumentNode;
@@ -19,3 +20,4 @@ pub use validation_error::ValidationError;
 pub use document_issue::{DocumentIssue, IssueSeverity};
 pub use output_format::{OutputFormat, ViewOptions, RawOptions, BinaryInfo};
 pub use selector::Selector;
+pub use path_range::{PathRangeSegment, parse_range_paths};

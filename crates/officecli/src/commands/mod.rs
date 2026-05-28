@@ -60,6 +60,10 @@ pub struct WatchCommand {
     /// Port to serve on (default: 26315)
     #[arg(short, long)]
     pub port: Option<u16>,
+
+    /// Unique ID for this document in shared port mode
+    #[arg(short, long)]
+    pub id: Option<String>,
 }
 
 /// Stop a running watch server for the document

@@ -12,8 +12,9 @@ pub struct PdfReader {
 impl PdfReader {
     /// Open a PDF document.
     pub fn open(path: &str) -> Result<Self, HandlerError> {
-        let doc = LopdfDocument::load(path)
+        let mut doc = LopdfDocument::load(path)
             .map_err(|e| HandlerError::OpenError(format!("failed to open PDF: {}", e)))?;
+        let _ = doc.decompress();
         let page_count = Self::count_pages(&doc);
         Ok(Self { doc, page_count, file_path: path.to_string() })
     }

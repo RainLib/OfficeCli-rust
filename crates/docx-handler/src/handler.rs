@@ -243,7 +243,13 @@ impl DocumentHandler for WordHandler {
             return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
         }
         let mut dom = self.parse_dom()?;
-        let result = set_properties(&mut dom, path, properties)?;
+        let result = if let Some(range_paths_str) = properties.get("range_paths") {
+            let segments = handler_common::parse_range_paths(range_paths_str)
+                .map_err(|e| HandlerError::InvalidArgument(format!("invalid range paths: {}", e)))?;
+            apply_docx_range_highlights(&mut dom, properties, &segments)?
+        } else {
+            set_properties(&mut dom, path, properties)?
+        };
         self.write_dom(&dom)?;
         Ok(result)
     }
@@ -418,6 +424,130 @@ impl DocumentHandler for WordHandler {
         let dom = self.parse_dom()?;
         extract_text_with_offsets(&dom)
     }
+}
+
+fn apply_docx_range_highlights(
+    dom: &mut WordDom,
+    properties: &HashMap<String, String>,
+    segments: &[PathRangeSegment],
+) -> Result<Vec<String>, HandlerError> {
+    let mut unsupported = Vec::new();
+    
+    let mut run_props = properties.clone();
+    run_props.remove("range_paths");
+    if !run_props.contains_key("bgColor") && !run_props.contains_key("highlight") && !run_props.contains_key("bg") {
+        run_props.insert("highlight".to_string(), "yellow".to_string());
+    }
+
+    for seg in segments {
+        let path_segs = crate::navigation::parse_path(&seg.path)?;
+        if path_segs.len() < 2 {
+            return Err(HandlerError::InvalidPath(format!("invalid run path: {}", seg.path)));
+        }
+        
+        let parent_segs = &path_segs[..path_segs.len() - 1];
+        let mut parent_path_str = String::new();
+        for s in parent_segs {
+            parent_path_str.push('/');
+            parent_path_str.push_str(&s.to_path_fragment());
+        }
+        
+        let parent = navigate_to_element_mut(dom, &parent_path_str)?;
+        let last_seg = &path_segs[path_segs.len() - 1];
+        let target_type = crate::navigation::resolve_element_type_from_name(&last_seg.name);
+        
+        let matching_indices: Vec<usize> = parent.children.iter()
+            .enumerate()
+            .filter(|(_, c)| c.element_type == target_type ||
+                matches!(&c.element_type, WordElementType::Unknown(ref n) if n == &last_seg.name))
+            .map(|(i, _)| i)
+            .collect();
+            
+        let idx = last_seg.index.unwrap_or(1);
+        if idx == 0 || idx > matching_indices.len() {
+            return Err(HandlerError::PathNotFound(format!("run index {} out of range at {}", idx, seg.path)));
+        }
+        
+        let child_idx = matching_indices[idx - 1];
+        let run = &parent.children[child_idx];
+        
+        let start = seg.start;
+        let end = seg.end;
+        
+        let new_runs = match (start, end) {
+            (None, None) => {
+                let mut new_run = run.clone();
+                new_run.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
+                    new_run.children.insert(0, new_rpr);
+                }
+                vec![new_run]
+            }
+            (Some(s), None) => {
+                let (left, right) = crate::helpers::split_run_at_offset(run, s);
+                let mut result = Vec::new();
+                if let Some(l) = left {
+                    result.push(l);
+                }
+                if let Some(mut r) = right {
+                    r.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                    if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
+                        r.children.insert(0, new_rpr);
+                    }
+                    result.push(r);
+                }
+                result
+            }
+            (None, Some(e)) => {
+                let (left, right) = crate::helpers::split_run_at_offset(run, e);
+                let mut result = Vec::new();
+                if let Some(mut l) = left {
+                    l.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                    if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
+                        l.children.insert(0, new_rpr);
+                    }
+                    result.push(l);
+                }
+                if let Some(r) = right {
+                    result.push(r);
+                }
+                result
+            }
+            (Some(s), Some(e)) => {
+                let mut result = Vec::new();
+                let (left, rest) = crate::helpers::split_run_at_offset(run, s);
+                if let Some(l) = left {
+                    result.push(l);
+                }
+                if let Some(r) = rest {
+                    let local_e = e.saturating_sub(s);
+                    let (mid, right) = crate::helpers::split_run_at_offset(&r, local_e);
+                    if let Some(mut m) = mid {
+                        m.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                        if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
+                            m.children.insert(0, new_rpr);
+                        }
+                        result.push(m);
+                    }
+                    if let Some(rg) = right {
+                        result.push(rg);
+                    }
+                }
+                result
+            }
+        };
+        
+        parent.children.splice(child_idx..=child_idx, new_runs);
+        // Removed modified path push
+    }
+    
+    for (key, _) in properties {
+        if !matches!(key.as_str(), "range_paths" | "bgColor" | "highlight" | "bg") {
+            unsupported.push(key.clone());
+        }
+    }
+    
+    Ok(unsupported)
 }
 
 // ============================================================

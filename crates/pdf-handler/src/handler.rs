@@ -150,19 +150,24 @@ impl DocumentHandler for PdfHandler {
             }
 
             let block = &parsed.text_blocks[block_idx];
-            let node = DocumentNode::new(path, "text-block")
+            let mut node = DocumentNode::new(path, "text-block")
                 .with_text(&block.text)
                 .with_format("bbox_x", serde_json::json!(block.bbox.x))
                 .with_format("bbox_y", serde_json::json!(block.bbox.y))
                 .with_format("bbox_width", serde_json::json!(block.bbox.width))
                 .with_format("bbox_height", serde_json::json!(block.bbox.height));
 
-            let mut node = node;
             if let Some(ref font) = block.style.font_name {
                 node = node.with_format("font", serde_json::json!(font));
             }
             if let Some(size) = block.style.font_size {
                 node = node.with_format("font_size", serde_json::json!(size));
+            }
+            if let Some(ref color) = block.style.fill_color {
+                node = node.with_format("color", serde_json::json!(format_pdf_color(color)));
+            }
+            if let Some(ref bg) = block.style.bg_color {
+                node = node.with_format("bgColor", serde_json::json!(format_pdf_color(bg)));
             }
 
             return Ok(node);
@@ -198,19 +203,24 @@ impl DocumentHandler for PdfHandler {
                     if let Some(parsed_stream) = reader.parse_page_text_blocks(page_num) {
                         for block in &parsed_stream.text_blocks {
                             let path = format!("/page[{}]/text[{}]", page_num, block.index);
-                            let node = DocumentNode::new(&path, "text-block")
+                            let mut node = DocumentNode::new(&path, "text-block")
                                 .with_text(&block.text)
                                 .with_format("bbox_x", serde_json::json!(block.bbox.x))
                                 .with_format("bbox_y", serde_json::json!(block.bbox.y))
                                 .with_format("bbox_width", serde_json::json!(block.bbox.width))
                                 .with_format("bbox_height", serde_json::json!(block.bbox.height));
 
-                            let mut node = node;
                             if let Some(ref font) = block.style.font_name {
                                 node = node.with_format("font", serde_json::json!(font));
                             }
                             if let Some(size) = block.style.font_size {
                                 node = node.with_format("font_size", serde_json::json!(size));
+                            }
+                            if let Some(ref color) = block.style.fill_color {
+                                node = node.with_format("color", serde_json::json!(format_pdf_color(color)));
+                            }
+                            if let Some(ref bg) = block.style.bg_color {
+                                node = node.with_format("bgColor", serde_json::json!(format_pdf_color(bg)));
                             }
                             results.push(node);
                         }
@@ -228,6 +238,37 @@ impl DocumentHandler for PdfHandler {
 
         let mut unsupported = Vec::new();
 
+
+        // Check if global range paths highlit is requested
+        if let Some(range_paths_str) = properties.get("range_paths") {
+            let segments = handler_common::parse_range_paths(range_paths_str)
+                .map_err(|e| HandlerError::InvalidArgument(format!("invalid range paths: {}", e)))?;
+            
+            let mut reader = self.reader.borrow_mut();
+
+            if properties.contains_key("color") {
+                if let Some(color_str) = properties.get("color") {
+                    if let Some(color) = parse_color(color_str) {
+                        crate::modifier::apply_range_text_colors(reader.document_mut(), &color, &segments)?;
+                    }
+                }
+            }
+
+            if properties.contains_key("bgColor") || !properties.contains_key("color") {
+                let bg_color = properties.get("bgColor")
+                    .and_then(|s| parse_color(s))
+                    .unwrap_or(PdfColor::Rgb(1.0, 1.0, 0.0)); // default yellow
+                crate::modifier::apply_range_highlights(reader.document_mut(), &bg_color, &segments)?;
+            }
+
+            for (key, _) in properties {
+                if !matches!(key.as_str(), "range_paths" | "bgColor" | "color") {
+                    unsupported.push(key.clone());
+                }
+            }
+            return Ok(unsupported);
+        }
+
         // Check if path targets a specific text block: /page[N]/text[M]
         let text_path = parse_text_block_path(path);
         if let Some((page_num, text_index)) = text_path {
@@ -237,32 +278,65 @@ impl DocumentHandler for PdfHandler {
             let color_val = properties.get("color").and_then(|s| parse_color(s));
             let char_spacing_val = properties.get("charSpacing").and_then(|s| s.parse::<f32>().ok());
             let word_spacing_val = properties.get("wordSpacing").and_then(|s| s.parse::<f32>().ok());
+            let bg_color_val = properties.get("bgColor").and_then(|s| parse_color(s));
+            let font_file_val = properties.get("fontFile").map(|s| s.as_str());
 
             let mut reader = self.reader.borrow_mut();
 
-            // If only text property, use simple targeted replacement
-            if text_val.is_some() && font_val.is_none() && size_val.is_none()
-                && color_val.is_none() && char_spacing_val.is_none() && word_spacing_val.is_none()
+            // Before the actual text edit, give the embedder a chance to add a
+            // fallback font for any character the existing page fonts can't render.
+            // The embedder itself scans page fonts and is a no-op when every char
+            // is already supported, so this is safe to call unconditionally.
+            // Skipping this check based on ASCII/CJK heuristics is wrong: PowerPoint
+            // exports use subsetted fonts that may omit even ASCII glyphs like '*'.
+            if let Some(text_str) = text_val {
+                let chars_needed: std::collections::HashSet<char> =
+                    text_str.chars().collect();
+                let _ = crate::font_embedder::ensure_cjk_font_for_chars(
+                    reader.document_mut(),
+                    page_num,
+                    &chars_needed,
+                    font_val,
+                    font_file_val,
+                );
+            }
+
+            if text_val.is_some()
+                && font_val.is_none()
+                && size_val.is_none()
+                && color_val.is_none()
+                && char_spacing_val.is_none()
+                && word_spacing_val.is_none()
+                && bg_color_val.is_none()
             {
                 crate::modifier::replace_text_at_path(
-                    reader.document_mut(), page_num, text_index, text_val.unwrap(),
+                    reader.document_mut(),
+                    page_num,
+                    text_index,
+                    text_val.unwrap(),
+                    font_val,
                 )?;
             } else {
-                // Use style-aware replacement
                 crate::modifier::replace_text_with_style(
-                    reader.document_mut(), page_num, text_index,
+                    reader.document_mut(),
+                    page_num,
+                    text_index,
                     text_val,
                     font_val,
                     size_val,
                     color_val.as_ref(),
                     char_spacing_val,
                     word_spacing_val,
+                    bg_color_val.as_ref(),
                 )?;
             }
 
-            // Collect unsupported properties
             for (key, _) in properties {
-                if !matches!(key.as_str(), "text" | "content" | "font" | "size" | "color" | "charSpacing" | "wordSpacing") {
+                if !matches!(
+                    key.as_str(),
+                    "text" | "content" | "font" | "size" | "color"
+                        | "charSpacing" | "wordSpacing" | "bgColor" | "fontFile"
+                ) {
                     unsupported.push(key.clone());
                 }
             }
@@ -449,7 +523,13 @@ impl DocumentHandler for PdfHandler {
         }
 
         let file_path = self.reader.borrow().file_path().to_string();
-        self.reader.borrow_mut().document_mut().save(&file_path)
+        let mut reader = self.reader.borrow_mut();
+        // Remove "Prev" key from the trailer dictionary. Since lopdf saves
+        // the PDF as a single flattened document, keeping a legacy "Prev"
+        // key from incremental updates will point to invalid offsets and
+        // corrupt the file trailer for subsequent loads.
+        reader.document_mut().trailer.remove(b"Prev");
+        reader.document_mut().save(&file_path)
             .map_err(|e| HandlerError::SaveError(format!("failed to save PDF: {}", e)))?;
         Ok(())
     }
@@ -508,4 +588,26 @@ fn parse_color(s: &str) -> Option<PdfColor> {
     }
 
     None
+}
+
+/// Format a PdfColor as a hex color string (e.g. #FF0000).
+fn format_pdf_color(color: &PdfColor) -> String {
+    match color {
+        PdfColor::Gray(g) => {
+            let val = (g * 255.0).round() as u8;
+            format!("#{:02X}{:02X}{:02X}", val, val, val)
+        }
+        PdfColor::Rgb(r, g, b) => {
+            let rv = (r * 255.0).round() as u8;
+            let gv = (g * 255.0).round() as u8;
+            let bv = (b * 255.0).round() as u8;
+            format!("#{:02X}{:02X}{:02X}", rv, gv, bv)
+        }
+        PdfColor::Cmyk(c, m, y, k) => {
+            let r = (((1.0 - c) * (1.0 - k)) * 255.0).round() as u8;
+            let g = (((1.0 - m) * (1.0 - k)) * 255.0).round() as u8;
+            let b = (((1.0 - y) * (1.0 - k)) * 255.0).round() as u8;
+            format!("#{:02X}{:02X}{:02X}", r, g, b)
+        }
+    }
 }
