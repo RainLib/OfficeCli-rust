@@ -93,6 +93,7 @@ pub struct FontInfo {
     pub is_cid_font: bool,
     pub char_widths: HashMap<u32, f32>,
     pub default_width: f32,
+    pub unicode_to_cid: HashMap<u32, u32>,
 }
 
 /// A structured image block extracted from a page's content stream.
@@ -134,7 +135,12 @@ pub fn estimate_text_width(
     let char_count = text.chars().count();
 
     for c in text.chars() {
-        let code = c as u32;
+        let mut code = c as u32;
+        if font_info.is_cid_font {
+            if let Some(&cid) = font_info.unicode_to_cid.get(&code) {
+                code = cid;
+            }
+        }
         let w = font_info.char_widths
             .get(&code)
             .copied()
@@ -206,12 +212,28 @@ fn build_font_info(doc: &LopdfDocument, font_dict: &Dictionary, pdf_name: &str) 
 
     let (char_widths, default_width) = extract_font_widths(doc, font_dict, &base_font, is_cid);
 
+    let mut unicode_to_cid = HashMap::new();
+    if let Ok(to_unicode) = font_dict.get(b"ToUnicode") {
+        if let Ok(ref_id) = to_unicode.as_reference() {
+            if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
+                let content = String::from_utf8_lossy(&stream.content);
+                let cmap = parse_to_unicode_cmap(&content);
+                for (cid, unicode_str) in cmap {
+                    if let Some(ch) = unicode_str.chars().next() {
+                        unicode_to_cid.insert(ch as u32, cid);
+                    }
+                }
+            }
+        }
+    }
+
     FontInfo {
         pdf_name: pdf_name.to_string(),
         base_font,
         is_cid_font: is_cid,
         char_widths,
         default_width,
+        unicode_to_cid,
     }
 }
 
@@ -2064,6 +2086,7 @@ fn compute_block_dimensions(
                 is_cid_font: false,
                 char_widths: HashMap::new(),
                 default_width: standard_font_avg_width(font_name),
+                unicode_to_cid: HashMap::new(),
             });
         estimate_text_width(text, &font_info, effective_width_scale, state.char_spacing, state.word_spacing)
     } else {

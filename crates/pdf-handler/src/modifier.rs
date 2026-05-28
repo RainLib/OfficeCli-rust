@@ -451,6 +451,117 @@ fn parse_text_block_path(path: &str) -> Option<(usize, usize)> {
     Some((page_num, text_index))
 }
 
+/// Apply foreground text colors to a specific character range of text blocks.
+pub fn apply_range_text_colors(
+    doc: &mut LopdfDocument,
+    color: &PdfColor,
+    segments: &[handler_common::PathRangeSegment],
+) -> Result<(), HandlerError> {
+    use std::collections::HashMap;
+
+    // Helper to format color operator
+    let format_color_op = |col: &PdfColor| -> String {
+        match col {
+            PdfColor::Gray(g) => format!("{} g", g),
+            PdfColor::Rgb(r, g, b) => format!("{} {} {} rg", r, g, b),
+            PdfColor::Cmyk(c, m, y, k) => format!("{} {} {} {} k", c, m, y, k),
+        }
+    };
+
+    // Group segments by page
+    let mut page_groups: HashMap<usize, Vec<handler_common::PathRangeSegment>> = HashMap::new();
+    for seg in segments {
+        if let Some((page_num, _)) = parse_text_block_path(&seg.path) {
+            page_groups.entry(page_num).or_default().push(seg.clone());
+        }
+    }
+
+    for (page_num, page_segs) in page_groups {
+        let pages = doc.get_pages();
+        let page_id = *pages.get(&(page_num as u32))
+            .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
+
+        let content = doc.get_page_content(page_id)
+            .map_err(|e| HandlerError::OperationFailed(format!("failed to get page content: {}", e)))?;
+
+        let parsed = parse_page_content_stream(&content, page_id, doc)
+            .map_err(|e| HandlerError::OperationFailed(format!("failed to parse content stream: {}", e)))?;
+
+        let mut modified_lines = parsed.lines.clone();
+
+        for seg in page_segs {
+            if let Some((_, text_index)) = parse_text_block_path(&seg.path) {
+                let block_idx = text_index - 1;
+                if block_idx >= parsed.text_blocks.len() {
+                    return Err(HandlerError::PathNotFound(format!(
+                        "text block {} not found on page {}",
+                        text_index, page_num
+                    )));
+                }
+                let block = &parsed.text_blocks[block_idx];
+
+                let start = seg.start.unwrap_or(0);
+                let char_count = block.text.chars().count();
+                let end = seg.end.unwrap_or(char_count).min(char_count).max(start);
+
+                let prefix_chars: String = block.text.chars().take(start).collect();
+                let selected_chars: String = block.text.chars().skip(start).take(end - start).collect();
+                let suffix_chars: String = block.text.chars().skip(end).collect();
+
+                let font_name = block.style.font_name.as_deref().unwrap_or("F1");
+
+                let mut ops = Vec::new();
+
+                if !prefix_chars.is_empty() {
+                    let enc = crate::content_stream::encode_chunk_with_font(doc, page_id, font_name, &prefix_chars)?;
+                    ops.push(format!("{} Tj", enc));
+                }
+
+                // Set new color
+                ops.push(format_color_op(color));
+
+                if !selected_chars.is_empty() {
+                    let enc = crate::content_stream::encode_chunk_with_font(doc, page_id, font_name, &selected_chars)?;
+                    ops.push(format!("{} Tj", enc));
+                }
+
+                // Restore original color
+                let orig_color = block.style.fill_color.clone().unwrap_or(PdfColor::Gray(0.0));
+                ops.push(format_color_op(&orig_color));
+
+                if !suffix_chars.is_empty() {
+                    let enc = crate::content_stream::encode_chunk_with_font(doc, page_id, font_name, &suffix_chars)?;
+                    ops.push(format!("{} Tj", enc));
+                }
+
+                // Splice ops into content stream
+                let line = &modified_lines[block.text_line_index];
+                let mut line_tokens = crate::content_stream::tokenize_pdf_line(line);
+
+                if block.line_token_index < line_tokens.len() {
+                    let op_idx = block.line_token_index;
+                    let consume_extra = matches!(
+                        line_tokens.get(op_idx + 1).map(|s| s.as_str()),
+                        Some("Tj") | Some("TJ")
+                    );
+                    let end_token = if consume_extra { op_idx + 2 } else { op_idx + 1 };
+                    
+                    let replacement = ops.join(" ");
+                    line_tokens.splice(op_idx..end_token, vec![replacement]);
+                    modified_lines[block.text_line_index] = line_tokens.join(" ");
+                }
+            }
+        }
+
+        // Save page content
+        let new_content = modified_lines.join("\n").into_bytes();
+        doc.change_page_content(page_id, new_content)
+            .map_err(|e| HandlerError::OperationFailed(format!("failed to save page content: {}", e)))?;
+    }
+
+    Ok(())
+}
+
 /// Apply native Highlight annotation for a cross-node text block range.
 pub fn apply_range_highlights(
     doc: &mut LopdfDocument,

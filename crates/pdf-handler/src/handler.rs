@@ -238,18 +238,28 @@ impl DocumentHandler for PdfHandler {
 
         let mut unsupported = Vec::new();
 
+
         // Check if global range paths highlit is requested
         if let Some(range_paths_str) = properties.get("range_paths") {
             let segments = handler_common::parse_range_paths(range_paths_str)
                 .map_err(|e| HandlerError::InvalidArgument(format!("invalid range paths: {}", e)))?;
             
-            let bg_color = properties.get("bgColor")
-                .or_else(|| properties.get("color"))
-                .and_then(|s| parse_color(s))
-                .unwrap_or(PdfColor::Rgb(1.0, 1.0, 0.0)); // default yellow
-                
             let mut reader = self.reader.borrow_mut();
-            crate::modifier::apply_range_highlights(reader.document_mut(), &bg_color, &segments)?;
+
+            if properties.contains_key("color") {
+                if let Some(color_str) = properties.get("color") {
+                    if let Some(color) = parse_color(color_str) {
+                        crate::modifier::apply_range_text_colors(reader.document_mut(), &color, &segments)?;
+                    }
+                }
+            }
+
+            if properties.contains_key("bgColor") || !properties.contains_key("color") {
+                let bg_color = properties.get("bgColor")
+                    .and_then(|s| parse_color(s))
+                    .unwrap_or(PdfColor::Rgb(1.0, 1.0, 0.0)); // default yellow
+                crate::modifier::apply_range_highlights(reader.document_mut(), &bg_color, &segments)?;
+            }
 
             for (key, _) in properties {
                 if !matches!(key.as_str(), "range_paths" | "bgColor" | "color") {

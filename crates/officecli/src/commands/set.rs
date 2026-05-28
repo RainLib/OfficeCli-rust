@@ -64,6 +64,17 @@ pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, Handl
         .collect();
 
     if let Some(ref rp) = cmd.range_paths {
+        // When --range-paths is used, clap may misparse the first key=value property
+        // as the positional `path` argument. Detect and fix this.
+        if let Some(ref path_val) = cmd.path {
+            if path_val.contains('=') {
+                let parts: Vec<&str> = path_val.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    properties.insert(parts[0].to_string(), parts[1].to_string());
+                }
+            }
+        }
+
         // Validate DSL syntax
         handler_common::parse_range_paths(rp)
             .map_err(|e| HandlerError::InvalidArgument(format!("invalid --range-paths: {}", e)))?;
@@ -72,7 +83,12 @@ pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, Handl
         return Err(HandlerError::InvalidArgument("either element path or --range-paths is required".to_string()));
     }
 
-    let path_str = cmd.path.unwrap_or_default();
+    let path_str = if cmd.range_paths.is_some() {
+        // When using --range-paths, path is not meaningful
+        String::new()
+    } else {
+        cmd.path.unwrap_or_default()
+    };
     let unsupported = handler.set(&path_str, &properties)?;
     handler.save()?;
 
