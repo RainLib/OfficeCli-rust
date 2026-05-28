@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, OutputFormat};
 use clap::Args;
+use handler_common::{HandlerError, OutputFormat};
 use std::collections::HashMap;
 
 /// Modify properties of an element at a path (text, style, content)
@@ -47,7 +47,8 @@ pub struct SetCommand {
 pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, true)?;
 
-    let properties: HashMap<String, String> = cmd.properties
+    let properties: HashMap<String, String> = cmd
+        .properties
         .iter()
         .filter_map(|p| {
             let parts: Vec<&str> = p.splitn(2, '=').collect();
@@ -73,6 +74,7 @@ pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, Handl
         OutputFormat::Json => Ok(serde_json::json!({
             "result": "OK",
             "unsupported": unsupported
-        }).to_string()),
+        })
+        .to_string()),
     }
 }
