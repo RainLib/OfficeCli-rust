@@ -346,19 +346,20 @@ impl DocumentHandler for PdfHandler {
                 );
             }
 
-            if text_val.is_some()
-                && font_val.is_none()
-                && size_val.is_none()
-                && color_val.is_none()
-                && char_spacing_val.is_none()
-                && word_spacing_val.is_none()
-                && bg_color_val.is_none()
-            {
+            if let (Some(text), None, None, None, None, None, None) = (
+                text_val,
+                font_val,
+                size_val,
+                color_val.as_ref(),
+                char_spacing_val,
+                word_spacing_val,
+                bg_color_val.as_ref(),
+            ) {
                 crate::modifier::replace_text_at_path(
                     reader.document_mut(),
                     page_num,
                     text_index,
-                    text_val.unwrap(),
+                    text,
                     font_val,
                 )?;
             } else {
