@@ -409,7 +409,7 @@ officecli add-part <file> <parent>                   # create new document part 
 `officecli load_skill <name>` — output is a SKILL.md, follow its rules.
 
 **Loading rule**:
-- Pick the most specific match in "When to use"; if none fits, load the format default (`word` / `pptx` / `excel`).
+- Pick the most specific match in "When to use"; if none fits, load the format default (`word` / `pptx` / `excel` / `pdf`).
 - Scenes already contain the format default's rules — load **one** skill per artifact, never stack.
 - Loaded rules persist across turns; don't re-load each reply.
 - Two distinct artifacts → two separate loads.
@@ -420,6 +420,7 @@ officecli add-part <file> <parent>                   # create new document part 
 |------|-------------|
 | `word` | Reports, letters, memos, proposals, generic documents |
 | `academic-paper` | Journal / conference / thesis: APA / Chicago / IEEE / MLA citations, equations, SEQ + PAGEREF cross-refs, multi-column journal layout, bibliography. NOT for business reports or letters (route those to `word`) |
+| `word-form` | Fillable forms, contracts, SOW templates, intake forms, checklists with content controls (SDT), form fields, or document protection. NOT for normal reports or proposals (route those to `word`) |
 
 ### PowerPoint (.pptx)
 
@@ -437,6 +438,12 @@ officecli add-part <file> <parent>                   # create new document part 
 | `excel` | Generic workbooks, formulas, pivots, trackers |
 | `financial-model` | Financial models, scenarios, projections. NOT for general data analysis (route those to `excel`) |
 | `data-dashboard` | CSV/tabular data → KPI / analytics / executive dashboards with charts and sparklines. NOT for raw data tracking (route those to `excel`) |
+
+### PDF (.pdf)
+
+| Name | When to use |
+|------|-------------|
+| `pdf` | Reading, parsing, or extracting text; viewing outlines, stats, or formatting issues; rendering PDF pages to HTML or SVG; applying highlights, text color changes, or modifications on specific pages; deleting pages; replacing content stream text |
 
 Example: a fundraising deck task → `officecli load_skill pitch-deck` → use the printed rules.
 
