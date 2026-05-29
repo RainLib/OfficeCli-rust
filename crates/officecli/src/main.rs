@@ -6,7 +6,29 @@
 
 mod commands;
 mod mcp;
+#[cfg(unix)]
 mod resident;
+#[cfg(not(unix))]
+mod resident {
+    pub struct IpcResponse {
+        pub error: Option<String>,
+    }
+    pub async fn run_server(_file_path: &str) -> Result<(), anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "Resident mode is not supported on this platform"
+        ))
+    }
+    pub fn spawn_server(_file_path: &str) -> Result<(), anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "Resident mode is not supported on this platform"
+        ))
+    }
+    pub async fn close_server(_file_path: &str) -> Result<IpcResponse, anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "Resident mode is not supported on this platform"
+        ))
+    }
+}
 mod watch;
 
 use clap::Parser;
