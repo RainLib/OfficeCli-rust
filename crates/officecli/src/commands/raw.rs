@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, OutputFormat, RawOptions};
 use clap::Args;
+use handler_common::{HandlerError, OutputFormat, RawOptions};
 
 /// View raw XML or PDF content stream of a document part
 #[derive(Args)]
@@ -19,7 +19,9 @@ pub fn handle_raw(cmd: RawCommand, _format: OutputFormat) -> Result<String, Hand
     let opts = RawOptions {
         start_row: cmd.start_row,
         end_row: cmd.end_row,
-        cols: cmd.cols.map(|c| c.split(',').map(|s| s.to_string()).collect()),
+        cols: cmd
+            .cols
+            .map(|c| c.split(',').map(|s| s.to_string()).collect()),
     };
     handler.raw(&cmd.part_path, opts)
 }

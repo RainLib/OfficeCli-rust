@@ -12,9 +12,12 @@ use oxml::OxmlPackage;
 ///   "type=sharedString" — all cells of a specific type
 ///   "range=A1:C10" — cells in a range on the first sheet
 ///   "Sheet1!A1:C10" — cells in a range on a specific sheet
-pub fn query_cells(package: &OxmlPackage, selector: &str) -> Result<Vec<DocumentNode>, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+pub fn query_cells(
+    package: &OxmlPackage,
+    selector: &str,
+) -> Result<Vec<DocumentNode>, HandlerError> {
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
     let mut results = Vec::new();
 
@@ -22,7 +25,9 @@ pub fn query_cells(package: &OxmlPackage, selector: &str) -> Result<Vec<Document
     if selector.starts_with("sheet=") {
         // Sheet selector
         let sheet_name = &selector[6..];
-        let ws = model.sheets.iter()
+        let ws = model
+            .sheets
+            .iter()
             .find(|s| s.name == sheet_name)
             .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
@@ -47,7 +52,12 @@ pub fn query_cells(package: &OxmlPackage, selector: &str) -> Result<Vec<Document
             "inlineString" => CellValueType::InlineString,
             "boolean" => CellValueType::Boolean,
             "error" => CellValueType::Error,
-            _ => return Err(HandlerError::InvalidArgument(format!("unknown cell type '{}'", type_name))),
+            _ => {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "unknown cell type '{}'",
+                    type_name
+                )))
+            }
         };
 
         for ws in &model.sheets {
@@ -64,23 +74,37 @@ pub fn query_cells(package: &OxmlPackage, selector: &str) -> Result<Vec<Document
             (&selector[..idx], &selector[idx + 1..])
         } else {
             // Default to first sheet
-            (model.sheets.first().map(|s| s.name.as_str()).unwrap_or("Sheet1"), selector)
+            (
+                model
+                    .sheets
+                    .first()
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("Sheet1"),
+                selector,
+            )
         };
 
-        let ws = model.sheets.iter()
+        let ws = model
+            .sheets
+            .iter()
             .find(|s| s.name == sheet_name)
             .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
         // Parse range: "A1:C10"
         let parts: Vec<&str> = range_str.split(':').collect();
         if parts.len() != 2 {
-            return Err(HandlerError::InvalidArgument(format!("invalid range '{}'", range_str)));
+            return Err(HandlerError::InvalidArgument(format!(
+                "invalid range '{}'",
+                range_str
+            )));
         }
 
-        let start_ref = CellRef::parse(parts[0])
-            .ok_or_else(|| HandlerError::InvalidArgument(format!("invalid cell ref '{}'", parts[0])))?;
-        let end_ref = CellRef::parse(parts[1])
-            .ok_or_else(|| HandlerError::InvalidArgument(format!("invalid cell ref '{}'", parts[1])))?;
+        let start_ref = CellRef::parse(parts[0]).ok_or_else(|| {
+            HandlerError::InvalidArgument(format!("invalid cell ref '{}'", parts[0]))
+        })?;
+        let end_ref = CellRef::parse(parts[1]).ok_or_else(|| {
+            HandlerError::InvalidArgument(format!("invalid cell ref '{}'", parts[1]))
+        })?;
 
         for row in start_ref.row..=end_ref.row {
             for col in start_ref.col..=end_ref.col {
@@ -90,7 +114,10 @@ pub fn query_cells(package: &OxmlPackage, selector: &str) -> Result<Vec<Document
             }
         }
     } else {
-        return Err(HandlerError::InvalidArgument(format!("unsupported selector '{}'", selector)));
+        return Err(HandlerError::InvalidArgument(format!(
+            "unsupported selector '{}'",
+            selector
+        )));
     }
 
     Ok(results)
@@ -98,8 +125,7 @@ pub fn query_cells(package: &OxmlPackage, selector: &str) -> Result<Vec<Document
 
 fn make_cell_node(ws: &Worksheet, cell: &Cell) -> DocumentNode {
     let path = format!("/{}{}", ws.name, cell.ref_str);
-    let mut node = DocumentNode::new(&path, "cell")
-        .with_text(cell.display_value.clone());
+    let mut node = DocumentNode::new(&path, "cell").with_text(cell.display_value.clone());
 
     if let Some(f) = &cell.formula {
         node = node.with_preview(f.clone());

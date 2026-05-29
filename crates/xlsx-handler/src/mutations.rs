@@ -19,14 +19,22 @@ pub fn remove_element(
     match (pc.sheet_name, pc.cell_ref) {
         (Some(sheet_name), Some(cell_ref)) => {
             remove_cell(package, &sheet_name, &cell_ref)?;
-            Ok(Some(format!("removed cell {}{}", sheet_name, cell_ref.to_string_ref())))
+            Ok(Some(format!(
+                "removed cell {}{}",
+                sheet_name,
+                cell_ref.to_string_ref()
+            )))
         }
         (Some(sheet_name), None) => {
             remove_sheet(package, &sheet_name)?;
             Ok(Some(format!("removed sheet {}", sheet_name)))
         }
-        (None, None) => Err(HandlerError::InvalidPath("remove requires a sheet or cell path".to_string())),
-        (None, Some(_)) => Err(HandlerError::InvalidPath("cell path requires a sheet name".to_string())),
+        (None, None) => Err(HandlerError::InvalidPath(
+            "remove requires a sheet or cell path".to_string(),
+        )),
+        (None, Some(_)) => Err(HandlerError::InvalidPath(
+            "cell path requires a sheet name".to_string(),
+        )),
     }
 }
 
@@ -36,17 +44,20 @@ fn remove_cell(
     sheet_name: &str,
     cell_ref: &CellRef,
 ) -> Result<(), HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
-    let ws = model.sheets.iter()
+    let ws = model
+        .sheets
+        .iter()
         .find(|s| s.name == sheet_name)
         .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
     let part_path = ws.part_path.clone();
     let ref_str = cell_ref.to_string_ref();
 
-    let xml = package.read_part_xml(&part_path)
+    let xml = package
+        .read_part_xml(&part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     let p = detect_namespace_prefix(&xml);
@@ -57,7 +68,8 @@ fn remove_cell(
         let cell_end = find_cell_element_end(&xml, cell_start, &p)?;
         let mut result = xml[..cell_start].to_string();
         result.push_str(&xml[cell_end..]);
-        package.write_part_xml(&part_path, &result)
+        package
+            .write_part_xml(&part_path, &result)
             .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     }
 
@@ -65,38 +77,39 @@ fn remove_cell(
 }
 
 /// Remove a sheet from the workbook.
-fn remove_sheet(
-    package: &mut OxmlPackage,
-    sheet_name: &str,
-) -> Result<(), HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+fn remove_sheet(package: &mut OxmlPackage, sheet_name: &str) -> Result<(), HandlerError> {
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
-    let ws = model.sheets.iter()
+    let ws = model
+        .sheets
+        .iter()
         .find(|s| s.name == sheet_name)
         .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
     // Remove the sheet part from the package
     if package.has_part(&ws.part_path) {
-        package.write_part(&ws.part_path, Vec::<u8>::new())
+        package
+            .write_part(&ws.part_path, Vec::<u8>::new())
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
     }
 
     // Remove the <sheet> entry from workbook.xml
-    let wb_xml = package.read_part_xml("xl/workbook.xml")
+    let wb_xml = package
+        .read_part_xml("xl/workbook.xml")
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Find the sheet entry by name
     let sheet_entry_pattern = format!("name=\"{}\"", sheet_name);
     if let Some(name_pos) = wb_xml.find(&sheet_entry_pattern) {
         // Find the <sheet .../> element containing this name
-        let element_start = wb_xml[..name_pos].rfind("<sheet")
-            .unwrap_or(0);
+        let element_start = wb_xml[..name_pos].rfind("<sheet").unwrap_or(0);
         let element_end = find_element_end(&wb_xml, element_start, "sheet");
         let mut result = wb_xml[..element_start].to_string();
         result.push_str(&wb_xml[element_end..]);
 
-        package.write_part_xml("xl/workbook.xml", &result)
+        package
+            .write_part_xml("xl/workbook.xml", &result)
             .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     }
 
@@ -112,29 +125,38 @@ pub fn move_cell(
 ) -> Result<String, HandlerError> {
     let source_pc = navigation::parse_path(source)?;
 
-    let sheet_name = source_pc.sheet_name
-        .ok_or_else(|| HandlerError::InvalidPath("move source requires a sheet name".to_string()))?;
-    let source_ref = source_pc.cell_ref
-        .ok_or_else(|| HandlerError::InvalidPath("move source requires a cell reference".to_string()))?;
+    let sheet_name = source_pc.sheet_name.ok_or_else(|| {
+        HandlerError::InvalidPath("move source requires a sheet name".to_string())
+    })?;
+    let source_ref = source_pc.cell_ref.ok_or_else(|| {
+        HandlerError::InvalidPath("move source requires a cell reference".to_string())
+    })?;
 
     // Determine target
     let target_path = target_parent.unwrap_or("/");
     let target_pc = navigation::parse_path(target_path)?;
 
     let target_sheet = target_pc.sheet_name.unwrap_or(sheet_name.clone());
-    let target_ref = target_pc.cell_ref
-        .ok_or_else(|| HandlerError::InvalidPath("move target requires a cell reference".to_string()))?;
+    let target_ref = target_pc.cell_ref.ok_or_else(|| {
+        HandlerError::InvalidPath("move target requires a cell reference".to_string())
+    })?;
 
     // 1. Copy cell content to target
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
-    let src_ws = model.sheets.iter()
+    let src_ws = model
+        .sheets
+        .iter()
         .find(|s| s.name == sheet_name)
         .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
-    let src_cell = src_ws.cells.get(&(source_ref.row, source_ref.col))
-        .ok_or_else(|| HandlerError::PathNotFound(format!("cell {}{}", sheet_name, source_ref.to_string_ref())))?;
+    let src_cell = src_ws
+        .cells
+        .get(&(source_ref.row, source_ref.col))
+        .ok_or_else(|| {
+            HandlerError::PathNotFound(format!("cell {}{}", sheet_name, source_ref.to_string_ref()))
+        })?;
 
     // Build properties from source cell
     let mut props = HashMap::new();
@@ -166,26 +188,35 @@ pub fn copy_cell(
 ) -> Result<String, HandlerError> {
     let source_pc = navigation::parse_path(source)?;
 
-    let sheet_name = source_pc.sheet_name
-        .ok_or_else(|| HandlerError::InvalidPath("copy source requires a sheet name".to_string()))?;
-    let source_ref = source_pc.cell_ref
-        .ok_or_else(|| HandlerError::InvalidPath("copy source requires a cell reference".to_string()))?;
+    let sheet_name = source_pc.sheet_name.ok_or_else(|| {
+        HandlerError::InvalidPath("copy source requires a sheet name".to_string())
+    })?;
+    let source_ref = source_pc.cell_ref.ok_or_else(|| {
+        HandlerError::InvalidPath("copy source requires a cell reference".to_string())
+    })?;
 
     let target_pc = navigation::parse_path(target_parent)?;
 
     let target_sheet = target_pc.sheet_name.unwrap_or(sheet_name.clone());
-    let target_ref = target_pc.cell_ref
-        .ok_or_else(|| HandlerError::InvalidPath("copy target requires a cell reference".to_string()))?;
+    let target_ref = target_pc.cell_ref.ok_or_else(|| {
+        HandlerError::InvalidPath("copy target requires a cell reference".to_string())
+    })?;
 
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
-    let src_ws = model.sheets.iter()
+    let src_ws = model
+        .sheets
+        .iter()
         .find(|s| s.name == sheet_name)
         .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
-    let src_cell = src_ws.cells.get(&(source_ref.row, source_ref.col))
-        .ok_or_else(|| HandlerError::PathNotFound(format!("cell {}{}", sheet_name, source_ref.to_string_ref())))?;
+    let src_cell = src_ws
+        .cells
+        .get(&(source_ref.row, source_ref.col))
+        .ok_or_else(|| {
+            HandlerError::PathNotFound(format!("cell {}{}", sheet_name, source_ref.to_string_ref()))
+        })?;
 
     let mut props = HashMap::new();
     if let Some(v) = &src_cell.raw_value {
@@ -207,7 +238,10 @@ pub fn copy_cell(
 /// Find the end position of an XML element (handles both self-closing and regular closing tags).
 fn find_element_end(xml: &str, start: usize, tag: &str) -> usize {
     // Check if self-closing: look for /> before >
-    let first_gt = xml[start..].find('>').map(|pos| start + pos).unwrap_or(xml.len());
+    let first_gt = xml[start..]
+        .find('>')
+        .map(|pos| start + pos)
+        .unwrap_or(xml.len());
 
     if first_gt > 0 && xml.as_bytes().get(first_gt - 1) == Some(&b'/') {
         // Self-closing element: <tag .../>
@@ -215,7 +249,8 @@ fn find_element_end(xml: &str, start: usize, tag: &str) -> usize {
     } else {
         // Regular element: find </tag>
         let close_tag = format!("</{}>", tag);
-        xml[first_gt..].find(&close_tag)
+        xml[first_gt..]
+            .find(&close_tag)
             .map(|pos| first_gt + pos + close_tag.len())
             .unwrap_or(xml.len())
     }
@@ -230,16 +265,20 @@ pub fn set_cell_properties(
     let pc = navigation::parse_path(path)?;
 
     // Need both sheet name and cell reference for set operations
-    let sheet_name = pc.sheet_name
-        .ok_or_else(|| HandlerError::InvalidPath("set requires a sheet name in the path".to_string()))?;
-    let cell_ref = pc.cell_ref
-        .ok_or_else(|| HandlerError::InvalidPath("set requires a cell reference (e.g. /Sheet1/A1)".to_string()))?;
+    let sheet_name = pc.sheet_name.ok_or_else(|| {
+        HandlerError::InvalidPath("set requires a sheet name in the path".to_string())
+    })?;
+    let cell_ref = pc.cell_ref.ok_or_else(|| {
+        HandlerError::InvalidPath("set requires a cell reference (e.g. /Sheet1/A1)".to_string())
+    })?;
 
     // Parse the model to find the sheet part path
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
-    let ws = model.sheets.iter()
+    let ws = model
+        .sheets
+        .iter()
         .find(|s| s.name == sheet_name)
         .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
@@ -247,7 +286,8 @@ pub fn set_cell_properties(
     let cell_ref_str = cell_ref.to_string_ref();
 
     // Read the current worksheet XML
-    let xml = package.read_part_xml(&part_path)
+    let xml = package
+        .read_part_xml(&part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     let p = detect_namespace_prefix(&xml);
@@ -258,7 +298,13 @@ pub fn set_cell_properties(
     for (key, value) in properties {
         match key.as_str() {
             "value" => {
-                modified_xml = set_cell_value(&modified_xml, &cell_ref_str, value, &model.shared_strings, &p)?;
+                modified_xml = set_cell_value(
+                    &modified_xml,
+                    &cell_ref_str,
+                    value,
+                    &model.shared_strings,
+                    &p,
+                )?;
             }
             "formula" => {
                 modified_xml = set_cell_formula(&modified_xml, &cell_ref_str, value, &p)?;
@@ -273,7 +319,8 @@ pub fn set_cell_properties(
     }
 
     // Write back the modified XML
-    package.write_part_xml(&part_path, &modified_xml)
+    package
+        .write_part_xml(&part_path, &modified_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     Ok(unsupported)
@@ -294,7 +341,13 @@ fn detect_namespace_prefix(xml: &str) -> String {
 
 /// Set the value of a cell in the worksheet XML.
 /// If the cell exists, update its <v> element. If not, insert a new <c> element.
-fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[String], p: &str) -> Result<String, HandlerError> {
+fn set_cell_value(
+    xml: &str,
+    cell_ref: &str,
+    value: &str,
+    shared_strings: &[String],
+    p: &str,
+) -> Result<String, HandlerError> {
     // Check if the value matches an existing shared string
     let ss_idx = shared_strings.iter().position(|s| s == value);
 
@@ -303,7 +356,14 @@ fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[Stri
         ("t=\"s\"".to_string(), idx.to_string())
     } else if value == "TRUE" || value == "FALSE" {
         // Boolean
-        ("t=\"b\"".to_string(), if value == "TRUE" { "1".to_string() } else { "0".to_string() })
+        (
+            "t=\"b\"".to_string(),
+            if value == "TRUE" {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        )
     } else if value.parse::<f64>().is_ok() {
         // Numeric
         ("".to_string(), value.to_string())
@@ -321,7 +381,14 @@ fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[Stri
         let cell_xml = &xml[cell_start..cell_end];
 
         // Build new cell XML
-        let new_cell = build_cell_xml(cell_ref, &t_attr, &v_content, None, &extract_existing_style(cell_xml), p);
+        let new_cell = build_cell_xml(
+            cell_ref,
+            &t_attr,
+            &v_content,
+            None,
+            &extract_existing_style(cell_xml),
+            p,
+        );
 
         let mut result = xml[..cell_start].to_string();
         result.push_str(&new_cell);
@@ -334,7 +401,12 @@ fn set_cell_value(xml: &str, cell_ref: &str, value: &str, shared_strings: &[Stri
 }
 
 /// Set the formula of a cell.
-fn set_cell_formula(xml: &str, cell_ref: &str, formula: &str, p: &str) -> Result<String, HandlerError> {
+fn set_cell_formula(
+    xml: &str,
+    cell_ref: &str,
+    formula: &str,
+    p: &str,
+) -> Result<String, HandlerError> {
     let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
     if let Some(cell_start) = xml.find(&cell_pattern) {
         let cell_end = find_cell_element_end(xml, cell_start, p)?;
@@ -365,7 +437,12 @@ fn set_cell_formula(xml: &str, cell_ref: &str, formula: &str, p: &str) -> Result
 }
 
 /// Set the style index of a cell.
-fn set_cell_style(xml: &str, cell_ref: &str, style_index: &str, p: &str) -> Result<String, HandlerError> {
+fn set_cell_style(
+    xml: &str,
+    cell_ref: &str,
+    style_index: &str,
+    p: &str,
+) -> Result<String, HandlerError> {
     let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
     if let Some(cell_start) = xml.find(&cell_pattern) {
         let cell_end = find_cell_element_end(xml, cell_start, p)?;
@@ -424,9 +501,12 @@ fn build_cell_xml(
 fn find_cell_element_end(xml: &str, start: usize, p: &str) -> Result<usize, HandlerError> {
     // Check for regular closing tag — need to find matching </c>
     // Look for the next '>' after start to see if self-closing or not
-    let first_gt = xml[start..].find('>')
+    let first_gt = xml[start..]
+        .find('>')
         .map(|pos| start + pos)
-        .ok_or_else(|| HandlerError::OperationFailed("malformed XML: no '>' in cell tag".to_string()))?;
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("malformed XML: no '>' in cell tag".to_string())
+        })?;
 
     // Check if the character before '>' is '/' (self-closing)
     if xml.as_bytes().get(first_gt - 1) == Some(&b'/') {
@@ -435,9 +515,15 @@ fn find_cell_element_end(xml: &str, start: usize, p: &str) -> Result<usize, Hand
     } else {
         // Regular element: find </c>
         let close_tag = format!("</{}c>", p);
-        let close_tag_pos = xml[first_gt..].find(&close_tag)
+        let close_tag_pos = xml[first_gt..]
+            .find(&close_tag)
             .map(|pos| first_gt + pos + close_tag.len())
-            .ok_or_else(|| HandlerError::OperationFailed(format!("malformed XML: no '{}' closing tag", close_tag)))?;
+            .ok_or_else(|| {
+                HandlerError::OperationFailed(format!(
+                    "malformed XML: no '{}' closing tag",
+                    close_tag
+                ))
+            })?;
         Ok(close_tag_pos)
     }
 }
@@ -497,7 +583,8 @@ fn modify_style_in_cell(cell_xml: &str, new_style: &str) -> String {
     }
     // No existing style — insert s= attribute into the opening tag
     // Find the first > or /> and insert before it
-    let insert_pos = cell_xml.find("/>")
+    let insert_pos = cell_xml
+        .find("/>")
         .or_else(|| cell_xml.find('>'))
         .unwrap_or(cell_xml.len());
     let mut result = cell_xml[..insert_pos].to_string();
@@ -519,12 +606,14 @@ fn insert_new_cell(
     let new_cell = build_cell_xml(ref_str, t_attr, v_content, formula, style_attr, p);
 
     // Find <sheetData> opening tag
-    let sd_start = xml.find(&format!("<{}sheetData", p))
-        .ok_or_else(|| HandlerError::OperationFailed(format!("no <{}sheetData> element found", p)))?;
+    let sd_start = xml.find(&format!("<{}sheetData", p)).ok_or_else(|| {
+        HandlerError::OperationFailed(format!("no <{}sheetData> element found", p))
+    })?;
 
     // Find the first <row> inside sheetData, or the closing </sheetData>
     let after_sd = &xml[sd_start..];
-    let sd_gt = after_sd.find('>')
+    let sd_gt = after_sd
+        .find('>')
         .map(|pos| sd_start + pos + 1)
         .ok_or_else(|| HandlerError::OperationFailed(format!("malformed <{}sheetData>", p)))?;
 
@@ -539,7 +628,8 @@ fn insert_new_cell(
         let abs_row_start = sd_gt + row_start;
 
         // Find end of row element
-        let row_gt = xml[abs_row_start..].find('>')
+        let row_gt = xml[abs_row_start..]
+            .find('>')
             .map(|pos| abs_row_start + pos + 1)
             .ok_or_else(|| HandlerError::OperationFailed(format!("malformed <{}row>", p)))?;
 
@@ -554,8 +644,9 @@ fn insert_new_cell(
 
         // Insert before </sheetData>
         let sd_end_pattern = format!("</{}sheetData>", p);
-        let sd_end = xml.find(&sd_end_pattern)
-            .ok_or_else(|| HandlerError::OperationFailed(format!("no {} closing tag", sd_end_pattern)))?;
+        let sd_end = xml.find(&sd_end_pattern).ok_or_else(|| {
+            HandlerError::OperationFailed(format!("no {} closing tag", sd_end_pattern))
+        })?;
 
         let mut result = xml[..sd_end].to_string();
         result.push_str(&new_row);

@@ -1,5 +1,5 @@
-use handler_common::HandlerError;
 use crate::reader::PdfReader;
+use handler_common::HandlerError;
 
 /// PDF rendering — converts page text content to SVG for basic preview.
 /// Full rasterization (PNG) requires external tools like poppler/mutool.
@@ -11,7 +11,17 @@ impl PdfRenderer {
     pub fn render_page_to_png(path: &str, page: usize) -> Result<Vec<u8>, HandlerError> {
         // Try using mutool (muPDF command-line tool) if available
         let output = std::process::Command::new("mutool")
-            .args(["draw", "-F", "png", "-o", "-", "-r", "150", path, &page.to_string()])
+            .args([
+                "draw",
+                "-F",
+                "png",
+                "-o",
+                "-",
+                "-r",
+                "150",
+                path,
+                &page.to_string(),
+            ])
             .output();
 
         match output {
@@ -42,7 +52,10 @@ impl PdfRenderer {
         ));
 
         // Background
-        svg.push_str(&format!("  <rect width=\"612\" height=\"{:.0}\" fill=\"white\"/>\n", actual_height));
+        svg.push_str(&format!(
+            "  <rect width=\"612\" height=\"{:.0}\" fill=\"white\"/>\n",
+            actual_height
+        ));
 
         // Render text blocks at their real bbox coordinates (PDF y is bottom-up, SVG y is top-down)
         if let Some(parsed) = reader.parse_page_text_blocks(page) {
@@ -52,7 +65,9 @@ impl PdfRenderer {
                 let svg_x = bbox.x;
                 let svg_y = actual_height - bbox.y;
 
-                let escaped = block.text.replace('&', "&amp;")
+                let escaped = block
+                    .text
+                    .replace('&', "&amp;")
                     .replace('<', "&lt;")
                     .replace('>', "&gt;")
                     .replace('"', "&quot;");
@@ -61,23 +76,31 @@ impl PdfRenderer {
                 let font_size = block.style.font_size.unwrap_or(12.0);
 
                 // Build fill color from style
-                let fill_color = block.style.fill_color.as_ref().map(|c| {
-                    match c {
+                let fill_color = block
+                    .style
+                    .fill_color
+                    .as_ref()
+                    .map(|c| match c {
                         crate::content_stream::PdfColor::Gray(g) => {
                             let v = (g * 255.0) as u8;
                             format!("rgb({},{},{})", v, v, v)
                         }
                         crate::content_stream::PdfColor::Rgb(r, g, b) => {
-                            format!("rgb({},{},{})", (r*255.0) as u8, (g*255.0) as u8, (b*255.0) as u8)
+                            format!(
+                                "rgb({},{},{})",
+                                (r * 255.0) as u8,
+                                (g * 255.0) as u8,
+                                (b * 255.0) as u8
+                            )
                         }
                         crate::content_stream::PdfColor::Cmyk(c, m, y, k) => {
-                            let r = ((1.0-c)*(1.0-k)*255.0) as u8;
-                            let g = ((1.0-m)*(1.0-k)*255.0) as u8;
-                            let b = ((1.0-y)*(1.0-k)*255.0) as u8;
+                            let r = ((1.0 - c) * (1.0 - k) * 255.0) as u8;
+                            let g = ((1.0 - m) * (1.0 - k) * 255.0) as u8;
+                            let b = ((1.0 - y) * (1.0 - k) * 255.0) as u8;
                             format!("rgb({},{},{})", r, g, b)
                         }
-                    }
-                }).unwrap_or("black".to_string());
+                    })
+                    .unwrap_or("black".to_string());
 
                 svg.push_str(&format!(
                     "  <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"{}\" font-size=\"{:.0}\" fill=\"{}\" data-path=\"/page[{}]/text[{}]\">{}</text>\n",

@@ -79,10 +79,7 @@ impl OxmlPackage {
         let content_types = ContentTypes::parse(&content_types_xml)?;
 
         // Parse root relationships
-        let root_rels_xml = parts
-            .get("_rels/.rels")
-            .cloned()
-            .unwrap_or_default();
+        let root_rels_xml = parts.get("_rels/.rels").cloned().unwrap_or_default();
         let root_rels = Relationships::parse(&root_rels_xml)?;
 
         Ok(Self {
@@ -195,8 +192,8 @@ impl OxmlPackage {
         let tmp_path = format!("{}.new", self.file_path);
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = zip::ZipWriter::new(file);
-        let options = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
         for (path, content) in &self.parts {
             writer.start_file(path, options)?;
@@ -227,8 +224,8 @@ impl OxmlPackage {
     pub fn save_as(&mut self, path: &str) -> Result<(), PackageError> {
         let file = std::fs::File::create(path)?;
         let mut writer = ZipWriter::new(file);
-        let options = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
         for (part_path, content) in &self.parts {
             writer.start_file(part_path, options)?;

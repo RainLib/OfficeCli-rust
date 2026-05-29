@@ -51,7 +51,8 @@ pub struct SetCommand {
 pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, true)?;
 
-    let mut properties: HashMap<String, String> = cmd.properties
+    let mut properties: HashMap<String, String> = cmd
+        .properties
         .iter()
         .filter_map(|p| {
             let parts: Vec<&str> = p.splitn(2, '=').collect();
@@ -80,7 +81,9 @@ pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, Handl
             .map_err(|e| HandlerError::InvalidArgument(format!("invalid --range-paths: {}", e)))?;
         properties.insert("range_paths".to_string(), rp.clone());
     } else if cmd.path.is_none() {
-        return Err(HandlerError::InvalidArgument("either element path or --range-paths is required".to_string()));
+        return Err(HandlerError::InvalidArgument(
+            "either element path or --range-paths is required".to_string(),
+        ));
     }
 
     let path_str = if cmd.range_paths.is_some() {

@@ -1,9 +1,9 @@
-use handler_common::HandlerError;
-use lopdf::Document as LopdfDocument;
-use lopdf::ObjectId;
 use crate::content_stream::{
     parse_page_content_stream, pick_fonts_for_text, FontSegment, PdfColor,
 };
+use handler_common::HandlerError;
+use lopdf::Document as LopdfDocument;
+use lopdf::ObjectId;
 
 /// Build the replacement token sequence for the Tj line based on font segments.
 /// If a single segment with the original font, just returns `[encoded_operand, "Tj"]`.
@@ -60,20 +60,25 @@ pub fn replace_text_at_path(
     preferred_font: Option<&str>,
 ) -> Result<(), HandlerError> {
     let pages = doc.get_pages();
-    let page_id = *pages.get(&(page_num as u32))
+    let page_id = *pages
+        .get(&(page_num as u32))
         .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
-    let content = doc.get_page_content(page_id)
+    let content = doc
+        .get_page_content(page_id)
         .map_err(|e| HandlerError::OperationFailed(format!("failed to get page content: {}", e)))?;
 
-    let parsed = parse_page_content_stream(&content, page_id, doc)
-        .map_err(|e| HandlerError::OperationFailed(format!("failed to parse content stream: {}", e)))?;
+    let parsed = parse_page_content_stream(&content, page_id, doc).map_err(|e| {
+        HandlerError::OperationFailed(format!("failed to parse content stream: {}", e))
+    })?;
 
     let block_idx = text_index - 1;
     if block_idx >= parsed.text_blocks.len() {
         return Err(HandlerError::PathNotFound(format!(
             "text[{}] not found (page {} has {} text blocks)",
-            text_index, page_num, parsed.text_blocks.len()
+            text_index,
+            page_num,
+            parsed.text_blocks.len()
         )));
     }
 
@@ -84,7 +89,9 @@ pub fn replace_text_at_path(
     // the original content will still scale our re-emitted Tf; writing the
     // effective (already-scaled) size here would compound Tm twice and blow
     // up the rendered font size.
-    let orig_size = target_block.style.raw_font_size
+    let orig_size = target_block
+        .style
+        .raw_font_size
         .or(target_block.style.font_size)
         .unwrap_or(1.0);
 
@@ -113,7 +120,11 @@ pub fn replace_text_at_path(
             line_tokens.get(op_idx + 1).map(|s| s.as_str()),
             Some("Tj") | Some("TJ")
         );
-        let end = if consume_extra { op_idx + 2 } else { op_idx + 1 };
+        let end = if consume_extra {
+            op_idx + 2
+        } else {
+            op_idx + 1
+        };
         line_tokens.splice(op_idx..end, new_tokens);
         modified_lines[target_block.text_line_index] = line_tokens.join(" ");
     } else {
@@ -142,18 +153,24 @@ pub fn replace_text_with_style(
     bg_color: Option<&PdfColor>,
 ) -> Result<(), HandlerError> {
     let pages = doc.get_pages();
-    let page_id = *pages.get(&(page_num as u32))
+    let page_id = *pages
+        .get(&(page_num as u32))
         .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
-    let content = doc.get_page_content(page_id)
+    let content = doc
+        .get_page_content(page_id)
         .map_err(|e| HandlerError::OperationFailed(format!("failed to get page content: {}", e)))?;
 
-    let parsed = parse_page_content_stream(&content, page_id, doc)
-        .map_err(|e| HandlerError::OperationFailed(format!("failed to parse content stream: {}", e)))?;
+    let parsed = parse_page_content_stream(&content, page_id, doc).map_err(|e| {
+        HandlerError::OperationFailed(format!("failed to parse content stream: {}", e))
+    })?;
 
     let block_idx = text_index - 1;
     if block_idx >= parsed.text_blocks.len() {
-        return Err(HandlerError::PathNotFound(format!("text[{}] not found", text_index)));
+        return Err(HandlerError::PathNotFound(format!(
+            "text[{}] not found",
+            text_index
+        )));
     }
 
     let target_block = parsed.text_blocks[block_idx].clone();
@@ -173,14 +190,23 @@ pub fn replace_text_with_style(
         .unwrap_or(12.0);
 
     if font_name.is_some() || font_size.is_some() {
-        style_lines.push(format!("/{} {} Tf", effective_font, format_size(effective_size)));
+        style_lines.push(format!(
+            "/{} {} Tf",
+            effective_font,
+            format_size(effective_size)
+        ));
     }
 
     if let Some(color) = fill_color {
         match color {
             PdfColor::Gray(g) => style_lines.push(format!("{} g {} G", g, g)),
-            PdfColor::Rgb(r, g, b) => style_lines.push(format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b)),
-            PdfColor::Cmyk(c, m, y, k) => style_lines.push(format!("{} {} {} {} k {} {} {} {} K", c, m, y, k, c, m, y, k)),
+            PdfColor::Rgb(r, g, b) => {
+                style_lines.push(format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b))
+            }
+            PdfColor::Cmyk(c, m, y, k) => style_lines.push(format!(
+                "{} {} {} {} k {} {} {} {} K",
+                c, m, y, k, c, m, y, k
+            )),
         }
     }
 
@@ -193,14 +219,16 @@ pub fn replace_text_with_style(
 
     // Build restore lines to reset the original style for subsequent blocks
     let mut restore_lines = Vec::new();
-    let has_subsequent = parsed.text_blocks[block_idx + 1..]
-        .iter()
-        .any(|b| b.bt_start_line == target_block.bt_start_line && b.bt_end_line == target_block.bt_end_line);
+    let has_subsequent = parsed.text_blocks[block_idx + 1..].iter().any(|b| {
+        b.bt_start_line == target_block.bt_start_line && b.bt_end_line == target_block.bt_end_line
+    });
 
     if has_subsequent {
         if font_name.is_some() || font_size.is_some() {
             let orig_font = target_block.style.font_name.as_deref().unwrap_or("F1");
-            let orig_size = target_block.style.raw_font_size
+            let orig_size = target_block
+                .style
+                .raw_font_size
                 .or(target_block.style.font_size)
                 .unwrap_or(12.0);
             restore_lines.push(format!("/{} {} Tf", orig_font, format_size(orig_size)));
@@ -209,8 +237,13 @@ pub fn replace_text_with_style(
             if let Some(ref orig_color) = target_block.style.fill_color {
                 match orig_color {
                     PdfColor::Gray(g) => restore_lines.push(format!("{} g {} G", g, g)),
-                    PdfColor::Rgb(r, g, b) => restore_lines.push(format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b)),
-                    PdfColor::Cmyk(c, m, y, k) => restore_lines.push(format!("{} {} {} {} k {} {} {} {} K", c, m, y, k, c, m, y, k)),
+                    PdfColor::Rgb(r, g, b) => {
+                        restore_lines.push(format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b))
+                    }
+                    PdfColor::Cmyk(c, m, y, k) => restore_lines.push(format!(
+                        "{} {} {} {} k {} {} {} {} K",
+                        c, m, y, k, c, m, y, k
+                    )),
                 }
             }
         }
@@ -228,7 +261,13 @@ pub fn replace_text_with_style(
         .unwrap_or_else(|| target_block.text.clone());
 
     let mut missing: Vec<char> = Vec::new();
-    let segments = pick_fonts_for_text(doc, page_id, Some(&effective_font), &effective_text, &mut missing)?;
+    let segments = pick_fonts_for_text(
+        doc,
+        page_id,
+        Some(&effective_font),
+        &effective_text,
+        &mut missing,
+    )?;
     if !missing.is_empty() {
         return Err(HandlerError::OperationFailed(format!(
             "characters not encodable in any page font: {}. Provide --prop fontFile=<path> or --prop font=<name> to override.",
@@ -252,7 +291,11 @@ pub fn replace_text_with_style(
             line_tokens.get(op_idx + 1).map(|s| s.as_str()),
             Some("Tj") | Some("TJ")
         );
-        let end = if consume_extra { op_idx + 2 } else { op_idx + 1 };
+        let end = if consume_extra {
+            op_idx + 2
+        } else {
+            op_idx + 1
+        };
         line_tokens.splice(op_idx..end, final_tokens);
         modified_lines[target_block.text_line_index] = line_tokens.join(" ");
     } else {
@@ -295,10 +338,16 @@ pub fn replace_text_with_style(
     Ok(())
 }
 
-fn write_content_to_page(doc: &mut LopdfDocument, page_id: ObjectId, content: &[u8]) -> Result<(), HandlerError> {
+fn write_content_to_page(
+    doc: &mut LopdfDocument,
+    page_id: ObjectId,
+    content: &[u8],
+) -> Result<(), HandlerError> {
     let content_ids = doc.get_page_contents(page_id);
     if content_ids.is_empty() {
-        return Err(HandlerError::OperationFailed("page has no content streams".to_string()));
+        return Err(HandlerError::OperationFailed(
+            "page has no content streams".to_string(),
+        ));
     }
 
     // Write modified content to the first stream
@@ -317,7 +366,9 @@ fn write_content_to_page(doc: &mut LopdfDocument, page_id: ObjectId, content: &[
             if stream.compress().is_err() {
                 // Fallback: if compression fails, keep uncompressed but
                 // update Length to match the raw content.
-                stream.dict.set("Length", lopdf::Object::Integer(content.len() as i64));
+                stream
+                    .dict
+                    .set("Length", lopdf::Object::Integer(content.len() as i64));
             }
         }
     }
@@ -343,10 +394,12 @@ pub fn replace_text_on_page(
     new_text: &str,
 ) -> Result<(), HandlerError> {
     let pages = doc.get_pages();
-    let page_id = pages.get(&(page_num as u32))
+    let page_id = pages
+        .get(&(page_num as u32))
         .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
-    let content = doc.get_page_content(*page_id)
+    let content = doc
+        .get_page_content(*page_id)
         .map_err(|e| HandlerError::OperationFailed(format!("failed to get page content: {}", e)))?;
 
     let content_str = String::from_utf8_lossy(&content);
@@ -356,7 +409,12 @@ pub fn replace_text_on_page(
     Ok(())
 }
 
-fn blanket_replace_strings(doc: &LopdfDocument, page_id: ObjectId, stream: &str, new_text: &str) -> Result<String, HandlerError> {
+fn blanket_replace_strings(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    stream: &str,
+    new_text: &str,
+) -> Result<String, HandlerError> {
     let mut result = String::new();
     let mut in_text_object = false;
     let mut active_font: Option<String> = None;
@@ -364,9 +422,23 @@ fn blanket_replace_strings(doc: &LopdfDocument, page_id: ObjectId, stream: &str,
 
     for line in stream.lines() {
         let trimmed = line.trim();
-        if trimmed == "BT" { in_text_object = true; result.push_str(line); result.push('\n'); continue; }
-        if trimmed == "ET" { in_text_object = false; result.push_str(line); result.push('\n'); continue; }
-        if !in_text_object { result.push_str(line); result.push('\n'); continue; }
+        if trimmed == "BT" {
+            in_text_object = true;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        if trimmed == "ET" {
+            in_text_object = false;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        if !in_text_object {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
 
         if trimmed.ends_with(" Tf") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -385,7 +457,13 @@ fn blanket_replace_strings(doc: &LopdfDocument, page_id: ObjectId, stream: &str,
                 || (string_part.starts_with('<') && string_part.ends_with('>'))
             {
                 let mut missing = Vec::new();
-                let segments = pick_fonts_for_text(doc, page_id, active_font.as_deref(), new_text, &mut missing)?;
+                let segments = pick_fonts_for_text(
+                    doc,
+                    page_id,
+                    active_font.as_deref(),
+                    new_text,
+                    &mut missing,
+                )?;
                 if !missing.is_empty() {
                     return Err(HandlerError::OperationFailed(format!(
                         "characters not encodable in any page font: {}",
@@ -396,10 +474,12 @@ fn blanket_replace_strings(doc: &LopdfDocument, page_id: ObjectId, stream: &str,
                 result.push_str(&tokens.join(" "));
                 result.push('\n');
             } else {
-                result.push_str(line); result.push('\n');
+                result.push_str(line);
+                result.push('\n');
             }
         } else {
-            result.push_str(line); result.push('\n');
+            result.push_str(line);
+            result.push('\n');
         }
     }
     Ok(result)
@@ -424,17 +504,25 @@ pub fn delete_page(doc: &mut LopdfDocument, page_num: usize) -> Result<(), Handl
 /// Parse a text block path like /page[N]/text[M] into (page_num, text_index).
 fn parse_text_block_path(path: &str) -> Option<(usize, usize)> {
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
 
     let page_part = parts[0];
-    if !page_part.starts_with("page") { return None; }
-    let page_num = page_part.strip_prefix("page[")
+    if !page_part.starts_with("page") {
+        return None;
+    }
+    let page_num = page_part
+        .strip_prefix("page[")
         .and_then(|s| s.strip_suffix("]"))
         .and_then(|s| s.parse::<usize>().ok())?;
 
     let text_part = parts[1];
-    if !text_part.starts_with("text") { return None; }
-    let text_index = text_part.strip_prefix("text[")
+    if !text_part.starts_with("text") {
+        return None;
+    }
+    let text_index = text_part
+        .strip_prefix("text[")
         .and_then(|s| s.strip_suffix("]"))
         .and_then(|s| s.parse::<usize>().ok())?;
 
@@ -455,7 +543,9 @@ pub fn apply_range_text_colors(
         match col {
             PdfColor::Gray(g) => format!("{} g {} G", g, g),
             PdfColor::Rgb(r, g, b) => format!("{} {} {} rg {} {} {} RG", r, g, b, r, g, b),
-            PdfColor::Cmyk(c, m, y, k) => format!("{} {} {} {} k {} {} {} {} K", c, m, y, k, c, m, y, k),
+            PdfColor::Cmyk(c, m, y, k) => {
+                format!("{} {} {} {} k {} {} {} {} K", c, m, y, k, c, m, y, k)
+            }
         }
     };
 
@@ -469,14 +559,17 @@ pub fn apply_range_text_colors(
 
     for (page_num, page_segs) in page_groups {
         let pages = doc.get_pages();
-        let page_id = *pages.get(&(page_num as u32))
+        let page_id = *pages
+            .get(&(page_num as u32))
             .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
-        let content = doc.get_page_content(page_id)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to get page content: {}", e)))?;
+        let content = doc.get_page_content(page_id).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to get page content: {}", e))
+        })?;
 
-        let parsed = parse_page_content_stream(&content, page_id, doc)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to parse content stream: {}", e)))?;
+        let parsed = parse_page_content_stream(&content, page_id, doc).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to parse content stream: {}", e))
+        })?;
 
         let mut modified_lines = parsed.lines.clone();
 
@@ -496,7 +589,8 @@ pub fn apply_range_text_colors(
                 let end = seg.end.unwrap_or(char_count).min(char_count).max(start);
 
                 let prefix_chars: String = block.text.chars().take(start).collect();
-                let selected_chars: String = block.text.chars().skip(start).take(end - start).collect();
+                let selected_chars: String =
+                    block.text.chars().skip(start).take(end - start).collect();
                 let suffix_chars: String = block.text.chars().skip(end).collect();
 
                 let font_name = block.style.font_name.as_deref().unwrap_or("F1");
@@ -504,7 +598,12 @@ pub fn apply_range_text_colors(
                 let mut ops = Vec::new();
 
                 if !prefix_chars.is_empty() {
-                    let enc = crate::content_stream::encode_chunk_with_font(doc, page_id, font_name, &prefix_chars)?;
+                    let enc = crate::content_stream::encode_chunk_with_font(
+                        doc,
+                        page_id,
+                        font_name,
+                        &prefix_chars,
+                    )?;
                     ops.push(format!("{} Tj", enc));
                 }
 
@@ -512,16 +611,30 @@ pub fn apply_range_text_colors(
                 ops.push(format_color_op(color));
 
                 if !selected_chars.is_empty() {
-                    let enc = crate::content_stream::encode_chunk_with_font(doc, page_id, font_name, &selected_chars)?;
+                    let enc = crate::content_stream::encode_chunk_with_font(
+                        doc,
+                        page_id,
+                        font_name,
+                        &selected_chars,
+                    )?;
                     ops.push(format!("{} Tj", enc));
                 }
 
                 // Restore original color
-                let orig_color = block.style.fill_color.clone().unwrap_or(PdfColor::Gray(0.0));
+                let orig_color = block
+                    .style
+                    .fill_color
+                    .clone()
+                    .unwrap_or(PdfColor::Gray(0.0));
                 ops.push(format_color_op(&orig_color));
 
                 if !suffix_chars.is_empty() {
-                    let enc = crate::content_stream::encode_chunk_with_font(doc, page_id, font_name, &suffix_chars)?;
+                    let enc = crate::content_stream::encode_chunk_with_font(
+                        doc,
+                        page_id,
+                        font_name,
+                        &suffix_chars,
+                    )?;
                     ops.push(format!("{} Tj", enc));
                 }
 
@@ -535,8 +648,12 @@ pub fn apply_range_text_colors(
                         line_tokens.get(op_idx + 1).map(|s| s.as_str()),
                         Some("Tj") | Some("TJ")
                     );
-                    let end_token = if consume_extra { op_idx + 2 } else { op_idx + 1 };
-                    
+                    let end_token = if consume_extra {
+                        op_idx + 2
+                    } else {
+                        op_idx + 1
+                    };
+
                     let replacement = ops.join(" ");
                     line_tokens.splice(op_idx..end_token, vec![replacement]);
                     modified_lines[block.text_line_index] = line_tokens.join(" ");
@@ -546,8 +663,9 @@ pub fn apply_range_text_colors(
 
         // Save page content
         let new_content = modified_lines.join("\n").into_bytes();
-        doc.change_page_content(page_id, new_content)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to save page content: {}", e)))?;
+        doc.change_page_content(page_id, new_content).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to save page content: {}", e))
+        })?;
     }
 
     Ok(())
@@ -571,14 +689,17 @@ pub fn apply_range_highlights(
 
     for (page_num, page_segs) in page_groups {
         let pages = doc.get_pages();
-        let page_id = *pages.get(&(page_num as u32))
+        let page_id = *pages
+            .get(&(page_num as u32))
             .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
-        let content = doc.get_page_content(page_id)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to get page content: {}", e)))?;
+        let content = doc.get_page_content(page_id).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to get page content: {}", e))
+        })?;
 
-        let parsed = parse_page_content_stream(&content, page_id, doc)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to parse content stream: {}", e)))?;
+        let parsed = parse_page_content_stream(&content, page_id, doc).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to parse content stream: {}", e))
+        })?;
 
         let mut rects = Vec::new();
 
@@ -624,7 +745,8 @@ pub fn apply_range_highlights(
                     );
 
                     // Selected width
-                    let selected_chars: String = block.text.chars().skip(start).take(end - start).collect();
+                    let selected_chars: String =
+                        block.text.chars().skip(start).take(end - start).collect();
                     let selected_width = crate::content_stream::estimate_text_width(
                         &selected_chars,
                         fi,
@@ -633,25 +755,25 @@ pub fn apply_range_highlights(
                         word_spacing,
                     );
 
-                    (
-                        block.bbox.x + prefix_width,
-                        selected_width,
-                    )
+                    (block.bbox.x + prefix_width, selected_width)
                 } else {
                     // Fallback to proportional split
                     let ratio_start = start as f32 / char_count as f32;
                     let ratio_end = end as f32 / char_count as f32;
                     let prefix_width = block.bbox.width * ratio_start;
                     let selected_width = block.bbox.width * (ratio_end - ratio_start);
-                    (
-                        block.bbox.x + prefix_width,
-                        selected_width,
-                    )
+                    (block.bbox.x + prefix_width, selected_width)
                 };
 
-                eprintln!("[DEBUG highlight] block.bbox=({},{},{},{}), sub_bbox_x={}, sub_bbox_width={}", 
-                    block.bbox.x, block.bbox.y, block.bbox.width, block.bbox.height,
-                    sub_bbox_x, sub_bbox_width);
+                eprintln!(
+                    "[DEBUG highlight] block.bbox=({},{},{},{}), sub_bbox_x={}, sub_bbox_width={}",
+                    block.bbox.x,
+                    block.bbox.y,
+                    block.bbox.width,
+                    block.bbox.height,
+                    sub_bbox_x,
+                    sub_bbox_width
+                );
                 rects.push(crate::content_stream::BBox {
                     x: sub_bbox_x,
                     y: block.bbox.y,
@@ -674,7 +796,7 @@ pub fn apply_range_highlights(
         let mut y_min = f32::MAX;
         let mut x_max = f32::MIN;
         let mut y_max = f32::MIN;
-        
+
         let mut quad_points = Vec::new();
         for rect in &rects {
             x_min = x_min.min(rect.x);
@@ -703,12 +825,15 @@ pub fn apply_range_highlights(
             quad_points.push(lopdf::Object::Real(y_br as f32));
         }
 
-        annot_dict.set("Rect", lopdf::Object::Array(vec![
-            lopdf::Object::Real(x_min as f32),
-            lopdf::Object::Real(y_min as f32),
-            lopdf::Object::Real(x_max as f32),
-            lopdf::Object::Real(y_max as f32),
-        ]));
+        annot_dict.set(
+            "Rect",
+            lopdf::Object::Array(vec![
+                lopdf::Object::Real(x_min as f32),
+                lopdf::Object::Real(y_min as f32),
+                lopdf::Object::Real(x_max as f32),
+                lopdf::Object::Real(y_max as f32),
+            ]),
+        );
         annot_dict.set("QuadPoints", lopdf::Object::Array(quad_points));
 
         let (r, g, b) = match color {
@@ -721,11 +846,14 @@ pub fn apply_range_highlights(
                 (r, g, b)
             }
         };
-        annot_dict.set("C", lopdf::Object::Array(vec![
-            lopdf::Object::Real(r as f32),
-            lopdf::Object::Real(g as f32),
-            lopdf::Object::Real(b as f32),
-        ]));
+        annot_dict.set(
+            "C",
+            lopdf::Object::Array(vec![
+                lopdf::Object::Real(r as f32),
+                lopdf::Object::Real(g as f32),
+                lopdf::Object::Real(b as f32),
+            ]),
+        );
 
         // 1. Check if "Annots" exists on the page (immutable borrow of doc)
         let mut has_annots = false;

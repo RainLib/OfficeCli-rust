@@ -1,5 +1,5 @@
-use handler_common::HandlerError;
 use clap::Args;
+use handler_common::HandlerError;
 
 /// Create a blank document (docx, xlsx, pptx, pdf)
 #[derive(Args)]
@@ -12,7 +12,10 @@ pub struct CreateCommand {
     pub format: Option<String>,
 }
 
-pub fn handle_create(cmd: CreateCommand, format: handler_common::OutputFormat) -> Result<String, HandlerError> {
+pub fn handle_create(
+    cmd: CreateCommand,
+    format: handler_common::OutputFormat,
+) -> Result<String, HandlerError> {
     let ext = cmd.format.unwrap_or_else(|| {
         std::path::Path::new(&cmd.file)
             .extension()
@@ -25,7 +28,12 @@ pub fn handle_create(cmd: CreateCommand, format: handler_common::OutputFormat) -
         "docx" => create_blank_docx(&cmd.file)?,
         "xlsx" => create_blank_xlsx(&cmd.file)?,
         "pptx" => create_blank_pptx(&cmd.file)?,
-        other => return Err(HandlerError::UnsupportedMode(format!("create {} not supported", other))),
+        other => {
+            return Err(HandlerError::UnsupportedMode(format!(
+                "create {} not supported",
+                other
+            )))
+        }
     };
 
     Ok(result)
@@ -61,7 +69,8 @@ fn create_blank_docx(path: &str) -> Result<String, HandlerError> {
     pkg.add_part("word/document.xml", document_xml.as_bytes());
     pkg.add_part("word/_rels/document.xml.rels", b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"/>");
 
-    pkg.save_as(path).map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    pkg.save_as(path)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     Ok(format!("Created blank Word document: {}", path))
 }
 
@@ -124,7 +133,8 @@ fn create_blank_xlsx(path: &str) -> Result<String, HandlerError> {
     pkg.add_part("xl/sharedStrings.xml", shared_strings.as_bytes());
     pkg.add_part("xl/styles.xml", styles.as_bytes());
 
-    pkg.save_as(path).map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    pkg.save_as(path)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     Ok(format!("Created blank Excel workbook: {}", path))
 }
 
@@ -179,6 +189,7 @@ fn create_blank_pptx(path: &str) -> Result<String, HandlerError> {
     pkg.add_part("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes());
     pkg.add_part("ppt/slides/slide1.xml", slide_xml.as_bytes());
 
-    pkg.save_as(path).map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    pkg.save_as(path)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     Ok(format!("Created blank PowerPoint presentation: {}", path))
 }

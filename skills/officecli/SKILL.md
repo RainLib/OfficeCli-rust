@@ -115,7 +115,7 @@ officecli validate <file>             # Validate against OpenXML schema
 | `issues` | Formatting/content/structure problems | `--type format\|content\|structure`, `--limit N` |
 | `text` | Plain text extraction | `--start N --end N`, `--max-lines N` |
 | `annotated` | Text with formatting annotations | |
-| `html` | Static HTML snapshot — same renderer as `watch`, no server needed | `--browser`, `--page N` (docx), `--start N --end N` (pptx) |
+| `html` | Static HTML snapshot — same renderer as `watch`, no server needed | `--browser`, `--page N` (pdf/docx), `--start N --end N` (pptx) |
 | `screenshot` / `svg` / `pdf` / `forms` | PNG via headless browser / SVG (pptx/pdf) / PDF via exporter plugin / form-fields JSON via format-handler plugin | `-o`, `--screenshot-width/-height`, pptx `--grid N` |
 
 Use `view html` for one-shot snapshots (CI artifacts, archival, diffing); use `watch` when you need live refresh or browser-side click-to-select.

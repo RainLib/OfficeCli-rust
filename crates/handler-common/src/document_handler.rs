@@ -1,5 +1,5 @@
-use crate::*;
 use crate::output_format::{BinaryInfo, RawOptions, ViewOptions};
+use crate::*;
 use std::collections::HashMap;
 
 /// Common interface for all document types (Word/Excel/PowerPoint/PDF).
@@ -38,7 +38,11 @@ pub trait DocumentHandler: Send {
     // === Query Layer ===
     fn get(&self, path: &str, depth: usize) -> Result<DocumentNode, HandlerError>;
     fn query(&self, selector: &str) -> Result<Vec<DocumentNode>, HandlerError>;
-    fn set(&self, path: &str, properties: &HashMap<String, String>) -> Result<Vec<String>, HandlerError>;
+    fn set(
+        &self,
+        path: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<Vec<String>, HandlerError>;
     fn add(
         &self,
         parent: &str,
@@ -76,7 +80,11 @@ pub trait DocumentHandler: Send {
         properties: Option<&HashMap<String, String>>,
     ) -> Result<(String, String), HandlerError>;
     fn validate(&self) -> Result<Vec<ValidationError>, HandlerError>;
-    fn try_extract_binary(&self, path: &str, dest: &str) -> Result<Option<BinaryInfo>, HandlerError>;
+    fn try_extract_binary(
+        &self,
+        path: &str,
+        dest: &str,
+    ) -> Result<Option<BinaryInfo>, HandlerError>;
     fn save(&self) -> Result<(), HandlerError>;
 
     // === **NEW**: Text Offset Mapping ===

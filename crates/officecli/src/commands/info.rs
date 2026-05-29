@@ -1,5 +1,5 @@
-use handler_common::HandlerError;
 use clap::Args;
+use handler_common::HandlerError;
 
 /// Display tool information and help topics (formats, commands, paths)
 #[derive(Args)]
@@ -8,7 +8,10 @@ pub struct InfoCommand {
     pub topic: Option<String>,
 }
 
-pub fn handle_info(cmd: InfoCommand, _format: handler_common::OutputFormat) -> Result<String, HandlerError> {
+pub fn handle_info(
+    cmd: InfoCommand,
+    _format: handler_common::OutputFormat,
+) -> Result<String, HandlerError> {
     match cmd.topic.as_deref() {
         Some("docx") => Ok("Word document (.docx):\n  Elements: p (paragraph), r (run), tbl (table), tr (row), tc (cell)\n  Paths: /body/p[N], /body/tbl[N]/tr[N]/tc[N]".to_string()),
         Some("xlsx") => Ok("Excel spreadsheet (.xlsx):\n  Elements: sheet, cell, chart, table, pivot\n  Paths: /SheetName/A1, /Sheet1/B5".to_string()),

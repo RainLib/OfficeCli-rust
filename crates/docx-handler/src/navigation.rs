@@ -1,12 +1,15 @@
-use handler_common::{HandlerError, PathSegment, PathAliases};
-use crate::dom_types::{WordDom, WordNode, WordElementType};
+use crate::dom_types::{WordDom, WordElementType, WordNode};
+use handler_common::{HandlerError, PathAliases, PathSegment};
 
 /// Parse a document path string into a list of PathSegments.
 /// Path format: /body/p[3]/r[1] or /body/tbl[2]/tr[1]/tc[3]
 /// Also supports aliases: /body/paragraph[3]/run[1]
 pub fn parse_path(path: &str) -> Result<Vec<PathSegment>, HandlerError> {
     if !path.starts_with('/') {
-        return Err(HandlerError::InvalidPath(format!("path must start with /: {}", path)));
+        return Err(HandlerError::InvalidPath(format!(
+            "path must start with /: {}",
+            path
+        )));
     }
 
     let aliases = PathAliases::new();
@@ -76,12 +79,14 @@ pub fn navigate_to_element<'a>(dom: &'a WordDom, path: &str) -> Result<&'a WordN
 
     let first = &segments[0];
     if first.name != "body" {
-        return Err(HandlerError::InvalidPath(
-            format!("Word paths must start with /body, got: /{}", first.name),
-        ));
+        return Err(HandlerError::InvalidPath(format!(
+            "Word paths must start with /body, got: /{}",
+            first.name
+        )));
     }
 
-    let body = dom.body()
+    let body = dom
+        .body()
         .ok_or_else(|| HandlerError::PathNotFound("body element not found".to_string()))?;
 
     if segments.len() == 1 {
@@ -92,7 +97,10 @@ pub fn navigate_to_element<'a>(dom: &'a WordDom, path: &str) -> Result<&'a WordN
 }
 
 /// Navigate mutable Word DOM tree to find the node at a given path.
-pub fn navigate_to_element_mut<'a>(dom: &'a mut WordDom, path: &str) -> Result<&'a mut WordNode, HandlerError> {
+pub fn navigate_to_element_mut<'a>(
+    dom: &'a mut WordDom,
+    path: &str,
+) -> Result<&'a mut WordNode, HandlerError> {
     let segments = parse_path(path)?;
     if segments.is_empty() {
         return Err(HandlerError::InvalidPath("empty path".to_string()));
@@ -100,13 +108,17 @@ pub fn navigate_to_element_mut<'a>(dom: &'a mut WordDom, path: &str) -> Result<&
 
     let first = &segments[0];
     if first.name != "body" {
-        return Err(HandlerError::InvalidPath(
-            format!("Word paths must start with /body, got: /{}", first.name),
-        ));
+        return Err(HandlerError::InvalidPath(format!(
+            "Word paths must start with /body, got: /{}",
+            first.name
+        )));
     }
 
     // Find body in root children
-    let body_idx = dom.root.children.iter()
+    let body_idx = dom
+        .root
+        .children
+        .iter()
         .position(|c| c.element_type == WordElementType::Body)
         .ok_or_else(|| HandlerError::PathNotFound("body element not found".to_string()))?;
 
@@ -130,23 +142,28 @@ fn navigate_segments<'a>(
     let seg = &segments[0];
     let target_type = resolve_element_type_from_name(&seg.name);
 
-    let matching: Vec<&WordNode> = node.children
+    let matching: Vec<&WordNode> = node
+        .children
         .iter()
         .filter(|c| element_matches_type(c, &target_type, seg))
         .collect();
 
     if matching.is_empty() {
-        return Err(HandlerError::PathNotFound(
-            format!("no {} children at path {}", seg.name, full_path),
-        ));
+        return Err(HandlerError::PathNotFound(format!(
+            "no {} children at path {}",
+            seg.name, full_path
+        )));
     }
 
     let idx = seg.index.unwrap_or(1);
     if idx == 0 || idx > matching.len() {
-        return Err(HandlerError::PathNotFound(
-            format!("index {} out of range for {} at path {} (max: {})",
-                idx, seg.name, full_path, matching.len()),
-        ));
+        return Err(HandlerError::PathNotFound(format!(
+            "index {} out of range for {} at path {} (max: {})",
+            idx,
+            seg.name,
+            full_path,
+            matching.len()
+        )));
     }
 
     navigate_segments(matching[idx - 1], &segments[1..], full_path)
@@ -167,7 +184,8 @@ fn navigate_segments_mut<'a>(
     let idx = seg.index.unwrap_or(1);
 
     // First pass: collect matching child indices (non-mutable scan)
-    let matching_indices: Vec<usize> = node.children
+    let matching_indices: Vec<usize> = node
+        .children
         .iter()
         .enumerate()
         .filter(|(_, c)| element_matches_type(c, &target_type, seg))
@@ -175,16 +193,20 @@ fn navigate_segments_mut<'a>(
         .collect();
 
     if matching_indices.is_empty() {
-        return Err(HandlerError::PathNotFound(
-            format!("no {} children at path {}", seg.name, full_path),
-        ));
+        return Err(HandlerError::PathNotFound(format!(
+            "no {} children at path {}",
+            seg.name, full_path
+        )));
     }
 
     if idx == 0 || idx > matching_indices.len() {
-        return Err(HandlerError::PathNotFound(
-            format!("index {} out of range for {} at path {} (max: {})",
-                idx, seg.name, full_path, matching_indices.len()),
-        ));
+        return Err(HandlerError::PathNotFound(format!(
+            "index {} out of range for {} at path {} (max: {})",
+            idx,
+            seg.name,
+            full_path,
+            matching_indices.len()
+        )));
     }
 
     let child_idx = matching_indices[idx - 1];
@@ -264,7 +286,10 @@ pub fn build_run_path(para_index: usize, run_index: usize) -> String {
 
 /// Build the path string for a table cell.
 pub fn build_cell_path(tbl_index: usize, row_index: usize, cell_index: usize) -> String {
-    format!("/body/tbl[{}]/tr[{}]/tc[{}]", tbl_index, row_index, cell_index)
+    format!(
+        "/body/tbl[{}]/tr[{}]/tc[{}]",
+        tbl_index, row_index, cell_index
+    )
 }
 
 /// Given a path, return the parent path.
@@ -304,7 +329,8 @@ pub fn find_child_index(dom: &WordDom, path: &str) -> usize {
     for i in 1..segments.len() - 1 {
         let seg = &segments[i];
         let target_type = resolve_element_type_from_name(&seg.name);
-        let matching_indices: Vec<usize> = current.children
+        let matching_indices: Vec<usize> = current
+            .children
             .iter()
             .enumerate()
             .filter(|(_, c)| element_matches_type(c, &target_type, seg))

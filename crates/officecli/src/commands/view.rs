@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, OutputFormat, ViewOptions};
 use clap::Args;
+use handler_common::{HandlerError, OutputFormat, ViewOptions};
 
 /// Display document content in various modes (text, outline, annotated, html, svg)
 #[derive(Args)]
@@ -38,7 +38,9 @@ pub fn handle_view(cmd: ViewCommand, format: OutputFormat) -> Result<String, Han
         start_line: cmd.start_line,
         end_line: cmd.end_line,
         max_lines: cmd.max_lines,
-        cols: cmd.cols.map(|c| c.split(',').map(|s| s.to_string()).collect()),
+        cols: cmd
+            .cols
+            .map(|c| c.split(',').map(|s| s.to_string()).collect()),
         page: cmd.page,
     };
 
@@ -49,11 +51,17 @@ pub fn handle_view(cmd: ViewCommand, format: OutputFormat) -> Result<String, Han
         "stats" => handler.view_as_stats(),
         "issues" => {
             let issues = handler.view_as_issues(None, None)?;
-            let lines: Vec<String> = issues.iter().map(|i| format!("[{:?}] {}: {}", i.severity, i.issue_type, i.description)).collect();
+            let lines: Vec<String> = issues
+                .iter()
+                .map(|i| format!("[{:?}] {}: {}", i.severity, i.issue_type, i.description))
+                .collect();
             Ok(lines.join("\n"))
         }
         "html" => handler.view_as_html(opts),
         "svg" => handler.view_as_svg(),
-        other => Err(HandlerError::UnsupportedMode(format!("view mode '{}' not supported by this format", other))),
+        other => Err(HandlerError::UnsupportedMode(format!(
+            "view mode '{}' not supported by this format",
+            other
+        ))),
     }
 }

@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use handler_common::HandlerError;
-use lopdf::{Document as LopdfDocument, ObjectId, Object, Dictionary};
+use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
+use std::collections::{HashMap, HashSet};
 
 /// Bounding box for a text block in PDF coordinate space.
 /// PDF origin is bottom-left, y increases upward.
@@ -141,7 +141,8 @@ pub fn estimate_text_width(
                 code = cid;
             }
         }
-        let w = font_info.char_widths
+        let w = font_info
+            .char_widths
             .get(&code)
             .copied()
             .unwrap_or_else(|| {
@@ -154,7 +155,9 @@ pub fn estimate_text_width(
                 }
             });
         total_width_units += w;
-        if c == ' ' { space_count += 1; }
+        if c == ' ' {
+            space_count += 1;
+        }
     }
 
     let base_width = total_width_units * font_size / 1000.0;
@@ -199,12 +202,14 @@ fn extract_page_fonts(doc: &LopdfDocument, page_id: ObjectId) -> HashMap<String,
 }
 
 fn build_font_info(doc: &LopdfDocument, font_dict: &Dictionary, pdf_name: &str) -> FontInfo {
-    let base_font = font_dict.get(b"BaseFont")
+    let base_font = font_dict
+        .get(b"BaseFont")
         .ok()
         .and_then(|v| v.as_name_str().ok())
         .map(|s| s.to_string());
 
-    let is_cid = font_dict.get(b"Subtype")
+    let is_cid = font_dict
+        .get(b"Subtype")
         .ok()
         .and_then(|v| v.as_name_str().ok())
         .map(|s| s == "Type0")
@@ -251,7 +256,8 @@ fn extract_font_widths(
     let mut widths = HashMap::new();
 
     if is_cid {
-        let dw = font_dict.get(b"DW")
+        let dw = font_dict
+            .get(b"DW")
             .ok()
             .and_then(|v| v.as_float().ok().or(v.as_i64().ok().map(|i| i as f32)))
             .unwrap_or(1000.0);
@@ -265,7 +271,8 @@ fn extract_font_widths(
         }
         (widths, dw)
     } else {
-        let first_char = font_dict.get(b"FirstChar")
+        let first_char = font_dict
+            .get(b"FirstChar")
             .ok()
             .and_then(|v| v.as_i64().ok())
             .unwrap_or(0) as u32;
@@ -274,7 +281,9 @@ fn extract_font_widths(
             if let Ok((_, resolved)) = doc.dereference(w_obj) {
                 if let Object::Array(arr) = resolved {
                     for (i, obj) in arr.iter().enumerate() {
-                        let w = obj.as_float().ok()
+                        let w = obj
+                            .as_float()
+                            .ok()
                             .or(obj.as_i64().ok().map(|v| v as f32))
                             .unwrap_or(default_width);
                         widths.insert(first_char + i as u32, w);
@@ -291,10 +300,14 @@ fn parse_cid_width_array(arr: &[Object], widths: &mut HashMap<u32, f32>) {
     while i < arr.len() {
         if let Some(start) = arr[i].as_i64().ok() {
             i += 1;
-            if i >= arr.len() { break; }
+            if i >= arr.len() {
+                break;
+            }
             if let Object::Array(sub_arr) = &arr[i] {
                 for (j, obj) in sub_arr.iter().enumerate() {
-                    let w = obj.as_float().ok()
+                    let w = obj
+                        .as_float()
+                        .ok()
                         .or(obj.as_i64().ok().map(|v| v as f32))
                         .unwrap_or(600.0);
                     widths.insert(start as u32 + j as u32, w);
@@ -302,8 +315,12 @@ fn parse_cid_width_array(arr: &[Object], widths: &mut HashMap<u32, f32>) {
                 i += 1;
             } else if let Some(end) = arr[i].as_i64().ok() {
                 i += 1;
-                if i >= arr.len() { break; }
-                let w = arr[i].as_float().ok()
+                if i >= arr.len() {
+                    break;
+                }
+                let w = arr[i]
+                    .as_float()
+                    .ok()
                     .or(arr[i].as_i64().ok().map(|v| v as f32))
                     .unwrap_or(600.0);
                 for cid in start..=end {
@@ -325,7 +342,7 @@ fn parse_cid_width_array(arr: &[Object], widths: &mut HashMap<u32, f32>) {
 fn extract_pdf_string_bytes(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
     if s.starts_with('(') && s.ends_with(')') {
-        let inner = &s[1..s.len()-1];
+        let inner = &s[1..s.len() - 1];
         let mut result = Vec::new();
         let mut chars = inner.chars().peekable();
         while let Some(c) = chars.next() {
@@ -343,11 +360,16 @@ fn extract_pdf_string_bytes(s: &str) -> Option<Vec<u8>> {
                         let mut octal = String::from(d);
                         for _ in 0..2 {
                             if let Some(&next) = chars.peek() {
-                                if next.is_ascii_digit() { octal.push(chars.next().unwrap()); }
-                                else { break; }
+                                if next.is_ascii_digit() {
+                                    octal.push(chars.next().unwrap());
+                                } else {
+                                    break;
+                                }
                             }
                         }
-                        if let Ok(code) = u8::from_str_radix(&octal, 8) { result.push(code); }
+                        if let Ok(code) = u8::from_str_radix(&octal, 8) {
+                            result.push(code);
+                        }
                     }
                     Some(other) => {
                         let mut buf = [0; 4];
@@ -366,7 +388,7 @@ fn extract_pdf_string_bytes(s: &str) -> Option<Vec<u8>> {
         }
         Some(result)
     } else if s.starts_with('<') && s.ends_with('>') {
-        Some(decode_hex_string_bytes(&s[1..s.len()-1]))
+        Some(decode_hex_string_bytes(&s[1..s.len() - 1]))
     } else {
         None
     }
@@ -377,7 +399,7 @@ fn decode_hex_string_bytes(hex: &str) -> Vec<u8> {
     let mut result = Vec::new();
     let mut i = 0;
     while i + 2 <= hex.len() {
-        if let Ok(byte) = u8::from_str_radix(&hex[i..i+2], 16) {
+        if let Ok(byte) = u8::from_str_radix(&hex[i..i + 2], 16) {
             result.push(byte);
         }
         i += 2;
@@ -410,7 +432,8 @@ pub fn parse_to_unicode_cmap(cmap_str: &str) -> HashMap<u32, String> {
         }
 
         if in_bfchar {
-            let parts: Vec<&str> = trimmed.split('<')
+            let parts: Vec<&str> = trimmed
+                .split('<')
                 .filter_map(|p| p.split('>').next())
                 .filter(|p| !p.is_empty())
                 .collect();
@@ -425,12 +448,16 @@ pub fn parse_to_unicode_cmap(cmap_str: &str) -> HashMap<u32, String> {
 
         if in_bfrange {
             let has_array = trimmed.contains('[');
-            let parts: Vec<&str> = trimmed.split('<')
+            let parts: Vec<&str> = trimmed
+                .split('<')
                 .filter_map(|p| p.split('>').next())
                 .filter(|p| !p.is_empty())
                 .collect();
             if parts.len() >= 3 {
-                if let (Ok(start), Ok(end)) = (u32::from_str_radix(parts[0], 16), u32::from_str_radix(parts[1], 16)) {
+                if let (Ok(start), Ok(end)) = (
+                    u32::from_str_radix(parts[0], 16),
+                    u32::from_str_radix(parts[1], 16),
+                ) {
                     if has_array {
                         for (idx, hex_val) in parts[2..].iter().enumerate() {
                             let cid = start + idx as u32;
@@ -462,7 +489,7 @@ fn hex_to_string(hex: &str) -> Option<String> {
     let mut u16_chars = Vec::new();
     let mut i = 0;
     while i + 4 <= hex.len() {
-        if let Ok(val) = u16::from_str_radix(&hex[i..i+4], 16) {
+        if let Ok(val) = u16::from_str_radix(&hex[i..i + 4], 16) {
             u16_chars.push(val);
         } else {
             return None;
@@ -487,7 +514,7 @@ fn decode_bytes(
         let mut decoded = String::new();
         let mut i = 0;
         while i + 2 <= bytes.len() {
-            let cid = ((bytes[i] as u32) << 8) | (bytes[i+1] as u32);
+            let cid = ((bytes[i] as u32) << 8) | (bytes[i + 1] as u32);
             if let Some(custom_map) = custom_to_unicode {
                 if let Some(mapped_str) = custom_map.get(&cid) {
                     decoded.push_str(mapped_str);
@@ -520,7 +547,8 @@ fn decode_bytes(
             }
             decoded
         } else if let Some(enc) = encoding {
-            lopdf::Document::decode_text(enc, bytes).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
+            lopdf::Document::decode_text(enc, bytes)
+                .unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
         } else {
             String::from_utf8_lossy(bytes).to_string()
         }
@@ -535,7 +563,12 @@ fn decode_pdf_string(
     is_cid: bool,
 ) -> Option<String> {
     let extracted_bytes = extract_pdf_string_bytes(s)?;
-    Some(decode_bytes(&extracted_bytes, encoding, custom_to_unicode, is_cid))
+    Some(decode_bytes(
+        &extracted_bytes,
+        encoding,
+        custom_to_unicode,
+        is_cid,
+    ))
 }
 
 /// Decode text from a PDF array TJ operator, applying font encoding to each string segment.
@@ -546,9 +579,11 @@ fn decode_pdf_array_text(
     is_cid: bool,
 ) -> Option<String> {
     let s = s.trim();
-    if !s.starts_with('[') || !s.ends_with(']') { return None; }
+    if !s.starts_with('[') || !s.ends_with(']') {
+        return None;
+    }
 
-    let inner = &s[1..s.len()-1];
+    let inner = &s[1..s.len() - 1];
     let bytes = inner.as_bytes();
     let mut result = String::new();
     let mut i = 0;
@@ -561,19 +596,27 @@ fn decode_pdf_array_text(
             i += 1;
             while i < bytes.len() && depth > 0 {
                 let bc = bytes[i] as char;
-                if bc == '(' && (i == 0 || bytes[i-1] as char != '\\') { depth += 1; }
-                else if bc == ')' && (i == 0 || bytes[i-1] as char != '\\') { depth -= 1; }
+                if bc == '(' && (i == 0 || bytes[i - 1] as char != '\\') {
+                    depth += 1;
+                } else if bc == ')' && (i == 0 || bytes[i - 1] as char != '\\') {
+                    depth -= 1;
+                }
                 i += 1;
             }
-            let string_content = std::str::from_utf8(&bytes[start..i-1]).unwrap_or("");
-            if let Some(extracted_bytes) = extract_pdf_string_bytes(&format!("({})", string_content)) {
-                let segment_text = decode_bytes(&extracted_bytes, encoding, custom_to_unicode, is_cid);
+            let string_content = std::str::from_utf8(&bytes[start..i - 1]).unwrap_or("");
+            if let Some(extracted_bytes) =
+                extract_pdf_string_bytes(&format!("({})", string_content))
+            {
+                let segment_text =
+                    decode_bytes(&extracted_bytes, encoding, custom_to_unicode, is_cid);
                 result.push_str(&segment_text);
             }
         } else if c == '<' {
             let start = i + 1;
             i += 1;
-            while i < bytes.len() && bytes[i] as char != '>' { i += 1; }
+            while i < bytes.len() && bytes[i] as char != '>' {
+                i += 1;
+            }
             let hex_content = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
             let extracted_bytes = decode_hex_string_bytes(hex_content);
             let segment_text = decode_bytes(&extracted_bytes, encoding, custom_to_unicode, is_cid);
@@ -583,10 +626,15 @@ fn decode_pdf_array_text(
             i += 1;
             while i < bytes.len() {
                 let bc = bytes[i] as char;
-                if bc.is_ascii_digit() || bc == '.' || bc == '-' { i += 1; }
-                else { break; }
+                if bc.is_ascii_digit() || bc == '.' || bc == '-' {
+                    i += 1;
+                } else {
+                    break;
+                }
             }
-        } else { i += 1; }
+        } else {
+            i += 1;
+        }
     }
     Some(result)
 }
@@ -707,7 +755,8 @@ pub fn encode_chunk_with_font(
             let mut missing = String::new();
             for ch in text.chars() {
                 // Find CID that maps to ch
-                let found_cid = cmap.iter()
+                let found_cid = cmap
+                    .iter()
                     .find(|(_, val)| val.contains(ch))
                     .map(|(cid, _)| *cid);
                 if let Some(cid) = found_cid {
@@ -727,7 +776,10 @@ pub fn encode_chunk_with_font(
         }
 
         let encoding = font.get_font_encoding(doc).map_err(|e| {
-            HandlerError::OperationFailed(format!("failed to resolve encoding for '{}': {:?}", font_name, e))
+            HandlerError::OperationFailed(format!(
+                "failed to resolve encoding for '{}': {:?}",
+                font_name, e
+            ))
         })?;
 
         if let Some(map) = build_unicode_to_cid_map(&encoding) {
@@ -811,7 +863,8 @@ pub fn pick_fonts_for_text(
     if let Ok(fonts) = doc.get_page_fonts(page_id) {
         for (name, font) in fonts {
             let font_name = String::from_utf8_lossy(&name).to_string();
-            let is_sub = font.get(b"BaseFont")
+            let is_sub = font
+                .get(b"BaseFont")
                 .ok()
                 .and_then(|v| v.as_name_str().ok())
                 .map(|s| s.contains('+'))
@@ -872,7 +925,7 @@ pub fn pick_fonts_for_text(
                 return Some(pref.to_string());
             }
         }
-        
+
         // Check other fonts on the page
         for font_name in page_fonts.keys() {
             if Some(font_name.as_str()) == preferred_font {
@@ -1055,7 +1108,8 @@ pub fn tokenize_pdf_line(line: &str) -> Vec<String> {
             //   * anything else       -> single character
             let start = i;
             let first = chars[i];
-            let starts_number = first.is_ascii_digit() || first == '+' || first == '-' || first == '.';
+            let starts_number =
+                first.is_ascii_digit() || first == '+' || first == '-' || first == '.';
             let starts_word = first.is_ascii_alphabetic();
 
             if starts_number {
@@ -1087,8 +1141,6 @@ pub fn tokenize_pdf_line(line: &str) -> Vec<String> {
     }
     tokens
 }
-
-
 
 /// Text state machine for tracking position, font, and style during content stream parsing.
 /// line_x/line_y track the text line start position (Td offsets are relative to this).
@@ -1158,7 +1210,31 @@ impl Default for TextState {
 fn is_pdf_operator(token: &str) -> bool {
     matches!(
         token,
-        "BT" | "ET" | "Tm" | "Td" | "TD" | "T*" | "Tf" | "Tc" | "Tw" | "Tj" | "TJ" | "rg" | "g" | "k" | "q" | "Q" | "cm" | "Do" | "re" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*"
+        "BT" | "ET"
+            | "Tm"
+            | "Td"
+            | "TD"
+            | "T*"
+            | "Tf"
+            | "Tc"
+            | "Tw"
+            | "Tj"
+            | "TJ"
+            | "rg"
+            | "g"
+            | "k"
+            | "q"
+            | "Q"
+            | "cm"
+            | "Do"
+            | "re"
+            | "f"
+            | "F"
+            | "f*"
+            | "B"
+            | "B*"
+            | "b"
+            | "b*"
     )
 }
 
@@ -1263,7 +1339,10 @@ fn add_or_merge_text_block(
 
         if same_y && close_x && same_font && same_size && same_color {
             // If there's a small gap, inject a space character between segments
-            if gap > 0.15 * effective_font_size && !last.text.ends_with(' ') && !text.starts_with(' ') {
+            if gap > 0.15 * effective_font_size
+                && !last.text.ends_with(' ')
+                && !text.starts_with(' ')
+            {
                 last.text.push(' ');
             }
             last.text.push_str(&text);
@@ -1314,19 +1393,33 @@ fn base64_encode(data: &[u8]) -> String {
     let mut i = 0;
     while i < data.len() {
         let b0 = data[i] as usize;
-        let b1 = if i + 1 < data.len() { data[i + 1] as usize } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] as usize } else { 0 };
+        let b1 = if i + 1 < data.len() {
+            data[i + 1] as usize
+        } else {
+            0
+        };
+        let b2 = if i + 2 < data.len() {
+            data[i + 2] as usize
+        } else {
+            0
+        };
 
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
         result.push(ALPHABET[(triple >> 18) & 63] as char);
         result.push(ALPHABET[(triple >> 12) & 63] as char);
 
-        if i + 1 < data.len() { result.push(ALPHABET[(triple >> 6) & 63] as char); }
-        else { result.push('='); }
+        if i + 1 < data.len() {
+            result.push(ALPHABET[(triple >> 6) & 63] as char);
+        } else {
+            result.push('=');
+        }
 
-        if i + 2 < data.len() { result.push(ALPHABET[triple & 63] as char); }
-        else { result.push('='); }
+        if i + 2 < data.len() {
+            result.push(ALPHABET[triple & 63] as char);
+        } else {
+            result.push('=');
+        }
 
         i += 3;
     }
@@ -1358,8 +1451,8 @@ fn write_png_chunk(buf: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
 }
 
 fn encode_png(width: u32, height: u32, rgb_data: &[u8]) -> Option<Vec<u8>> {
-    use flate2::Compression;
     use flate2::write::ZlibEncoder;
+    use flate2::Compression;
     use std::io::Write;
 
     let mut png = Vec::new();
@@ -1401,9 +1494,7 @@ fn convert_to_rgb_png(data: &[u8]) -> Option<Vec<u8>> {
     let (width, height) = (info.width as u32, info.height as u32);
 
     match info.pixel_format {
-        PixelFormat::RGB24 => {
-            encode_png(width, height, &pixels)
-        }
+        PixelFormat::RGB24 => encode_png(width, height, &pixels),
         PixelFormat::CMYK32 => {
             let mut rgb = Vec::with_capacity((width * height * 3) as usize);
             for chunk in pixels.chunks_exact(4) {
@@ -1412,11 +1503,11 @@ fn convert_to_rgb_png(data: &[u8]) -> Option<Vec<u8>> {
                 let m_raw = chunk[1] as f32;
                 let y_raw = chunk[2] as f32;
                 let k_raw = chunk[3] as f32;
-                
+
                 let r = ((c_raw * k_raw) / 255.0) as u8;
                 let g = ((m_raw * k_raw) / 255.0) as u8;
                 let b = ((y_raw * k_raw) / 255.0) as u8;
-                
+
                 rgb.push(r);
                 rgb.push(g);
                 rgb.push(b);
@@ -1448,45 +1539,73 @@ fn decode_png_predictor(data: &[u8], bytes_per_pixel: usize, columns: usize) -> 
     for r in 0..num_rows {
         let row_start = r * row_stride;
         let filter = data[row_start];
-        let raw_row = &data[row_start + 1 .. row_start + row_stride];
-        
+        let raw_row = &data[row_start + 1..row_start + row_stride];
+
         let out_row_start = r * row_data_size;
-        
+
         match filter {
             0 => {
-                decompressed[out_row_start .. out_row_start + row_data_size].copy_from_slice(raw_row);
+                decompressed[out_row_start..out_row_start + row_data_size].copy_from_slice(raw_row);
             }
             1 => {
                 for i in 0..row_data_size {
-                    let left = if i >= bytes_per_pixel { decompressed[out_row_start + i - bytes_per_pixel] } else { 0 };
+                    let left = if i >= bytes_per_pixel {
+                        decompressed[out_row_start + i - bytes_per_pixel]
+                    } else {
+                        0
+                    };
                     decompressed[out_row_start + i] = raw_row[i].wrapping_add(left);
                 }
             }
             2 => {
                 for i in 0..row_data_size {
-                    let up = if r > 0 { decompressed[(r - 1) * row_data_size + i] } else { 0 };
+                    let up = if r > 0 {
+                        decompressed[(r - 1) * row_data_size + i]
+                    } else {
+                        0
+                    };
                     decompressed[out_row_start + i] = raw_row[i].wrapping_add(up);
                 }
             }
             3 => {
                 for i in 0..row_data_size {
-                    let left = if i >= bytes_per_pixel { decompressed[out_row_start + i - bytes_per_pixel] as u32 } else { 0 };
-                    let up = if r > 0 { decompressed[(r - 1) * row_data_size + i] as u32 } else { 0 };
+                    let left = if i >= bytes_per_pixel {
+                        decompressed[out_row_start + i - bytes_per_pixel] as u32
+                    } else {
+                        0
+                    };
+                    let up = if r > 0 {
+                        decompressed[(r - 1) * row_data_size + i] as u32
+                    } else {
+                        0
+                    };
                     let avg = ((left + up) / 2) as u8;
                     decompressed[out_row_start + i] = raw_row[i].wrapping_add(avg);
                 }
             }
             4 => {
                 for i in 0..row_data_size {
-                    let left = if i >= bytes_per_pixel { decompressed[out_row_start + i - bytes_per_pixel] as i32 } else { 0 };
-                    let up = if r > 0 { decompressed[(r - 1) * row_data_size + i] as i32 } else { 0 };
-                    let corner = if i >= bytes_per_pixel && r > 0 { decompressed[(r - 1) * row_data_size + i - bytes_per_pixel] as i32 } else { 0 };
-                    
+                    let left = if i >= bytes_per_pixel {
+                        decompressed[out_row_start + i - bytes_per_pixel] as i32
+                    } else {
+                        0
+                    };
+                    let up = if r > 0 {
+                        decompressed[(r - 1) * row_data_size + i] as i32
+                    } else {
+                        0
+                    };
+                    let corner = if i >= bytes_per_pixel && r > 0 {
+                        decompressed[(r - 1) * row_data_size + i - bytes_per_pixel] as i32
+                    } else {
+                        0
+                    };
+
                     let p = left + up - corner;
                     let pa = (p - left).abs();
                     let pb = (p - up).abs();
                     let pc = (p - corner).abs();
-                    
+
                     let paeth = if pa <= pb && pa <= pc {
                         left
                     } else if pb <= pc {
@@ -1494,7 +1613,7 @@ fn decode_png_predictor(data: &[u8], bytes_per_pixel: usize, columns: usize) -> 
                     } else {
                         corner
                     } as u8;
-                    
+
                     decompressed[out_row_start + i] = raw_row[i].wrapping_add(paeth);
                 }
             }
@@ -1514,16 +1633,34 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
 
     let width = stream.dict.get(b"Width").ok()?.as_i64().ok()? as u32;
     let height = stream.dict.get(b"Height").ok()?.as_i64().ok()? as u32;
-    if width == 0 || height == 0 { return None; }
+    if width == 0 || height == 0 {
+        return None;
+    }
 
     let mut pixels = decompressed;
     if let Ok(decode_parms) = stream.dict.get(b"DecodeParms") {
         if let Some(params) = decode_parms.as_dict().ok() {
-            let predictor = params.get(b"Predictor").ok().and_then(|o| o.as_i64().ok()).unwrap_or(1);
+            let predictor = params
+                .get(b"Predictor")
+                .ok()
+                .and_then(|o| o.as_i64().ok())
+                .unwrap_or(1);
             if (10..=15).contains(&predictor) {
-                let columns = params.get(b"Columns").ok().and_then(|o| o.as_i64().ok()).unwrap_or(width as i64) as usize;
-                let colors = params.get(b"Colors").ok().and_then(|o| o.as_i64().ok()).unwrap_or(1) as usize;
-                let bits = params.get(b"BitsPerComponent").ok().and_then(|o| o.as_i64().ok()).unwrap_or(8) as usize;
+                let columns = params
+                    .get(b"Columns")
+                    .ok()
+                    .and_then(|o| o.as_i64().ok())
+                    .unwrap_or(width as i64) as usize;
+                let colors = params
+                    .get(b"Colors")
+                    .ok()
+                    .and_then(|o| o.as_i64().ok())
+                    .unwrap_or(1) as usize;
+                let bits = params
+                    .get(b"BitsPerComponent")
+                    .ok()
+                    .and_then(|o| o.as_i64().ok())
+                    .unwrap_or(8) as usize;
                 let bytes_per_pixel = (colors * bits + 7) / 8;
                 pixels = decode_png_predictor(&pixels, bytes_per_pixel, columns)?;
             }
@@ -1531,7 +1668,10 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
     }
 
     let colorspace_obj = stream.dict.get(b"ColorSpace").ok()?;
-    let colorspace_resolved = doc.dereference(colorspace_obj).map(|(_, o)| o).unwrap_or(colorspace_obj);
+    let colorspace_resolved = doc
+        .dereference(colorspace_obj)
+        .map(|(_, o)| o)
+        .unwrap_or(colorspace_obj);
 
     let mut rgb_pixels = Vec::with_capacity((width * height * 3) as usize);
 
@@ -1570,7 +1710,10 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
             if arr.len() >= 4 && arr[0].as_name_str().ok() == Some("Indexed") {
                 let base_space = arr[1].as_name_str().unwrap_or("DeviceRGB");
                 let lookup_obj = &arr[3];
-                let lookup_resolved = doc.dereference(lookup_obj).map(|(_, o)| o).unwrap_or(lookup_obj);
+                let lookup_resolved = doc
+                    .dereference(lookup_obj)
+                    .map(|(_, o)| o)
+                    .unwrap_or(lookup_obj);
 
                 let mut lookup_bytes = Vec::new();
                 match lookup_resolved {
@@ -1599,7 +1742,7 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
                     let idx = idx as usize;
                     let offset = idx * num_components;
                     if offset + num_components <= lookup_bytes.len() {
-                        let color_slice = &lookup_bytes[offset .. offset + num_components];
+                        let color_slice = &lookup_bytes[offset..offset + num_components];
                         match num_components {
                             3 => {
                                 rgb_pixels.push(color_slice[0]);
@@ -1631,7 +1774,11 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
                     }
                 }
             } else {
-                let num_channels = if width * height > 0 { pixels.len() / (width as usize * height as usize) } else { 1 };
+                let num_channels = if width * height > 0 {
+                    pixels.len() / (width as usize * height as usize)
+                } else {
+                    1
+                };
                 if num_channels == 3 {
                     rgb_pixels = pixels;
                 } else if num_channels == 4 {
@@ -1657,7 +1804,11 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
             }
         }
         _ => {
-            let num_channels = if width * height > 0 { pixels.len() / (width as usize * height as usize) } else { 1 };
+            let num_channels = if width * height > 0 {
+                pixels.len() / (width as usize * height as usize)
+            } else {
+                1
+            };
             if num_channels == 3 {
                 rgb_pixels = pixels;
             } else {
@@ -1688,32 +1839,61 @@ fn extract_page_images(doc: &LopdfDocument, page_id: ObjectId) -> HashMap<String
                                 if let Ok(subtype_obj) = stream.dict.get(b"Subtype") {
                                     if let Ok(name_str) = subtype_obj.as_name_str() {
                                         if name_str == "Image" {
-                                            let filter = stream.dict.get(b"Filter")
+                                            let filter = stream
+                                                .dict
+                                                .get(b"Filter")
                                                 .ok()
-                                                .and_then(|f| f.as_name_str().ok().or_else(|| f.as_array().ok().and_then(|arr| arr.first().and_then(|first| first.as_name_str().ok()))))
+                                                .and_then(|f| {
+                                                    f.as_name_str().ok().or_else(|| {
+                                                        f.as_array().ok().and_then(|arr| {
+                                                            arr.first().and_then(|first| {
+                                                                first.as_name_str().ok()
+                                                            })
+                                                        })
+                                                    })
+                                                })
                                                 .unwrap_or("");
-                                            
+
                                             // Extract the raw JPEG/PNG data
                                             if filter == "DCTDecode" || filter == "JPXDecode" {
-                                                if let Some(rgb_png_bytes) = convert_to_rgb_png(&stream.content) {
+                                                if let Some(rgb_png_bytes) =
+                                                    convert_to_rgb_png(&stream.content)
+                                                {
                                                     let b64 = base64_encode(&rgb_png_bytes);
-                                                    image_map.insert(pdf_name, format!("data:image/png;base64,{}", b64));
+                                                    image_map.insert(
+                                                        pdf_name,
+                                                        format!("data:image/png;base64,{}", b64),
+                                                    );
                                                 } else {
                                                     // Fallback to original bytes
                                                     let b64 = base64_encode(&stream.content);
-                                                    image_map.insert(pdf_name, format!("data:image/jpeg;base64,{}", b64));
+                                                    image_map.insert(
+                                                        pdf_name,
+                                                        format!("data:image/jpeg;base64,{}", b64),
+                                                    );
                                                 }
                                             } else if filter == "FlateDecode" {
-                                                if let Some(rgb_png_bytes) = decode_flate_to_png(stream, doc) {
+                                                if let Some(rgb_png_bytes) =
+                                                    decode_flate_to_png(stream, doc)
+                                                {
                                                     let b64 = base64_encode(&rgb_png_bytes);
-                                                    image_map.insert(pdf_name.clone(), format!("data:image/png;base64,{}", b64));
+                                                    image_map.insert(
+                                                        pdf_name.clone(),
+                                                        format!("data:image/png;base64,{}", b64),
+                                                    );
                                                 } else {
                                                     let b64 = base64_encode(&stream.content);
-                                                    image_map.insert(pdf_name.clone(), format!("data:image/png;base64,{}", b64));
+                                                    image_map.insert(
+                                                        pdf_name.clone(),
+                                                        format!("data:image/png;base64,{}", b64),
+                                                    );
                                                 }
                                             } else {
                                                 let b64 = base64_encode(&stream.content);
-                                                image_map.insert(pdf_name.clone(), format!("data:image/png;base64,{}", b64));
+                                                image_map.insert(
+                                                    pdf_name.clone(),
+                                                    format!("data:image/png;base64,{}", b64),
+                                                );
                                             }
                                         }
                                     }
@@ -1869,7 +2049,8 @@ pub fn parse_page_content_stream(
                     "g" => {
                         let len = operands.len();
                         if len >= 1 {
-                            state.fill_color = Some(PdfColor::Gray(parse_float(&operands[len - 1])));
+                            state.fill_color =
+                                Some(PdfColor::Gray(parse_float(&operands[len - 1])));
                         }
                     }
                     "k" => {
@@ -1914,14 +2095,14 @@ pub fn parse_page_content_stream(
                             let md = parse_float(&operands[len - 3]);
                             let me = parse_float(&operands[len - 2]);
                             let mf = parse_float(&operands[len - 1]);
-                            
+
                             let new_a = ma * state.ctm_a + mb * state.ctm_c;
                             let new_b = ma * state.ctm_b + mb * state.ctm_d;
                             let new_c = mc * state.ctm_a + md * state.ctm_c;
                             let new_d = mc * state.ctm_b + md * state.ctm_d;
                             let new_e = me * state.ctm_a + mf * state.ctm_c + state.ctm_e;
                             let new_f = me * state.ctm_b + mf * state.ctm_d + state.ctm_f;
-                            
+
                             state.ctm_a = new_a;
                             state.ctm_b = new_b;
                             state.ctm_c = new_c;
@@ -1959,7 +2140,7 @@ pub fn parse_page_content_stream(
                             } else {
                                 operand.to_string()
                             };
-                            
+
                             if image_map.contains_key(&xobject_name) {
                                 image_counter += 1;
                                 image_blocks.push(PdfImageBlock {
@@ -1978,14 +2159,23 @@ pub fn parse_page_content_stream(
                     "Tj" => {
                         if state.in_bt {
                             if let Some(operand) = operands.last() {
-                                let active_encoding = state.font_name.as_ref().and_then(|name| encodings.get(name));
-                                let is_cid = state.font_name.as_ref()
+                                let active_encoding = state
+                                    .font_name
+                                    .as_ref()
+                                    .and_then(|name| encodings.get(name));
+                                let is_cid = state
+                                    .font_name
+                                    .as_ref()
                                     .and_then(|name| font_map.get(name))
                                     .map(|info| info.is_cid_font)
                                     .unwrap_or(false);
-                                let custom_cmap = state.font_name.as_ref()
+                                let custom_cmap = state
+                                    .font_name
+                                    .as_ref()
                                     .and_then(|name| custom_to_unicode.get(name));
-                                if let Some(text) = decode_pdf_string(operand, active_encoding, custom_cmap, is_cid) {
+                                if let Some(text) =
+                                    decode_pdf_string(operand, active_encoding, custom_cmap, is_cid)
+                                {
                                     if !text.is_empty() {
                                         add_or_merge_text_block(
                                             &mut text_blocks,
@@ -2005,14 +2195,26 @@ pub fn parse_page_content_stream(
                     "TJ" => {
                         if state.in_bt {
                             if let Some(operand) = operands.last() {
-                                let active_encoding = state.font_name.as_ref().and_then(|name| encodings.get(name));
-                                let is_cid = state.font_name.as_ref()
+                                let active_encoding = state
+                                    .font_name
+                                    .as_ref()
+                                    .and_then(|name| encodings.get(name));
+                                let is_cid = state
+                                    .font_name
+                                    .as_ref()
                                     .and_then(|name| font_map.get(name))
                                     .map(|info| info.is_cid_font)
                                     .unwrap_or(false);
-                                let custom_cmap = state.font_name.as_ref()
+                                let custom_cmap = state
+                                    .font_name
+                                    .as_ref()
                                     .and_then(|name| custom_to_unicode.get(name));
-                                if let Some(text) = decode_pdf_array_text(operand, active_encoding, custom_cmap, is_cid) {
+                                if let Some(text) = decode_pdf_array_text(
+                                    operand,
+                                    active_encoding,
+                                    custom_cmap,
+                                    is_cid,
+                                ) {
                                     if !text.is_empty() {
                                         add_or_merge_text_block(
                                             &mut text_blocks,
@@ -2079,7 +2281,8 @@ fn compute_block_dimensions(
     let effective_width_scale = state.font_size * state.tm_a.abs();
 
     let width = if let Some(ref font_name) = state.font_name {
-        let font_info = font_map.get(font_name)
+        let font_info = font_map
+            .get(font_name)
             .cloned()
             .unwrap_or_else(|| FontInfo {
                 pdf_name: font_name.clone(),
@@ -2089,7 +2292,13 @@ fn compute_block_dimensions(
                 default_width: standard_font_avg_width(font_name),
                 unicode_to_cid: HashMap::new(),
             });
-        estimate_text_width(text, &font_info, effective_width_scale, state.char_spacing, state.word_spacing)
+        estimate_text_width(
+            text,
+            &font_info,
+            effective_width_scale,
+            state.char_spacing,
+            state.word_spacing,
+        )
     } else {
         text.chars().count() as f32 * effective_width_scale * 0.5
     };
@@ -2110,9 +2319,18 @@ mod tests {
 
     #[test]
     fn test_extract_pdf_string() {
-        assert_eq!(extract_pdf_string("(Hello World)"), Some("Hello World".to_string()));
-        assert_eq!(extract_pdf_string("(Hello\\nWorld)"), Some("Hello\nWorld".to_string()));
-        assert_eq!(extract_pdf_string("(Hello\\(World\\))"), Some("Hello(World)".to_string()));
+        assert_eq!(
+            extract_pdf_string("(Hello World)"),
+            Some("Hello World".to_string())
+        );
+        assert_eq!(
+            extract_pdf_string("(Hello\\nWorld)"),
+            Some("Hello\nWorld".to_string())
+        );
+        assert_eq!(
+            extract_pdf_string("(Hello\\(World\\))"),
+            Some("Hello(World)".to_string())
+        );
     }
 
     #[test]
@@ -2148,7 +2366,8 @@ mod tests {
         let pdf_path = "../../examples/pdf/demo3.pdf";
         if let Ok(doc) = lopdf::Document::load(pdf_path) {
             let page_id = *doc.get_pages().get(&1).unwrap();
-            let encoded = encode_pdf_text_with_font(&doc, page_id, Some("C2_0"), "刑事技术").unwrap();
+            let encoded =
+                encode_pdf_text_with_font(&doc, page_id, Some("C2_0"), "刑事技术").unwrap();
             assert_eq!(encoded, "<04AB03AB086109A2>");
         }
     }
@@ -2232,21 +2451,38 @@ mod tests {
                                         if let lopdf::Object::Stream(stream) = xobject_obj {
                                             if let Ok(subtype_obj) = stream.dict.get(b"Subtype") {
                                                 if let Ok("Image") = subtype_obj.as_name_str() {
-                                                    let filter = stream.dict.get(b"Filter")
+                                                    let filter = stream
+                                                        .dict
+                                                        .get(b"Filter")
                                                         .ok()
-                                                        .and_then(|f| f.as_name_str().ok().or_else(|| f.as_array().ok().and_then(|arr| arr.first().and_then(|first| first.as_name_str().ok()))))
+                                                        .and_then(|f| {
+                                                            f.as_name_str().ok().or_else(|| {
+                                                                f.as_array().ok().and_then(|arr| {
+                                                                    arr.first().and_then(|first| {
+                                                                        first.as_name_str().ok()
+                                                                    })
+                                                                })
+                                                            })
+                                                        })
                                                         .unwrap_or("");
-                                                    let width = stream.dict.get(b"Width")
+                                                    let width = stream
+                                                        .dict
+                                                        .get(b"Width")
                                                         .ok()
                                                         .and_then(|o| o.as_i64().ok())
                                                         .unwrap_or(0);
-                                                    let height = stream.dict.get(b"Height")
+                                                    let height = stream
+                                                        .dict
+                                                        .get(b"Height")
                                                         .ok()
                                                         .and_then(|o| o.as_i64().ok())
                                                         .unwrap_or(0);
-                                                    if filter == "DCTDecode" || filter == "JPXDecode" {
+                                                    if filter == "DCTDecode"
+                                                        || filter == "JPXDecode"
+                                                    {
                                                         use jpeg_decoder::Decoder;
-                                                        let mut decoder = Decoder::new(stream.content.as_slice());
+                                                        let mut decoder =
+                                                            Decoder::new(stream.content.as_slice());
                                                         if let Ok(pixels) = decoder.decode() {
                                                             if let Some(info) = decoder.info() {
                                                                 if info.pixel_format == jpeg_decoder::PixelFormat::CMYK32 && !cmyk_printed {
@@ -2262,12 +2498,12 @@ mod tests {
                                                                         let m_raw = chunk[1];
                                                                         let y_raw = chunk[2];
                                                                         let k_raw = chunk[3];
-                                                                        
+
                                                                         // Case A (Inverted: R = c_raw * k_raw / 255)
                                                                         let r_a = ((c_raw as f32 * k_raw as f32) / 255.0) as u8;
                                                                         let g_a = ((m_raw as f32 * k_raw as f32) / 255.0) as u8;
                                                                         let b_a = ((y_raw as f32 * k_raw as f32) / 255.0) as u8;
-                                                                        
+
                                                                         // Case B (Normal: R = (255 - c_raw) * (255 - k_raw) / 255)
                                                                         let c_norm = c_raw as f32 / 255.0;
                                                                         let m_norm = m_raw as f32 / 255.0;
@@ -2276,7 +2512,7 @@ mod tests {
                                                                         let r_b = (255.0 * (1.0 - c_norm) * (1.0 - k_norm)) as u8;
                                                                         let g_b = (255.0 * (1.0 - m_norm) * (1.0 - k_norm)) as u8;
                                                                         let b_b = (255.0 * (1.0 - y_norm) * (1.0 - k_norm)) as u8;
-                                                                        
+
                                                                         println!("Pixel {}: Raw=[C:{}, M:{}, Y:{}, K:{}], Case A (Inverted RGB)=[{}, {}, {}], Case B (Normal RGB)=[{}, {}, {}]",
                                                                             idx, c_raw, m_raw, y_raw, k_raw, r_a, g_a, b_a, r_b, g_b, b_b
                                                                         );
@@ -2286,45 +2522,97 @@ mod tests {
                                                         }
                                                     } else if filter == "FlateDecode" {
                                                         println!("Page {}, Image /{}, Filter=FlateDecode, Size={}x{}", page_num, pdf_name, width, height);
-                                                        let cs_resolved = if let Ok(cs_obj) = stream.dict.get(b"ColorSpace") {
-                                                            if let lopdf::Object::Reference(id) = cs_obj {
-                                                                doc.get_object(*id).ok().map(|o| format!("{:?}", o)).unwrap_or_else(|| format!("{:?}", cs_obj))
+                                                        let cs_resolved = if let Ok(cs_obj) =
+                                                            stream.dict.get(b"ColorSpace")
+                                                        {
+                                                            if let lopdf::Object::Reference(id) =
+                                                                cs_obj
+                                                            {
+                                                                doc.get_object(*id)
+                                                                    .ok()
+                                                                    .map(|o| format!("{:?}", o))
+                                                                    .unwrap_or_else(|| {
+                                                                        format!("{:?}", cs_obj)
+                                                                    })
                                                             } else {
                                                                 format!("{:?}", cs_obj)
                                                             }
                                                         } else {
                                                             "None".to_string()
                                                         };
-                                                        println!("  -> ColorSpace: {}", cs_resolved);
+                                                        println!(
+                                                            "  -> ColorSpace: {}",
+                                                            cs_resolved
+                                                        );
                                                         use flate2::read::ZlibDecoder;
                                                         use std::io::Read;
-                                                        let mut decoder = ZlibDecoder::new(stream.content.as_slice());
+                                                        let mut decoder = ZlibDecoder::new(
+                                                            stream.content.as_slice(),
+                                                        );
                                                         let mut decompressed = Vec::new();
-                                                        if decoder.read_to_end(&mut decompressed).is_ok() {
-                                                            let num_channels = if width * height > 0 { decompressed.len() as i64 / (width * height) } else { 0 };
+                                                        if decoder
+                                                            .read_to_end(&mut decompressed)
+                                                            .is_ok()
+                                                        {
+                                                            let num_channels = if width * height > 0
+                                                            {
+                                                                decompressed.len() as i64
+                                                                    / (width * height)
+                                                            } else {
+                                                                0
+                                                            };
                                                             println!("  -> Decompressed size: {} bytes, computed channels: {}", decompressed.len(), num_channels);
-                                                            if num_channels == 4 && pdf_name == "Im0" && page_num == 2 {
+                                                            if num_channels == 4
+                                                                && pdf_name == "Im0"
+                                                                && page_num == 2
+                                                            {
                                                                 println!("First 20 FlateDecode CMYK pixels:");
-                                                                for (idx, chunk) in decompressed.chunks_exact(4).take(20).enumerate() {
+                                                                for (idx, chunk) in decompressed
+                                                                    .chunks_exact(4)
+                                                                    .take(20)
+                                                                    .enumerate()
+                                                                {
                                                                     let c_raw = chunk[0];
                                                                     let m_raw = chunk[1];
                                                                     let y_raw = chunk[2];
                                                                     let k_raw = chunk[3];
-                                                                    
+
                                                                     // Case A (Inverted: R = c_raw * k_raw / 255)
-                                                                    let r_a = ((c_raw as f32 * k_raw as f32) / 255.0) as u8;
-                                                                    let g_a = ((m_raw as f32 * k_raw as f32) / 255.0) as u8;
-                                                                    let b_a = ((y_raw as f32 * k_raw as f32) / 255.0) as u8;
-                                                                    
+                                                                    let r_a = ((c_raw as f32
+                                                                        * k_raw as f32)
+                                                                        / 255.0)
+                                                                        as u8;
+                                                                    let g_a = ((m_raw as f32
+                                                                        * k_raw as f32)
+                                                                        / 255.0)
+                                                                        as u8;
+                                                                    let b_a = ((y_raw as f32
+                                                                        * k_raw as f32)
+                                                                        / 255.0)
+                                                                        as u8;
+
                                                                     // Case B (Normal: R = (255 - c_raw) * (255 - k_raw) / 255)
-                                                                    let c_norm = c_raw as f32 / 255.0;
-                                                                    let m_norm = m_raw as f32 / 255.0;
-                                                                    let y_norm = y_raw as f32 / 255.0;
-                                                                    let k_norm = k_raw as f32 / 255.0;
-                                                                    let r_b = (255.0 * (1.0 - c_norm) * (1.0 - k_norm)) as u8;
-                                                                    let g_b = (255.0 * (1.0 - m_norm) * (1.0 - k_norm)) as u8;
-                                                                    let b_b = (255.0 * (1.0 - y_norm) * (1.0 - k_norm)) as u8;
-                                                                    
+                                                                    let c_norm =
+                                                                        c_raw as f32 / 255.0;
+                                                                    let m_norm =
+                                                                        m_raw as f32 / 255.0;
+                                                                    let y_norm =
+                                                                        y_raw as f32 / 255.0;
+                                                                    let k_norm =
+                                                                        k_raw as f32 / 255.0;
+                                                                    let r_b = (255.0
+                                                                        * (1.0 - c_norm)
+                                                                        * (1.0 - k_norm))
+                                                                        as u8;
+                                                                    let g_b = (255.0
+                                                                        * (1.0 - m_norm)
+                                                                        * (1.0 - k_norm))
+                                                                        as u8;
+                                                                    let b_b = (255.0
+                                                                        * (1.0 - y_norm)
+                                                                        * (1.0 - k_norm))
+                                                                        as u8;
+
                                                                     println!("Pixel {}: Raw=[C:{}, M:{}, Y:{}, K:{}], Case A (Inverted RGB)=[{}, {}, {}], Case B (Normal RGB)=[{}, {}, {}]",
                                                                         idx, c_raw, m_raw, y_raw, k_raw, r_a, g_a, b_a, r_b, g_b, b_b
                                                                     );

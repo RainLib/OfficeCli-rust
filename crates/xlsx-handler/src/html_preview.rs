@@ -22,7 +22,7 @@ struct ParsedFill {
 }
 
 struct ParsedBorder {
-    left: Option<(String, String)>,   // (style, color)
+    left: Option<(String, String)>, // (style, color)
     right: Option<(String, String)>,
     top: Option<(String, String)>,
     bottom: Option<(String, String)>,
@@ -38,14 +38,14 @@ struct CellFormat {
 
 // 64 Default indexed colors for Excel compatibility
 const DEFAULT_INDEXED_COLORS: &[&str] = &[
-    "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF",
-    "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF",
-    "800000", "008000", "000080", "808000", "800080", "008080", "C0C0C0", "808080",
-    "9999FF", "993366", "FFFFCC", "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF",
-    "000080", "FF00FF", "FFFF00", "00FFFF", "800080", "800000", "008080", "0000FF",
-    "00CCFF", "CCFFFF", "CCFFCC", "FFFF99", "99CCFF", "FF99CC", "CC99FF", "FFCC99",
-    "3366FF", "33CCCC", "99CC00", "FFCC00", "FF9900", "FF6600", "666699", "969696",
-    "2A6F97", "014F86", "012A4A", "A9D6E5", "89C2D9", "61A5C2", "468FAF", "2C7DA0"
+    "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF", "000000",
+    "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF", "800000", "008000",
+    "000080", "808000", "800080", "008080", "C0C0C0", "808080", "9999FF", "993366", "FFFFCC",
+    "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF", "000080", "FF00FF", "FFFF00", "00FFFF",
+    "800080", "800000", "008080", "0000FF", "00CCFF", "CCFFFF", "CCFFCC", "FFFF99", "99CCFF",
+    "FF99CC", "CC99FF", "FFCC99", "3366FF", "33CCCC", "99CC00", "FFCC00", "FF9900", "FF6600",
+    "666699", "969696", "2A6F97", "014F86", "012A4A", "A9D6E5", "89C2D9", "61A5C2", "468FAF",
+    "2C7DA0",
 ];
 
 fn apply_transforms(hex: &str, tint: Option<f64>) -> String {
@@ -81,12 +81,21 @@ fn resolve_xml_color(
     if let Some(rgb) = color_node.attribute("rgb") {
         let clean = rgb.trim_start_matches("FF"); // remove alpha if present
         base_hex = Some(clean.to_string());
-    } else if let Some(indexed) = color_node.attribute("indexed").and_then(|s| s.parse::<usize>().ok()) {
+    } else if let Some(indexed) = color_node
+        .attribute("indexed")
+        .and_then(|s| s.parse::<usize>().ok())
+    {
         if indexed < indexed_colors.len() {
             base_hex = Some(indexed_colors[indexed].to_string());
         }
-    } else if let Some(theme) = color_node.attribute("theme").and_then(|s| s.parse::<usize>().ok()) {
-        let theme_names = ["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6"];
+    } else if let Some(theme) = color_node
+        .attribute("theme")
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        let theme_names = [
+            "lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5",
+            "accent6",
+        ];
         if theme < theme_names.len() {
             if let Some(hex) = theme_colors.get(theme_names[theme]) {
                 base_hex = Some(hex.to_string());
@@ -95,7 +104,9 @@ fn resolve_xml_color(
     }
 
     if let Some(hex) = base_hex {
-        let tint = color_node.attribute("tint").and_then(|s| s.parse::<f64>().ok());
+        let tint = color_node
+            .attribute("tint")
+            .and_then(|s| s.parse::<f64>().ok());
         return Some(apply_transforms(&hex, tint));
     }
     None
@@ -111,14 +122,21 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
     if let Ok(theme_xml) = package.read_part_xml("xl/theme/theme1.xml") {
         if let Ok(doc) = roxmltree::Document::parse(&theme_xml) {
             if let Some(scheme) = doc.descendants().find(|n| n.has_tag_name("clrScheme")) {
-                let clr_elements = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6"];
+                let clr_elements = [
+                    "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4",
+                    "accent5", "accent6",
+                ];
                 for elem in clr_elements {
                     if let Some(color_node) = scheme.descendants().find(|n| n.has_tag_name(elem)) {
-                        if let Some(srgb) = color_node.descendants().find(|n| n.has_tag_name("srgbClr")) {
+                        if let Some(srgb) =
+                            color_node.descendants().find(|n| n.has_tag_name("srgbClr"))
+                        {
                             if let Some(val) = srgb.attribute("val") {
                                 theme_colors.insert(elem.to_string(), val.to_string());
                             }
-                        } else if let Some(sys) = color_node.descendants().find(|n| n.has_tag_name("sysClr")) {
+                        } else if let Some(sys) =
+                            color_node.descendants().find(|n| n.has_tag_name("sysClr"))
+                        {
                             if let Some(val) = sys.attribute("lastClr") {
                                 theme_colors.insert(elem.to_string(), val.to_string());
                             }
@@ -140,9 +158,16 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         if let Ok(doc) = roxmltree::Document::parse(&styles_xml) {
             // Read Custom Palette
             if let Some(colors_node) = doc.descendants().find(|n| n.has_tag_name("colors")) {
-                if let Some(idx_node) = colors_node.descendants().find(|n| n.has_tag_name("indexedColors")) {
+                if let Some(idx_node) = colors_node
+                    .descendants()
+                    .find(|n| n.has_tag_name("indexedColors"))
+                {
                     // Overwrite indexed palette
-                    for (idx, rgb_node) in idx_node.children().filter(|n| n.has_tag_name("rgbColor")).enumerate() {
+                    for (idx, rgb_node) in idx_node
+                        .children()
+                        .filter(|n| n.has_tag_name("rgbColor"))
+                        .enumerate()
+                    {
                         if let Some(rgb) = rgb_node.attribute("rgb") {
                             let clean = rgb.trim_start_matches("FF").to_string();
                             if idx < indexed_colors.len() {
@@ -157,18 +182,31 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             // Parse Fonts
             if let Some(fonts_node) = doc.descendants().find(|n| n.has_tag_name("fonts")) {
                 for f_node in fonts_node.children().filter(|n| n.has_tag_name("font")) {
-                    let name = f_node.children().find(|n| n.has_tag_name("name"))
+                    let name = f_node
+                        .children()
+                        .find(|n| n.has_tag_name("name"))
                         .and_then(|n| n.attribute("val"))
-                        .unwrap_or("Calibri").to_string();
-                    let size = f_node.children().find(|n| n.has_tag_name("sz"))
+                        .unwrap_or("Calibri")
+                        .to_string();
+                    let size = f_node
+                        .children()
+                        .find(|n| n.has_tag_name("sz"))
                         .and_then(|n| n.attribute("val"))
                         .and_then(|s| s.parse::<f64>().ok())
                         .unwrap_or(11.0);
                     let bold = f_node.children().any(|n| n.has_tag_name("b"));
                     let italic = f_node.children().any(|n| n.has_tag_name("i"));
-                    let color = f_node.children().find(|n| n.has_tag_name("color"))
+                    let color = f_node
+                        .children()
+                        .find(|n| n.has_tag_name("color"))
                         .and_then(|c| resolve_xml_color(&c, &theme_colors, &indexed_colors));
-                    fonts.push(ParsedFont { name, size, bold, italic, color });
+                    fonts.push(ParsedFont {
+                        name,
+                        size,
+                        bold,
+                        italic,
+                        color,
+                    });
                 }
             }
 
@@ -176,12 +214,23 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             if let Some(fills_node) = doc.descendants().find(|n| n.has_tag_name("fills")) {
                 for fill in fills_node.children().filter(|n| n.has_tag_name("fill")) {
                     if let Some(pattern) = fill.children().find(|n| n.has_tag_name("patternFill")) {
-                        let fill_type = pattern.attribute("patternType").unwrap_or("none").to_string();
-                        let bg_color = pattern.children().find(|n| n.has_tag_name("fgColor"))
+                        let fill_type = pattern
+                            .attribute("patternType")
+                            .unwrap_or("none")
+                            .to_string();
+                        let bg_color = pattern
+                            .children()
+                            .find(|n| n.has_tag_name("fgColor"))
                             .and_then(|c| resolve_xml_color(&c, &theme_colors, &indexed_colors));
-                        fills.push(ParsedFill { fill_type, bg_color });
+                        fills.push(ParsedFill {
+                            fill_type,
+                            bg_color,
+                        });
                     } else {
-                        fills.push(ParsedFill { fill_type: "none".to_string(), bg_color: None });
+                        fills.push(ParsedFill {
+                            fill_type: "none".to_string(),
+                            bg_color: None,
+                        });
                     }
                 }
             }
@@ -192,7 +241,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                     let mut parse_edge = |edge_name: &str| -> Option<(String, String)> {
                         let edge = b_node.children().find(|n| n.has_tag_name(edge_name))?;
                         let style = edge.attribute("style")?.to_string();
-                        let color = edge.children().find(|n| n.has_tag_name("color"))
+                        let color = edge
+                            .children()
+                            .find(|n| n.has_tag_name("color"))
                             .and_then(|c| resolve_xml_color(&c, &theme_colors, &indexed_colors))
                             .unwrap_or_else(|| "#D9D9D9".to_string());
                         Some((style, color))
@@ -211,11 +262,25 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 for xf in xfs.children().filter(|n| n.has_tag_name("xf")) {
                     let font_id = xf.attribute("fontId").and_then(|s| s.parse::<usize>().ok());
                     let fill_id = xf.attribute("fillId").and_then(|s| s.parse::<usize>().ok());
-                    let border_id = xf.attribute("borderId").and_then(|s| s.parse::<usize>().ok());
+                    let border_id = xf
+                        .attribute("borderId")
+                        .and_then(|s| s.parse::<usize>().ok());
                     let align = xf.children().find(|n| n.has_tag_name("alignment"));
-                    let align_horiz = align.as_ref().and_then(|a| a.attribute("horizontal")).map(|s| s.to_string());
-                    let align_vert = align.as_ref().and_then(|a| a.attribute("vertical")).map(|s| s.to_string());
-                    cell_formats.push(CellFormat { font_id, fill_id, border_id, align_horiz, align_vert });
+                    let align_horiz = align
+                        .as_ref()
+                        .and_then(|a| a.attribute("horizontal"))
+                        .map(|s| s.to_string());
+                    let align_vert = align
+                        .as_ref()
+                        .and_then(|a| a.attribute("vertical"))
+                        .map(|s| s.to_string());
+                    cell_formats.push(CellFormat {
+                        font_id,
+                        fill_id,
+                        border_id,
+                        align_horiz,
+                        align_vert,
+                    });
                 }
             }
         }
@@ -235,8 +300,13 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         if let Ok(ws_xml) = package.read_part_xml(&ws.part_path) {
             if let Ok(ws_doc) = roxmltree::Document::parse(&ws_xml) {
                 // Parse Merge Cells
-                if let Some(merge_cells) = ws_doc.descendants().find(|n| n.has_tag_name("mergeCells")) {
-                    for mc in merge_cells.children().filter(|n| n.has_tag_name("mergeCell")) {
+                if let Some(merge_cells) =
+                    ws_doc.descendants().find(|n| n.has_tag_name("mergeCells"))
+                {
+                    for mc in merge_cells
+                        .children()
+                        .filter(|n| n.has_tag_name("mergeCell"))
+                    {
                         if let Some(range_ref) = mc.attribute("ref") {
                             if let Some((start, end)) = parse_range(range_ref) {
                                 for r in start.row..=end.row {
@@ -244,7 +314,14 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                                         let is_anchor = r == start.row && c == start.col;
                                         let row_span = end.row - start.row + 1;
                                         let col_span = end.col - start.col + 1;
-                                        merge_map.insert((r, c), MergeInfo { is_anchor, row_span, col_span });
+                                        merge_map.insert(
+                                            (r, c),
+                                            MergeInfo {
+                                                is_anchor,
+                                                row_span,
+                                                col_span,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -256,24 +333,47 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 if let Some(pane) = ws_doc.descendants().find(|n| n.has_tag_name("pane")) {
                     if let Some(state) = pane.attribute("state") {
                         if state == "frozen" || state == "frozenSplit" {
-                            frozen_rows = pane.attribute("ySplit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                            frozen_cols = pane.attribute("xSplit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                            frozen_rows = pane
+                                .attribute("ySplit")
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            frozen_cols = pane
+                                .attribute("xSplit")
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(0);
                         }
                     }
                 }
 
                 // Parse Format Props
-                if let Some(fmt_pr) = ws_doc.descendants().find(|n| n.has_tag_name("sheetFormatPr")) {
-                    default_col_width = fmt_pr.attribute("defaultColWidth").and_then(|s| s.parse::<f64>().ok()).unwrap_or(8.43) * 7.5;
-                    default_row_height = fmt_pr.attribute("defaultRowHeight").and_then(|s| s.parse::<f64>().ok()).unwrap_or(15.0);
+                if let Some(fmt_pr) = ws_doc
+                    .descendants()
+                    .find(|n| n.has_tag_name("sheetFormatPr"))
+                {
+                    default_col_width = fmt_pr
+                        .attribute("defaultColWidth")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(8.43)
+                        * 7.5;
+                    default_row_height = fmt_pr
+                        .attribute("defaultRowHeight")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(15.0);
                 }
 
                 // Parse Explicit Col Widths
                 if let Some(cols_node) = ws_doc.descendants().find(|n| n.has_tag_name("cols")) {
                     for col in cols_node.children().filter(|n| n.has_tag_name("col")) {
-                        let min = col.attribute("min").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
-                        let max = col.attribute("max").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
-                        if let Some(w) = col.attribute("width").and_then(|s| s.parse::<f64>().ok()) {
+                        let min = col
+                            .attribute("min")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(1);
+                        let max = col
+                            .attribute("max")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(1);
+                        if let Some(w) = col.attribute("width").and_then(|s| s.parse::<f64>().ok())
+                        {
                             let width_px = w * 7.5; // conversion factor
                             for c in min..=max {
                                 col_widths.insert(c, width_px);
@@ -283,10 +383,14 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 }
 
                 // Parse Explicit Row Heights
-                if let Some(sheet_data) = ws_doc.descendants().find(|n| n.has_tag_name("sheetData")) {
+                if let Some(sheet_data) = ws_doc.descendants().find(|n| n.has_tag_name("sheetData"))
+                {
                     for row in sheet_data.children().filter(|n| n.has_tag_name("row")) {
-                        if let Some(r_idx) = row.attribute("r").and_then(|s| s.parse::<usize>().ok()) {
-                            if let Some(h) = row.attribute("ht").and_then(|s| s.parse::<f64>().ok()) {
+                        if let Some(r_idx) =
+                            row.attribute("r").and_then(|s| s.parse::<usize>().ok())
+                        {
+                            if let Some(h) = row.attribute("ht").and_then(|s| s.parse::<f64>().ok())
+                            {
                                 row_heights.insert(r_idx, h);
                             }
                         }
@@ -340,7 +444,10 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             let mut style_attr = String::new();
             if frozen_rows > 0 && col <= frozen_cols {
                 let left = frozen_left_offsets.get(&col).unwrap_or(&0.0);
-                style_attr = format!(" style=\"position:sticky;top:0;left:{:.1}px;z-index:4;\"", left);
+                style_attr = format!(
+                    " style=\"position:sticky;top:0;left:{:.1}px;z-index:4;\"",
+                    left
+                );
             } else if frozen_rows > 0 {
                 style_attr = " style=\"position:sticky;top:0;z-index:3;\"".to_string();
             } else if col <= frozen_cols {
@@ -364,7 +471,11 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             if is_row_frozen {
                 tr_style.push_str("background:#f9f9f9;");
             }
-            let tr_style_attr = if tr_style.is_empty() { String::new() } else { format!(" style=\"{}\"", tr_style) };
+            let tr_style_attr = if tr_style.is_empty() {
+                String::new()
+            } else {
+                format!(" style=\"{}\"", tr_style)
+            };
 
             sheets_html.push_str(&format!("<tr{}>\n", tr_style_attr));
 
@@ -401,7 +512,10 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 if is_row_frozen && col <= frozen_cols {
                     let left = frozen_left_offsets.get(&col).unwrap_or(&0.0);
                     let top = frozen_top_offsets.get(&row).unwrap_or(&0.0);
-                    inline_styles.push(format!("position:sticky;top:{:.1}px;left:{:.1}px;z-index:3", top, left));
+                    inline_styles.push(format!(
+                        "position:sticky;top:{:.1}px;left:{:.1}px;z-index:3",
+                        top, left
+                    ));
                 } else if is_row_frozen {
                     let top = frozen_top_offsets.get(&row).unwrap_or(&0.0);
                     inline_styles.push(format!("position:sticky;top:{:.1}px;z-index:2", top));
@@ -424,10 +538,15 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                             if let Some(f_id) = format.font_id {
                                 if f_id < fonts.len() {
                                     let font = &fonts[f_id];
-                                    inline_styles.push(format!("font-family:'{}', sans-serif", font.name));
+                                    inline_styles
+                                        .push(format!("font-family:'{}', sans-serif", font.name));
                                     inline_styles.push(format!("font-size:{:.1}pt", font.size));
-                                    if font.bold { inline_styles.push("font-weight:bold".to_string()); }
-                                    if font.italic { inline_styles.push("font-style:italic".to_string()); }
+                                    if font.bold {
+                                        inline_styles.push("font-weight:bold".to_string());
+                                    }
+                                    if font.italic {
+                                        inline_styles.push("font-style:italic".to_string());
+                                    }
                                     if let Some(ref color) = font.color {
                                         inline_styles.push(format!("color:{}", color));
                                     }
@@ -438,7 +557,8 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                                     let fill = &fills[fill_id];
                                     if fill.fill_type == "solid" {
                                         if let Some(ref color) = fill.bg_color {
-                                            inline_styles.push(format!("background-color:{}", color));
+                                            inline_styles
+                                                .push(format!("background-color:{}", color));
                                         }
                                     }
                                 }
@@ -446,29 +566,44 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                             if let Some(border_id) = format.border_id {
                                 if border_id < borders.len() {
                                     let border = &borders[border_id];
-                                    let map_border = |edge: &Option<(String, String)>, css_edge: &str| -> Option<String> {
-                                        let (style, color) = edge.as_ref()?;
-                                        let width = match style.as_str() {
-                                            "thin" => "1px",
-                                            "medium" => "2px",
-                                            "double" => "3px double",
-                                            "dashed" => "1px dashed",
-                                            "dotted" => "1px dotted",
-                                            _ => "1px"
+                                    let map_border =
+                                        |edge: &Option<(String, String)>,
+                                         css_edge: &str|
+                                         -> Option<String> {
+                                            let (style, color) = edge.as_ref()?;
+                                            let width = match style.as_str() {
+                                                "thin" => "1px",
+                                                "medium" => "2px",
+                                                "double" => "3px double",
+                                                "dashed" => "1px dashed",
+                                                "dotted" => "1px dotted",
+                                                _ => "1px",
+                                            };
+                                            Some(format!(
+                                                "border-{}:{};",
+                                                css_edge,
+                                                format!("{} solid {}", width, color)
+                                            ))
                                         };
-                                        Some(format!("border-{}:{};", css_edge, format!("{} solid {}", width, color)))
-                                    };
-                                    if let Some(left) = map_border(&border.left, "left") { inline_styles.push(left); }
-                                    if let Some(right) = map_border(&border.right, "right") { inline_styles.push(right); }
-                                    if let Some(top) = map_border(&border.top, "top") { inline_styles.push(top); }
-                                    if let Some(bottom) = map_border(&border.bottom, "bottom") { inline_styles.push(bottom); }
+                                    if let Some(left) = map_border(&border.left, "left") {
+                                        inline_styles.push(left);
+                                    }
+                                    if let Some(right) = map_border(&border.right, "right") {
+                                        inline_styles.push(right);
+                                    }
+                                    if let Some(top) = map_border(&border.top, "top") {
+                                        inline_styles.push(top);
+                                    }
+                                    if let Some(bottom) = map_border(&border.bottom, "bottom") {
+                                        inline_styles.push(bottom);
+                                    }
                                 }
                             }
                             if let Some(ref horiz) = format.align_horiz {
                                 let alignment = match horiz.as_str() {
                                     "center" => "center",
                                     "right" => "right",
-                                    _ => "left"
+                                    _ => "left",
                                 };
                                 inline_styles.push(format!("text-align:{}", alignment));
                             }
@@ -476,7 +611,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                                 let alignment = match vert.as_str() {
                                     "center" => "middle",
                                     "bottom" => "bottom",
-                                    _ => "top"
+                                    _ => "top",
                                 };
                                 inline_styles.push(format!("vertical-align:{}", alignment));
                             }
@@ -498,8 +633,12 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 
                 let span_attrs = if let Some(merge) = merge_map.get(&(row, col)) {
                     let mut spans = String::new();
-                    if merge.row_span > 1 { spans.push_str(&format!(" rowspan=\"{}\"", merge.row_span)); }
-                    if merge.col_span > 1 { spans.push_str(&format!(" colspan=\"{}\"", merge.col_span)); }
+                    if merge.row_span > 1 {
+                        spans.push_str(&format!(" rowspan=\"{}\"", merge.row_span));
+                    }
+                    if merge.col_span > 1 {
+                        spans.push_str(&format!(" colspan=\"{}\"", merge.col_span));
+                    }
                     spans
                 } else {
                     String::new()
@@ -512,10 +651,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                         class_attr, style_attr, span_attrs, ws.name, cell_ref, text
                     ));
                 } else {
-                    sheets_html.push_str(&format!(
-                        "<td{}{}></td>\n",
-                        style_attr, span_attrs
-                    ));
+                    sheets_html.push_str(&format!("<td{}{}></td>\n", style_attr, span_attrs));
                 }
             }
             sheets_html.push_str("</tr>\n");
@@ -524,7 +660,8 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         sheets_html.push_str("</tbody>\n</table>\n</div>\n</div>\n");
     }
 
-    Ok(format!(r#"<!DOCTYPE html>
+    Ok(format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -663,10 +800,15 @@ function switchSheet(idx) {{
 </body>
 </html>"#,
         sheets_html,
-        model.sheets.iter().enumerate()
+        model
+            .sheets
+            .iter()
+            .enumerate()
             .map(|(i, ws)| format!(
                 "<button class=\"sheet-tab{}\" onclick=\"switchSheet({})\">{}</button>",
-                if i == 0 { " active" } else { "" }, i, ws.name
+                if i == 0 { " active" } else { "" },
+                i,
+                ws.name
             ))
             .collect::<Vec<_>>()
             .join("\n")

@@ -1,11 +1,16 @@
 use handler_common::{HandlerError, RawOptions};
-use oxml::OxmlPackage;
 use oxml::xml_util;
+use oxml::OxmlPackage;
 use std::collections::HashMap;
 
 /// Read raw XML from a part in the package.
-pub fn read_raw(package: &OxmlPackage, part_path: &str, opts: RawOptions) -> Result<String, HandlerError> {
-    let xml = package.read_part_xml(part_path)
+pub fn read_raw(
+    package: &OxmlPackage,
+    part_path: &str,
+    opts: RawOptions,
+) -> Result<String, HandlerError> {
+    let xml = package
+        .read_part_xml(part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Apply line range if specified
@@ -34,13 +39,15 @@ pub fn apply_raw_set(
     action: &str,
     xml: Option<&str>,
 ) -> Result<(), HandlerError> {
-    let original = package.read_part_xml(part_path)
+    let original = package
+        .read_part_xml(part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     let modified = xml_util::apply_xpath_action(&original, xpath, action, xml)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-    package.write_part_xml(part_path, &modified)
+    package
+        .write_part_xml(part_path, &modified)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok(())
@@ -59,14 +66,19 @@ pub fn add_part(
     // Create minimal content based on part type
     let content = create_part_content(part_type, properties);
 
-    package.write_part_xml(&part_path, &content)
+    package
+        .write_part_xml(&part_path, &content)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok((part_path.clone(), part_path))
 }
 
 /// Resolve a new part path based on the type and parent relationship.
-fn resolve_new_part_path(package: &OxmlPackage, _parent: &str, part_type: &str) -> Result<String, HandlerError> {
+fn resolve_new_part_path(
+    package: &OxmlPackage,
+    _parent: &str,
+    part_type: &str,
+) -> Result<String, HandlerError> {
     match part_type {
         "styles" => Ok("word/styles.xml".to_string()),
         "numbering" => Ok("word/numbering.xml".to_string()),
@@ -86,9 +98,10 @@ fn resolve_new_part_path(package: &OxmlPackage, _parent: &str, part_type: &str) 
                 Ok(format!("word/footer{}.xml", idx))
             }
         }
-        other => Err(HandlerError::UnsupportedType(
-            format!("unsupported part type: {}", other),
-        )),
+        other => Err(HandlerError::UnsupportedType(format!(
+            "unsupported part type: {}",
+            other
+        ))),
     }
 }
 

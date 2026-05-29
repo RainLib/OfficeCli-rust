@@ -1,10 +1,13 @@
-use handler_common::{DocumentNode, HandlerError, Selector};
 use crate::navigation::build_presentation;
+use handler_common::{DocumentNode, HandlerError, Selector};
 
 /// Query PPTX elements using a selector.
-pub fn query_elements(package: &oxml::OxmlPackage, selector_str: &str) -> Result<Vec<DocumentNode>, HandlerError> {
-    let selector = Selector::parse(selector_str)
-        .map_err(|e| HandlerError::InvalidArgument(e.to_string()))?;
+pub fn query_elements(
+    package: &oxml::OxmlPackage,
+    selector_str: &str,
+) -> Result<Vec<DocumentNode>, HandlerError> {
+    let selector =
+        Selector::parse(selector_str).map_err(|e| HandlerError::InvalidArgument(e.to_string()))?;
     let pres = build_presentation(package)?;
 
     let mut results = Vec::new();
@@ -14,7 +17,9 @@ pub fn query_elements(package: &oxml::OxmlPackage, selector_str: &str) -> Result
         "slide" | "*" => {
             for slide in &pres.slides {
                 let path = format!("/slide[{}]", slide.index);
-                let text: Vec<String> = slide.shapes.iter()
+                let text: Vec<String> = slide
+                    .shapes
+                    .iter()
                     .filter(|s| !s.text.is_empty())
                     .map(|s| s.text.clone())
                     .collect();
@@ -25,9 +30,11 @@ pub fn query_elements(package: &oxml::OxmlPackage, selector_str: &str) -> Result
             for slide in &pres.slides {
                 for (j, shape) in slide.shapes.iter().enumerate() {
                     let path = format!("/slide[{}]/shape[{}]", slide.index, j + 1);
-                    results.push(DocumentNode::new(&path, "shape")
-                        .with_text(&shape.text)
-                        .with_preview(shape.name.clone()));
+                    results.push(
+                        DocumentNode::new(&path, "shape")
+                            .with_text(&shape.text)
+                            .with_preview(shape.name.clone()),
+                    );
                 }
             }
         }
@@ -41,7 +48,12 @@ pub fn query_elements(package: &oxml::OxmlPackage, selector_str: &str) -> Result
                 }
             }
         }
-        other => return Err(HandlerError::InvalidArgument(format!("unsupported selector type: {}", other))),
+        other => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "unsupported selector type: {}",
+                other
+            )))
+        }
     }
 
     Ok(results)

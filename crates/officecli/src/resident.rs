@@ -38,10 +38,16 @@ pub struct IpcResponse {
 
 impl IpcResponse {
     fn ok(value: serde_json::Value) -> Self {
-        Self { result: Some(value), error: None }
+        Self {
+            result: Some(value),
+            error: None,
+        }
     }
     fn err(msg: String) -> Self {
-        Self { result: None, error: Some(msg) }
+        Self {
+            result: None,
+            error: Some(msg),
+        }
     }
 }
 
@@ -72,8 +78,7 @@ fn dirs_base() -> PathBuf {
 pub fn socket_path_for_file(file: &str) -> PathBuf {
     // Hash the absolute file path to get a stable socket name
     use std::hash::{Hash, Hasher};
-    let abs = std::fs::canonicalize(file)
-        .unwrap_or_else(|_| PathBuf::from(file));
+    let abs = std::fs::canonicalize(file).unwrap_or_else(|_| PathBuf::from(file));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut hasher);
     let hash = hasher.finish();
@@ -88,10 +93,7 @@ fn open_handler(file: &str, editable: bool) -> Result<Box<dyn DocumentHandler>, 
 
 // ─── Server: execute an IPC request against the in-memory handler ──────
 
-fn execute_request(
-    handler: &dyn DocumentHandler,
-    req: &IpcRequest,
-) -> IpcResponse {
+fn execute_request(handler: &dyn DocumentHandler, req: &IpcRequest) -> IpcResponse {
     match req.command.as_str() {
         // View commands
         "view_text" => {
@@ -108,24 +110,18 @@ fn execute_request(
                 Err(e) => IpcResponse::err(e.to_string()),
             }
         }
-        "view_outline" => {
-            match handler.view_as_outline() {
-                Ok(text) => IpcResponse::ok(serde_json::Value::String(text)),
-                Err(e) => IpcResponse::err(e.to_string()),
-            }
-        }
-        "view_stats" => {
-            match handler.view_as_stats() {
-                Ok(text) => IpcResponse::ok(serde_json::Value::String(text)),
-                Err(e) => IpcResponse::err(e.to_string()),
-            }
-        }
-        "view_issues" => {
-            match handler.view_as_issues(None, None) {
-                Ok(issues) => IpcResponse::ok(serde_json::to_value(issues).unwrap_or_default()),
-                Err(e) => IpcResponse::err(e.to_string()),
-            }
-        }
+        "view_outline" => match handler.view_as_outline() {
+            Ok(text) => IpcResponse::ok(serde_json::Value::String(text)),
+            Err(e) => IpcResponse::err(e.to_string()),
+        },
+        "view_stats" => match handler.view_as_stats() {
+            Ok(text) => IpcResponse::ok(serde_json::Value::String(text)),
+            Err(e) => IpcResponse::err(e.to_string()),
+        },
+        "view_issues" => match handler.view_as_issues(None, None) {
+            Ok(issues) => IpcResponse::ok(serde_json::to_value(issues).unwrap_or_default()),
+            Err(e) => IpcResponse::err(e.to_string()),
+        },
         "view_html" => {
             let opts = view_opts_from_params(&req.params);
             match handler.view_as_html(opts) {
@@ -136,10 +132,14 @@ fn execute_request(
 
         // Query commands
         "get" => {
-            let path = req.params.get("path")
+            let path = req
+                .params
+                .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("/");
-            let depth = req.params.get("depth")
+            let depth = req
+                .params
+                .get("depth")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as usize;
             match handler.get(path, depth) {
@@ -148,7 +148,9 @@ fn execute_request(
             }
         }
         "query" => {
-            let selector = req.params.get("selector")
+            let selector = req
+                .params
+                .get("selector")
                 .and_then(|v| v.as_str())
                 .unwrap_or("*");
             match handler.query(selector) {
@@ -157,7 +159,9 @@ fn execute_request(
             }
         }
         "set" => {
-            let path = req.params.get("path")
+            let path = req
+                .params
+                .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let properties = string_map_from_params(&req.params, "properties");
@@ -170,10 +174,14 @@ fn execute_request(
             }
         }
         "add" => {
-            let parent = req.params.get("parent")
+            let parent = req
+                .params
+                .get("parent")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let element_type = req.params.get("type")
+            let element_type = req
+                .params
+                .get("type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let position = parse_insert_position(&req.params);
@@ -184,7 +192,9 @@ fn execute_request(
             }
         }
         "remove" => {
-            let path = req.params.get("path")
+            let path = req
+                .params
+                .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             match handler.remove(path) {
@@ -193,11 +203,12 @@ fn execute_request(
             }
         }
         "move" => {
-            let source = req.params.get("source")
+            let source = req
+                .params
+                .get("source")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let target = req.params.get("target")
-                .and_then(|v| v.as_str());
+            let target = req.params.get("target").and_then(|v| v.as_str());
             let position = parse_insert_position(&req.params);
             match handler.move_element(source, target, position) {
                 Ok(new_path) => IpcResponse::ok(serde_json::json!({"path": new_path})),
@@ -205,10 +216,14 @@ fn execute_request(
             }
         }
         "copy" => {
-            let source = req.params.get("source")
+            let source = req
+                .params
+                .get("source")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let target = req.params.get("target")
+            let target = req
+                .params
+                .get("target")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let position = parse_insert_position(&req.params);
@@ -220,7 +235,9 @@ fn execute_request(
 
         // Raw commands
         "raw" => {
-            let part = req.params.get("part")
+            let part = req
+                .params
+                .get("part")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let opts = raw_opts_from_params(&req.params);
@@ -229,24 +246,18 @@ fn execute_request(
                 Err(e) => IpcResponse::err(e.to_string()),
             }
         }
-        "validate" => {
-            match handler.validate() {
-                Ok(errors) => IpcResponse::ok(serde_json::to_value(errors).unwrap_or_default()),
-                Err(e) => IpcResponse::err(e.to_string()),
-            }
-        }
-        "save" => {
-            match handler.save() {
-                Ok(()) => IpcResponse::ok(serde_json::json!({"result": "saved"})),
-                Err(e) => IpcResponse::err(e.to_string()),
-            }
-        }
-        "extract_text" => {
-            match handler.extract_text_with_offsets() {
-                Ok(map) => IpcResponse::ok(serde_json::to_value(map).unwrap_or_default()),
-                Err(e) => IpcResponse::err(e.to_string()),
-            }
-        }
+        "validate" => match handler.validate() {
+            Ok(errors) => IpcResponse::ok(serde_json::to_value(errors).unwrap_or_default()),
+            Err(e) => IpcResponse::err(e.to_string()),
+        },
+        "save" => match handler.save() {
+            Ok(()) => IpcResponse::ok(serde_json::json!({"result": "saved"})),
+            Err(e) => IpcResponse::err(e.to_string()),
+        },
+        "extract_text" => match handler.extract_text_with_offsets() {
+            Ok(map) => IpcResponse::ok(serde_json::to_value(map).unwrap_or_default()),
+            Err(e) => IpcResponse::err(e.to_string()),
+        },
         "ping" => IpcResponse::ok(serde_json::json!({"status": "alive"})),
         "close" => IpcResponse::ok(serde_json::json!({"status": "closing"})),
 
@@ -375,7 +386,8 @@ pub fn spawn_server(file_path: &str) -> Result<(), anyhow::Error> {
     // Spawn ourselves as a child process with --resident-serve flag
     let current_exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(current_exe);
-    cmd.arg("--resident-serve").arg(abs_path.to_str().unwrap_or(file_path));
+    cmd.arg("--resident-serve")
+        .arg(abs_path.to_str().unwrap_or(file_path));
 
     // Detach from parent: on Unix, we can use double-fork-like approach
     // by just spawning and not waiting
@@ -404,7 +416,9 @@ pub fn spawn_server(file_path: &str) -> Result<(), anyhow::Error> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    Err(anyhow::anyhow!("resident server did not start within 5 seconds"))
+    Err(anyhow::anyhow!(
+        "resident server did not start within 5 seconds"
+    ))
 }
 
 // ─── Close: send close command to resident server ──────────────────────
@@ -421,21 +435,41 @@ pub async fn close_server(file_path: &str) -> Result<IpcResponse, anyhow::Error>
 
 fn view_opts_from_params(params: &HashMap<String, serde_json::Value>) -> ViewOptions {
     ViewOptions {
-        start_line: params.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize),
-        end_line: params.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize),
-        max_lines: params.get("max_lines").and_then(|v| v.as_u64()).map(|v| v as usize),
-        cols: params.get("cols")
+        start_line: params
+            .get("start_line")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        end_line: params
+            .get("end_line")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        max_lines: params
+            .get("max_lines")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        cols: params
+            .get("cols")
             .and_then(|v| v.as_str())
             .map(|c| c.split(',').map(|s| s.to_string()).collect()),
-        page: params.get("page").and_then(|v| v.as_u64()).map(|v| v as usize),
+        page: params
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
     }
 }
 
 fn raw_opts_from_params(params: &HashMap<String, serde_json::Value>) -> handler_common::RawOptions {
     handler_common::RawOptions {
-        start_row: params.get("start_row").and_then(|v| v.as_u64()).map(|v| v as usize),
-        end_row: params.get("end_row").and_then(|v| v.as_u64()).map(|v| v as usize),
-        cols: params.get("cols")
+        start_row: params
+            .get("start_row")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        end_row: params
+            .get("end_row")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        cols: params
+            .get("cols")
             .and_then(|v| v.as_str())
             .map(|c| c.split(',').map(|s| s.to_string()).collect()),
     }
@@ -462,7 +496,8 @@ fn string_map_from_params(
     params: &HashMap<String, serde_json::Value>,
     key: &str,
 ) -> HashMap<String, String> {
-    params.get(key)
+    params
+        .get(key)
         .and_then(|v| v.as_object())
         .map(|obj| {
             obj.iter()

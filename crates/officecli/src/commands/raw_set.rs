@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, OutputFormat};
 use clap::Args;
+use handler_common::{HandlerError, OutputFormat};
 
 /// Modify raw XML or PDF content stream
 #[derive(Args)]

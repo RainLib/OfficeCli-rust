@@ -5,42 +5,42 @@ use std::collections::HashMap;
 pub enum WordElementType {
     Document,
     Body,
-    Paragraph,       // w:p
-    Run,             // w:r
-    Text,            // w:t
-    Break,           // w:br
-    Tab,             // w:tab
-    ParagraphMark,   // w:pPr placeholder
-    RunProperties,   // w:rPr
+    Paragraph,           // w:p
+    Run,                 // w:r
+    Text,                // w:t
+    Break,               // w:br
+    Tab,                 // w:tab
+    ParagraphMark,       // w:pPr placeholder
+    RunProperties,       // w:rPr
     ParagraphProperties, // w:pPr
-    Table,           // w:tbl
-    TableRow,        // w:tr
-    TableCell,       // w:tc
-    TableProperties, // w:tblPr
-    TableRowProperties, // w:trPr
+    Table,               // w:tbl
+    TableRow,            // w:tr
+    TableCell,           // w:tc
+    TableProperties,     // w:tblPr
+    TableRowProperties,  // w:trPr
     TableCellProperties, // w:tcPr
-    Hyperlink,       // w:hyperlink
-    BookmarkStart,   // w:bookmarkStart
-    BookmarkEnd,     // w:bookmarkEnd
-    FieldSimple,     // w:fldSimple
-    Drawing,         // w:drawing
-    InlineImage,     // wp:inline
-    SectionProperties, // w:sectPr
-    FootnoteReference, // w:footnoteReference
-    EndnoteReference, // w:endnoteReference
-    CommentReference, // w:commentReference
-    MoveFrom,        // w:moveFrom
-    MoveTo,          // w:moveTo
-    MoveFromRangeStart, // w:moveFromRangeStart
-    MoveFromRangeEnd,   // w:moveFromRangeEnd
-    MoveToRangeStart,   // w:moveToRangeStart
-    MoveToRangeEnd,     // w:moveToRangeEnd
-    CustomXml,       // w:customXml
-    Sdt,             // w:sdt
-    SdtContent,      // w:sdtContent
-    SdtPr,           // w:sdtPr
-    ProofErr,        // w:proofErr
-    AnnotationRef,   // w:annotationRef
+    Hyperlink,           // w:hyperlink
+    BookmarkStart,       // w:bookmarkStart
+    BookmarkEnd,         // w:bookmarkEnd
+    FieldSimple,         // w:fldSimple
+    Drawing,             // w:drawing
+    InlineImage,         // wp:inline
+    SectionProperties,   // w:sectPr
+    FootnoteReference,   // w:footnoteReference
+    EndnoteReference,    // w:endnoteReference
+    CommentReference,    // w:commentReference
+    MoveFrom,            // w:moveFrom
+    MoveTo,              // w:moveTo
+    MoveFromRangeStart,  // w:moveFromRangeStart
+    MoveFromRangeEnd,    // w:moveFromRangeEnd
+    MoveToRangeStart,    // w:moveToRangeStart
+    MoveToRangeEnd,      // w:moveToRangeEnd
+    CustomXml,           // w:customXml
+    Sdt,                 // w:sdt
+    SdtContent,          // w:sdtContent
+    SdtPr,               // w:sdtPr
+    ProofErr,            // w:proofErr
+    AnnotationRef,       // w:annotationRef
     Unknown(String),
 }
 
@@ -242,7 +242,11 @@ impl WordNode {
             }
             WordElementType::Break => {
                 // Line break within a run — add newline
-                let break_type = self.attributes.get("type").map(|s| s.as_str()).unwrap_or("");
+                let break_type = self
+                    .attributes
+                    .get("type")
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
                 if break_type == "page" {
                     buf.push_str("\n--- Page Break ---\n");
                 } else {

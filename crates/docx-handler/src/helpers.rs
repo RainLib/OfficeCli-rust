@@ -1,4 +1,4 @@
-use crate::dom_types::{WordNode, WordElementType};
+use crate::dom_types::{WordElementType, WordNode};
 use handler_common::HandlerError;
 
 /// Split a run at a text offset.
@@ -10,7 +10,10 @@ use handler_common::HandlerError;
 /// If offset equals text length, right is None.
 pub fn split_run_at_offset(run: &WordNode, offset: usize) -> (Option<WordNode>, Option<WordNode>) {
     // Find the w:t element and its text
-    let text_node = run.children.iter().find(|c| c.element_type == WordElementType::Text);
+    let text_node = run
+        .children
+        .iter()
+        .find(|c| c.element_type == WordElementType::Text);
     if text_node.is_none() {
         // No text in this run; can't split
         return (Some(run.clone()), None);
@@ -30,16 +33,19 @@ pub fn split_run_at_offset(run: &WordNode, offset: usize) -> (Option<WordNode>, 
 
     // Left run: text[0..offset]
     let left_text = text[..offset].to_string();
-    let left_preserve = if text_node.has_preserve_space() || left_text.ends_with(' ') || left_text.starts_with(' ') {
-        true
-    } else {
-        false
-    };
-    let left_t = WordNode::new(WordElementType::Text)
-        .with_text(&left_text);
+    let left_preserve =
+        if text_node.has_preserve_space() || left_text.ends_with(' ') || left_text.starts_with(' ')
+        {
+            true
+        } else {
+            false
+        };
+    let left_t = WordNode::new(WordElementType::Text).with_text(&left_text);
     let mut left_t = left_t;
     if left_preserve {
-        left_t.attributes.insert("xml:space".to_string(), "preserve".to_string());
+        left_t
+            .attributes
+            .insert("xml:space".to_string(), "preserve".to_string());
         left_t.preserve_space = true;
     }
 
@@ -54,9 +60,10 @@ pub fn split_run_at_offset(run: &WordNode, offset: usize) -> (Option<WordNode>, 
     // Right run: text[offset..end]
     let right_text = text[offset..].to_string();
     let _right_preserve = true; // Always preserve space on the right part after split
-    let mut right_t = WordNode::new(WordElementType::Text)
-        .with_text(&right_text);
-    right_t.attributes.insert("xml:space".to_string(), "preserve".to_string());
+    let mut right_t = WordNode::new(WordElementType::Text).with_text(&right_text);
+    right_t
+        .attributes
+        .insert("xml:space".to_string(), "preserve".to_string());
     right_t.preserve_space = true;
 
     let mut right_children = Vec::new();
@@ -72,7 +79,10 @@ pub fn split_run_at_offset(run: &WordNode, offset: usize) -> (Option<WordNode>, 
 
 /// Find the run and offset within a paragraph that corresponds to a global text offset.
 /// Returns (run_index_0based, offset_within_run_text).
-pub fn find_run_at_offset(para: &WordNode, para_text_offset: usize) -> Result<(usize, usize), HandlerError> {
+pub fn find_run_at_offset(
+    para: &WordNode,
+    para_text_offset: usize,
+) -> Result<(usize, usize), HandlerError> {
     let mut current_offset = 0;
     let runs = para.runs();
 
@@ -88,14 +98,16 @@ pub fn find_run_at_offset(para: &WordNode, para_text_offset: usize) -> Result<(u
         current_offset += run_len;
     }
 
-    Err(HandlerError::PathNotFound(
-        format!("offset {} beyond paragraph text length {}", para_text_offset, current_offset),
-    ))
+    Err(HandlerError::PathNotFound(format!(
+        "offset {} beyond paragraph text length {}",
+        para_text_offset, current_offset
+    )))
 }
 
 /// Count body-level content elements (paragraphs + tables) for path indexing.
 pub fn count_body_content_elements(body: &WordNode) -> usize {
-    body.children.iter()
+    body.children
+        .iter()
         .filter(|c| c.element_type.is_body_child())
         .count()
 }
@@ -161,7 +173,11 @@ pub fn build_run_properties(props: &std::collections::HashMap<String, String>) -
                 }
             }
             "underline" | "u" => {
-                let val = if value.is_empty() { "single" } else { value.as_str() };
+                let val = if value.is_empty() {
+                    "single"
+                } else {
+                    value.as_str()
+                };
                 let u_node = WordNode::new(WordElementType::Unknown("u".to_string()))
                     .with_attribute("val", val);
                 children.push(u_node);
@@ -209,7 +225,26 @@ pub fn build_run_properties(props: &std::collections::HashMap<String, String>) -
                 } else {
                     value.as_str()
                 };
-                if matches!(color_val.to_lowercase().as_str(), "yellow" | "green" | "cyan" | "magenta" | "blue" | "red" | "darkblue" | "darkcyan" | "darkgreen" | "darkmagenta" | "darkred" | "darkyellow" | "white" | "lightgray" | "darkgray" | "black" | "none") {
+                if matches!(
+                    color_val.to_lowercase().as_str(),
+                    "yellow"
+                        | "green"
+                        | "cyan"
+                        | "magenta"
+                        | "blue"
+                        | "red"
+                        | "darkblue"
+                        | "darkcyan"
+                        | "darkgreen"
+                        | "darkmagenta"
+                        | "darkred"
+                        | "darkyellow"
+                        | "white"
+                        | "lightgray"
+                        | "darkgray"
+                        | "black"
+                        | "none"
+                ) {
                     let hl_node = WordNode::new(WordElementType::Unknown("highlight".to_string()))
                         .with_attribute("val", &color_val.to_lowercase());
                     children.push(hl_node);
@@ -234,7 +269,9 @@ pub fn build_run_properties(props: &std::collections::HashMap<String, String>) -
 }
 
 /// Build paragraph properties from format properties.
-pub fn build_paragraph_properties(props: &std::collections::HashMap<String, String>) -> Option<WordNode> {
+pub fn build_paragraph_properties(
+    props: &std::collections::HashMap<String, String>,
+) -> Option<WordNode> {
     if props.is_empty() {
         return None;
     }

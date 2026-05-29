@@ -442,7 +442,11 @@ fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
     let l = (max + min) / 2.0;
 
     if delta.abs() > 1e-10 {
-        s = if l < 0.5 { delta / (max + min) } else { delta / (2.0 - max - min) };
+        s = if l < 0.5 {
+            delta / (max + min)
+        } else {
+            delta / (2.0 - max - min)
+        };
         if (max - rf).abs() < 1e-10 {
             h = ((gf - bf) / delta + (if gf < bf { 6.0 } else { 0.0 })) / 6.0;
         } else if (max - gf).abs() < 1e-10 {
@@ -455,11 +459,21 @@ fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
 }
 
 fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
-    if t < 0.0 { t += 1.0; }
-    if t > 1.0 { t -= 1.0; }
-    if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
-    if t < 1.0 / 2.0 { return q; }
-    if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
     p
 }
 
@@ -468,7 +482,11 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
         let val = (l * 255.0).round() as u8;
         return (val, val, val);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let r = (hue_to_rgb(p, q, h + 1.0 / 3.0) * 255.0).round() as u8;
     let g = (hue_to_rgb(p, q, h) * 255.0).round() as u8;
@@ -508,7 +526,9 @@ fn apply_transforms(
         let (h, s, mut l) = rgb_to_hsl(r, g, b);
         l = (l * m + o).clamp(0.0, 1.0);
         let (nr, ng, nb) = hsl_to_rgb(h, s, l);
-        r = nr; g = ng; b = nb;
+        r = nr;
+        g = ng;
+        b = nb;
     }
 
     if let Some(a_val) = alpha {
@@ -551,19 +571,29 @@ fn resolve_fill_color(
 
     if let Some(hex) = base_hex {
         if let Some(node) = clr_node {
-            let tint = node.children().find(|n| n.has_tag_name("tint"))
+            let tint = node
+                .children()
+                .find(|n| n.has_tag_name("tint"))
                 .and_then(|n| n.attribute("val"))
                 .and_then(|s| s.parse::<i32>().ok());
-            let shade = node.children().find(|n| n.has_tag_name("shade"))
+            let shade = node
+                .children()
+                .find(|n| n.has_tag_name("shade"))
                 .and_then(|n| n.attribute("val"))
                 .and_then(|s| s.parse::<i32>().ok());
-            let lum_mod = node.children().find(|n| n.has_tag_name("lumMod"))
+            let lum_mod = node
+                .children()
+                .find(|n| n.has_tag_name("lumMod"))
                 .and_then(|n| n.attribute("val"))
                 .and_then(|s| s.parse::<i32>().ok());
-            let lum_off = node.children().find(|n| n.has_tag_name("lumOff"))
+            let lum_off = node
+                .children()
+                .find(|n| n.has_tag_name("lumOff"))
                 .and_then(|n| n.attribute("val"))
                 .and_then(|s| s.parse::<i32>().ok());
-            let alpha = node.children().find(|n| n.has_tag_name("alpha"))
+            let alpha = node
+                .children()
+                .find(|n| n.has_tag_name("alpha"))
                 .and_then(|n| n.attribute("val"))
                 .and_then(|s| s.parse::<i32>().ok());
             return Some(apply_transforms(&hex, tint, shade, lum_mod, lum_off, alpha));
@@ -573,17 +603,17 @@ fn resolve_fill_color(
     None
 }
 
-fn gradient_to_css(
-    grad_fill: &roxmltree::Node,
-    theme_colors: &HashMap<String, String>,
-) -> String {
+fn gradient_to_css(grad_fill: &roxmltree::Node, theme_colors: &HashMap<String, String>) -> String {
     let mut stops = Vec::new();
     if let Some(stop_list) = grad_fill.children().find(|n| n.has_tag_name("gsLst")) {
         for stop in stop_list.children().filter(|n| n.has_tag_name("gs")) {
-            let pos = stop.attribute("pos")
+            let pos = stop
+                .attribute("pos")
                 .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0) / 1000.0;
-            let color = resolve_fill_color(&stop, theme_colors).unwrap_or_else(|| "transparent".to_string());
+                .unwrap_or(0.0)
+                / 1000.0;
+            let color = resolve_fill_color(&stop, theme_colors)
+                .unwrap_or_else(|| "transparent".to_string());
             stops.push(format!("{} {:.2}%", color, pos));
         }
     }
@@ -596,9 +626,11 @@ fn gradient_to_css(
     }
 
     let lin = grad_fill.children().find(|n| n.has_tag_name("lin"));
-    let angle_deg = lin.and_then(|n| n.attribute("ang"))
+    let angle_deg = lin
+        .and_then(|n| n.attribute("ang"))
         .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(5400000.0) / 60000.0;
+        .unwrap_or(5400000.0)
+        / 60000.0;
     let css_angle = angle_deg + 90.0;
     format!("linear-gradient({:.2}deg, {})", css_angle, stops.join(", "))
 }
@@ -612,39 +644,43 @@ fn parse_outline(
     if ln.children().any(|n| n.has_tag_name("noFill")) {
         return None;
     }
-    let has_fill = ln.children().any(|n| n.has_tag_name("solidFill") || n.has_tag_name("gradFill"));
+    let has_fill = ln
+        .children()
+        .any(|n| n.has_tag_name("solidFill") || n.has_tag_name("gradFill"));
     let width_emu = ln.attribute("w").and_then(|s| s.parse::<f64>().ok());
     if !has_fill && width_emu.is_none() {
         return None;
     }
 
-    let color = ln.children().find(|n| n.has_tag_name("solidFill"))
+    let color = ln
+        .children()
+        .find(|n| n.has_tag_name("solidFill"))
         .and_then(|n| resolve_fill_color(&n, theme_colors))
         .unwrap_or_else(|| {
-            theme_colors.get("dk1")
+            theme_colors
+                .get("dk1")
                 .map(|hex| format!("#{}", hex))
                 .unwrap_or_else(|| "#000000".to_string())
         });
     let width_pt = width_emu.unwrap_or(12700.0) / 12700.0;
     let width_pt = if width_pt < 0.5 { 0.5 } else { width_pt };
 
-    let prst_dash = ln.children().find(|n| n.has_tag_name("prstDash"))
+    let prst_dash = ln
+        .children()
+        .find(|n| n.has_tag_name("prstDash"))
         .and_then(|n| n.attribute("val"))
         .unwrap_or("solid");
 
     Some((width_pt, prst_dash.to_string(), color))
 }
 
-fn outline_to_css(
-    ln: &roxmltree::Node,
-    theme_colors: &HashMap<String, String>,
-) -> String {
+fn outline_to_css(ln: &roxmltree::Node, theme_colors: &HashMap<String, String>) -> String {
     if let Some((width_pt, prst_dash, color)) = parse_outline(ln, theme_colors) {
         let border_style = match prst_dash.as_str() {
             "dash" | "lgDash" | "sysDash" => "dashed",
             "dot" | "sysDot" => "dotted",
             "dashDot" | "lgDashDot" | "sysDashDot" | "sysDashDotDot" => "dashed",
-            _ => "solid"
+            _ => "solid",
         };
         format!("border:{:.2}pt {} {}", width_pt, border_style, color)
     } else {
@@ -662,7 +698,15 @@ fn dash_type_to_svg_dasharray(dash_type: &str, stroke_width: f64) -> String {
         "dashDot" => format!("{:.2} {:.2} {:.2} {:.2}", w * 4.0, w * 2.0, w, w * 2.0),
         "lgDashDot" => format!("{:.2} {:.2} {:.2} {:.2}", w * 8.0, w * 2.0, w, w * 2.0),
         "sysDashDot" => format!("{:.2} {:.2} {:.2} {:.2}", w * 3.0, w * 1.5, w, w * 1.5),
-        "sysDashDotDot" => format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}", w * 3.0, w * 1.5, w, w * 1.5, w, w * 1.5),
+        "sysDashDotDot" => format!(
+            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
+            w * 3.0,
+            w * 1.5,
+            w,
+            w * 1.5,
+            w,
+            w * 1.5
+        ),
         _ => "".to_string(),
     }
 }
@@ -674,13 +718,17 @@ fn effect_list_to_shadow_css(
     theme_colors: &HashMap<String, String>,
 ) -> String {
     if let Some(shadow) = effect_list.children().find(|n| n.has_tag_name("outerShdw")) {
-        let alpha = shadow.children().find(|n| n.has_tag_name("alpha"))
+        let alpha = shadow
+            .children()
+            .find(|n| n.has_tag_name("alpha"))
             .and_then(|n| n.attribute("val"))
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(50000);
         let opacity = alpha as f64 / 100000.0;
 
-        let rgb = shadow.children().find(|n| n.has_tag_name("srgbClr"))
+        let rgb = shadow
+            .children()
+            .find(|n| n.has_tag_name("srgbClr"))
             .and_then(|n| n.attribute("val"))
             .map(|s| s.to_string());
 
@@ -704,14 +752,29 @@ fn effect_list_to_shadow_css(
             format!("rgba(0,0,0,{:.2})", opacity)
         };
 
-        let blur_pt = shadow.attribute("blurRad").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-        let dist_pt = shadow.attribute("dist").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-        let angle_deg = shadow.attribute("dir").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 60000.0;
+        let blur_pt = shadow
+            .attribute("blurRad")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 12700.0;
+        let dist_pt = shadow
+            .attribute("dist")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 12700.0;
+        let angle_deg = shadow
+            .attribute("dir")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 60000.0;
         let angle_rad = angle_deg * std::f64::consts::PI / 180.0;
         let offset_x = dist_pt * angle_rad.cos();
         let offset_y = dist_pt * angle_rad.sin();
 
-        return format!("drop-shadow({:.2}pt {:.2}pt {:.2}pt {})", offset_x, offset_y, blur_pt, color);
+        return format!(
+            "drop-shadow({:.2}pt {:.2}pt {:.2}pt {})",
+            offset_x, offset_y, blur_pt, color
+        );
     }
     "".to_string()
 }
@@ -721,14 +784,22 @@ fn effect_list_to_glow_css(
     theme_colors: &HashMap<String, String>,
 ) -> String {
     if let Some(glow) = effect_list.children().find(|n| n.has_tag_name("glow")) {
-        let alpha = glow.children().find(|n| n.has_tag_name("alpha"))
+        let alpha = glow
+            .children()
+            .find(|n| n.has_tag_name("alpha"))
             .and_then(|n| n.attribute("val"))
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(40000);
         let opacity = alpha as f64 / 100000.0;
-        let radius_pt = glow.attribute("rad").and_then(|s| s.parse::<f64>().ok()).unwrap_or(63500.0) / 12700.0;
+        let radius_pt = glow
+            .attribute("rad")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(63500.0)
+            / 12700.0;
 
-        let rgb = glow.children().find(|n| n.has_tag_name("srgbClr"))
+        let rgb = glow
+            .children()
+            .find(|n| n.has_tag_name("srgbClr"))
             .and_then(|n| n.attribute("val"))
             .map(|s| s.to_string());
 
@@ -765,18 +836,44 @@ fn effect_list_to_glow_css(
 }
 
 fn effect_list_to_reflection_css(effect_list: &roxmltree::Node) -> String {
-    if let Some(refl) = effect_list.children().find(|n| n.has_tag_name("reflection")) {
-        let dist_pt = refl.attribute("dist").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-        let start_opacity = refl.attribute("stAl").and_then(|s| s.parse::<f64>().ok()).unwrap_or(52000.0) / 100000.0;
-        let end_opacity = refl.attribute("endAl").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 100000.0;
-        let end_pos = refl.attribute("endPos").and_then(|s| s.parse::<f64>().ok()).unwrap_or(90000.0) / 1000.0;
+    if let Some(refl) = effect_list
+        .children()
+        .find(|n| n.has_tag_name("reflection"))
+    {
+        let dist_pt = refl
+            .attribute("dist")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 12700.0;
+        let start_opacity = refl
+            .attribute("stAl")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(52000.0)
+            / 100000.0;
+        let end_opacity = refl
+            .attribute("endAl")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 100000.0;
+        let end_pos = refl
+            .attribute("endPos")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(90000.0)
+            / 1000.0;
         let end_pos = end_pos.clamp(0.0, 100.0);
 
         let start_stop = format!("rgba(255,255,255,{:.3}) 0%", start_opacity);
         let end_stop = format!("rgba(255,255,255,{:.3}) {:.1}%", end_opacity, end_pos);
-        let tail_stop = if end_pos < 100.0 { ",transparent 100%" } else { "" };
+        let tail_stop = if end_pos < 100.0 {
+            ",transparent 100%"
+        } else {
+            ""
+        };
 
-        return format!("-webkit-box-reflect:below {:.2}pt linear-gradient({}, {}{})", dist_pt, start_stop, end_stop, tail_stop);
+        return format!(
+            "-webkit-box-reflect:below {:.2}pt linear-gradient({}, {}{})",
+            dist_pt, start_stop, end_stop, tail_stop
+        );
     }
     "".to_string()
 }
@@ -785,7 +882,10 @@ fn effect_list_to_reflection_css(effect_list: &roxmltree::Node) -> String {
 
 fn read_adj_value(preset_geom: &roxmltree::Node, index: usize, default_value: i64) -> i64 {
     if let Some(av_lst) = preset_geom.children().find(|n| n.has_tag_name("avLst")) {
-        let gd = av_lst.children().filter(|n| n.has_tag_name("gd")).nth(index);
+        let gd = av_lst
+            .children()
+            .filter(|n| n.has_tag_name("gd"))
+            .nth(index);
         if let Some(guide) = gd {
             if let Some(fmla) = guide.attribute("fmla") {
                 if fmla.starts_with("val ") {
@@ -832,14 +932,23 @@ fn star5_polygon(preset_geom: &roxmltree::Node) -> String {
     format!("clip-path:polygon({})", pts.join(","))
 }
 
-fn preset_geometry_to_css(preset: &str, cx_pt: f64, cy_pt: f64, preset_geom: &roxmltree::Node) -> String {
+fn preset_geometry_to_css(
+    preset: &str,
+    cx_pt: f64,
+    cy_pt: f64,
+    preset_geom: &roxmltree::Node,
+) -> String {
     if preset == "rightArrow" {
         return right_arrow_polygon(cx_pt, cy_pt, preset_geom);
     }
     if preset == "star5" {
         return star5_polygon(preset_geom);
     }
-    if preset == "roundRect" || preset == "round1Rect" || preset == "round2SameRect" || preset == "round2DiagRect" {
+    if preset == "roundRect"
+        || preset == "round1Rect"
+        || preset == "round2SameRect"
+        || preset == "round2DiagRect"
+    {
         let min_side = cx_pt.min(cy_pt);
         let av_val = read_adj_value(preset_geom, 0, 16667).clamp(0, 100000);
         let radius = min_side * (av_val as f64 / 100000.0);
@@ -883,8 +992,14 @@ fn custom_geometry_to_clip_path(cust_geom: &roxmltree::Node) -> String {
         None => return "".to_string(),
     };
 
-    let path_w = path.attribute("w").and_then(|s| s.parse::<f64>().ok()).unwrap_or(100000.0);
-    let path_h = path.attribute("h").and_then(|s| s.parse::<f64>().ok()).unwrap_or(100000.0);
+    let path_w = path
+        .attribute("w")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(100000.0);
+    let path_h = path
+        .attribute("h")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(100000.0);
     let pw = if path_w == 0.0 { 100000.0 } else { path_w };
     let ph = if path_h == 0.0 { 100000.0 } else { path_h };
 
@@ -938,18 +1053,21 @@ fn custom_geometry_to_clip_path(cust_geom: &roxmltree::Node) -> String {
                 if let Some(pt) = child.children().find(|n| n.has_tag_name("pt")) {
                     if let Some((mx, my)) = try_parse_point(&pt) {
                         poly_points.push(format!("{:.1}% {:.1}%", mx, my));
-                        cur_x = mx; cur_y = my;
+                        cur_x = mx;
+                        cur_y = my;
                     }
                 }
             } else if tag == "lineTo" {
                 if let Some(pt) = child.children().find(|n| n.has_tag_name("pt")) {
                     if let Some((lx, ly)) = try_parse_point(&pt) {
                         poly_points.push(format!("{:.1}% {:.1}%", lx, ly));
-                        cur_x = lx; cur_y = ly;
+                        cur_x = lx;
+                        cur_y = ly;
                     }
                 }
             } else if tag == "cubicBezTo" {
-                let pts: Vec<roxmltree::Node> = child.children().filter(|n| n.has_tag_name("pt")).collect();
+                let pts: Vec<roxmltree::Node> =
+                    child.children().filter(|n| n.has_tag_name("pt")).collect();
                 if pts.len() >= 3 {
                     if let (Some((c1x, c1y)), Some((c2x, c2y)), Some((c3x, c3y))) = (
                         try_parse_point(&pts[0]),
@@ -959,20 +1077,27 @@ fn custom_geometry_to_clip_path(cust_geom: &roxmltree::Node) -> String {
                         for i in 1..=BEZIER_SEGMENTS {
                             let t = i as f64 / BEZIER_SEGMENTS as f64;
                             let u = 1.0 - t;
-                            let px = u * u * u * cur_x + 3.0 * u * u * t * c1x + 3.0 * u * t * t * c2x + t * t * t * c3x;
-                            let py = u * u * u * cur_y + 3.0 * u * u * t * c1y + 3.0 * u * t * t * c2y + t * t * t * c3y;
+                            let px = u * u * u * cur_x
+                                + 3.0 * u * u * t * c1x
+                                + 3.0 * u * t * t * c2x
+                                + t * t * t * c3x;
+                            let py = u * u * u * cur_y
+                                + 3.0 * u * u * t * c1y
+                                + 3.0 * u * t * t * c2y
+                                + t * t * t * c3y;
                             poly_points.push(format!("{:.1}% {:.1}%", px, py));
                         }
-                        cur_x = c3x; cur_y = c3y;
+                        cur_x = c3x;
+                        cur_y = c3y;
                     }
                 }
             } else if tag == "quadBezTo" {
-                let pts: Vec<roxmltree::Node> = child.children().filter(|n| n.has_tag_name("pt")).collect();
+                let pts: Vec<roxmltree::Node> =
+                    child.children().filter(|n| n.has_tag_name("pt")).collect();
                 if pts.len() >= 2 {
-                    if let (Some((q1x, q1y)), Some((q2x, q2y))) = (
-                        try_parse_point(&pts[0]),
-                        try_parse_point(&pts[1]),
-                    ) {
+                    if let (Some((q1x, q1y)), Some((q2x, q2y))) =
+                        (try_parse_point(&pts[0]), try_parse_point(&pts[1]))
+                    {
                         for i in 1..=BEZIER_SEGMENTS {
                             let t = i as f64 / BEZIER_SEGMENTS as f64;
                             let u = 1.0 - t;
@@ -980,7 +1105,8 @@ fn custom_geometry_to_clip_path(cust_geom: &roxmltree::Node) -> String {
                             let py = u * u * cur_y + 2.0 * u * t * q1y + t * t * q2y;
                             poly_points.push(format!("{:.1}% {:.1}%", px, py));
                         }
-                        cur_x = q2x; cur_y = q2y;
+                        cur_x = q2x;
+                        cur_y = q2y;
                     }
                 }
             }
@@ -1003,7 +1129,9 @@ fn find_matching_placeholder<'a>(
         for sp in shape_tree.descendants().filter(|n| n.has_tag_name("sp")) {
             if let Some(ph) = sp.descendants().find(|n| n.has_tag_name("ph")) {
                 if let Some(ph_i) = ph.attribute("idx").and_then(|s| s.parse::<usize>().ok()) {
-                    if ph_i == idx { return Some(sp); }
+                    if ph_i == idx {
+                        return Some(sp);
+                    }
                 }
             }
         }
@@ -1012,7 +1140,9 @@ fn find_matching_placeholder<'a>(
         for sp in shape_tree.descendants().filter(|n| n.has_tag_name("sp")) {
             if let Some(ph) = sp.descendants().find(|n| n.has_tag_name("ph")) {
                 if let Some(ph_t) = ph.attribute("type") {
-                    if ph_t == ty { return Some(sp); }
+                    if ph_t == ty {
+                        return Some(sp);
+                    }
                 }
             }
         }
@@ -1021,7 +1151,12 @@ fn find_matching_placeholder<'a>(
         for sp in shape_tree.descendants().filter(|n| n.has_tag_name("sp")) {
             if let Some(ph) = sp.descendants().find(|n| n.has_tag_name("ph")) {
                 let ph_t = ph.attribute("type").unwrap_or("body");
-                if ph_t == "title" || ph_t == "ctrTitle" || ph_t == "subTitle" || ph_t == "body" || ph_t == "obj" {
+                if ph_t == "title"
+                    || ph_t == "ctrTitle"
+                    || ph_t == "subTitle"
+                    || ph_t == "body"
+                    || ph_t == "obj"
+                {
                     return Some(sp);
                 }
             }
@@ -1039,11 +1174,26 @@ fn resolve_inherited_position(
     if let Some(tree) = layout_tree {
         if let Some(matched) = find_matching_placeholder(ph_type, ph_idx, &tree) {
             if let Some(xfrm) = matched.descendants().find(|n| n.has_tag_name("xfrm")) {
-                if let (Some(off), Some(ext)) = (xfrm.descendants().find(|n| n.has_tag_name("off")), xfrm.descendants().find(|n| n.has_tag_name("ext"))) {
-                    let x = off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    let y = off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    let cx = ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    let cy = ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                if let (Some(off), Some(ext)) = (
+                    xfrm.descendants().find(|n| n.has_tag_name("off")),
+                    xfrm.descendants().find(|n| n.has_tag_name("ext")),
+                ) {
+                    let x = off
+                        .attribute("x")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let y = off
+                        .attribute("y")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let cx = ext
+                        .attribute("cx")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let cy = ext
+                        .attribute("cy")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
                     return Some((x, y, cx, cy));
                 }
             }
@@ -1052,11 +1202,26 @@ fn resolve_inherited_position(
     if let Some(tree) = master_tree {
         if let Some(matched) = find_matching_placeholder(ph_type, ph_idx, &tree) {
             if let Some(xfrm) = matched.descendants().find(|n| n.has_tag_name("xfrm")) {
-                if let (Some(off), Some(ext)) = (xfrm.descendants().find(|n| n.has_tag_name("off")), xfrm.descendants().find(|n| n.has_tag_name("ext"))) {
-                    let x = off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    let y = off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    let cx = ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    let cy = ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                if let (Some(off), Some(ext)) = (
+                    xfrm.descendants().find(|n| n.has_tag_name("off")),
+                    xfrm.descendants().find(|n| n.has_tag_name("ext")),
+                ) {
+                    let x = off
+                        .attribute("x")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let y = off
+                        .attribute("y")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let cx = ext
+                        .attribute("cx")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let cy = ext
+                        .attribute("cy")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
                     return Some((x, y, cx, cy));
                 }
             }
@@ -1081,7 +1246,9 @@ fn get_level_def_rp<'a>(
         8 => "lvl9pPr",
         _ => "lvl1pPr",
     };
-    style_list.children().find(|n| n.has_tag_name(tag_name))
+    style_list
+        .children()
+        .find(|n| n.has_tag_name(tag_name))
         .and_then(|n| n.children().find(|c| c.has_tag_name("defRPr")))
 }
 
@@ -1098,7 +1265,8 @@ fn resolve_placeholder_font_size(
             if let Some(tx_body) = matched.descendants().find(|n| n.has_tag_name("txBody")) {
                 if let Some(lst_style) = tx_body.children().find(|n| n.has_tag_name("lstStyle")) {
                     if let Some(def_rp) = get_level_def_rp(&lst_style, level) {
-                        if let Some(sz) = def_rp.attribute("sz").and_then(|s| s.parse::<f64>().ok()) {
+                        if let Some(sz) = def_rp.attribute("sz").and_then(|s| s.parse::<f64>().ok())
+                        {
                             return Some(sz / 100.0);
                         }
                     }
@@ -1111,7 +1279,8 @@ fn resolve_placeholder_font_size(
             if let Some(tx_body) = matched.descendants().find(|n| n.has_tag_name("txBody")) {
                 if let Some(lst_style) = tx_body.children().find(|n| n.has_tag_name("lstStyle")) {
                     if let Some(def_rp) = get_level_def_rp(&lst_style, level) {
-                        if let Some(sz) = def_rp.attribute("sz").and_then(|s| s.parse::<f64>().ok()) {
+                        if let Some(sz) = def_rp.attribute("sz").and_then(|s| s.parse::<f64>().ok())
+                        {
                             return Some(sz / 100.0);
                         }
                     }
@@ -1120,8 +1289,12 @@ fn resolve_placeholder_font_size(
         }
     }
     if let Some(tx_styles) = master_text_styles {
-        let is_title = ph_type.map(|t| t == "title" || t == "ctrTitle").unwrap_or(false);
-        let is_body = ph_type.map(|t| t == "body" || t == "subTitle" || t == "obj").unwrap_or(false);
+        let is_title = ph_type
+            .map(|t| t == "title" || t == "ctrTitle")
+            .unwrap_or(false);
+        let is_body = ph_type
+            .map(|t| t == "body" || t == "subTitle" || t == "obj")
+            .unwrap_or(false);
 
         let style_list = if is_title {
             tx_styles.children().find(|n| n.has_tag_name("titleStyle"))
@@ -1140,53 +1313,81 @@ fn resolve_placeholder_font_size(
         }
     }
 
-    let is_title = ph_type.map(|t| t == "title" || t == "ctrTitle").unwrap_or(false);
+    let is_title = ph_type
+        .map(|t| t == "title" || t == "ctrTitle")
+        .unwrap_or(false);
     let is_subtitle = ph_type.map(|t| t == "subTitle").unwrap_or(false);
-    if is_title { Some(44.0) } else if is_subtitle { Some(32.0) } else { None }
+    if is_title {
+        Some(44.0)
+    } else if is_subtitle {
+        Some(32.0)
+    } else {
+        None
+    }
 }
 
 // ==================== Speaker Notes ====================
 
-fn get_speaker_notes(
-    package: &OxmlPackage,
-    slide_path: &str,
-) -> Option<String> {
+fn get_speaker_notes(package: &OxmlPackage, slide_path: &str) -> Option<String> {
     let slide_rels = package.part_rels(slide_path).ok()?;
-    let notes_rel = slide_rels.all().values().find(|r| r.type_uri.contains("relationships/notesSlide"))?;
+    let notes_rel = slide_rels
+        .all()
+        .values()
+        .find(|r| r.type_uri.contains("relationships/notesSlide"))?;
     let notes_path = package.resolve_rel_target(slide_path, &notes_rel.target);
 
     let notes_xml = package.read_part_xml(&notes_path).ok()?;
     let doc = roxmltree::Document::parse(&notes_xml).ok()?;
 
     let sp_tree = doc.descendants().find(|n| n.has_tag_name("spTree"))?;
-    let notes_shape = sp_tree.children().filter(|n| n.has_tag_name("sp")).find(|sp| {
-        if let Some(ph) = sp.descendants().find(|n| n.has_tag_name("ph")) {
-            if let Some(idx) = ph.attribute("idx").and_then(|s| s.parse::<usize>().ok()) {
-                if idx == 1 { return true; }
+    let notes_shape = sp_tree
+        .children()
+        .filter(|n| n.has_tag_name("sp"))
+        .find(|sp| {
+            if let Some(ph) = sp.descendants().find(|n| n.has_tag_name("ph")) {
+                if let Some(idx) = ph.attribute("idx").and_then(|s| s.parse::<usize>().ok()) {
+                    if idx == 1 {
+                        return true;
+                    }
+                }
+                if let Some(ty) = ph.attribute("type") {
+                    if ty == "body" {
+                        return true;
+                    }
+                }
             }
-            if let Some(ty) = ph.attribute("type") {
-                if ty == "body" { return true; }
-            }
-        }
-        false
-    });
+            false
+        });
 
     let shape = notes_shape.or_else(|| {
-        sp_tree.children().filter(|n| n.has_tag_name("sp")).find(|sp| {
-            sp.descendants().any(|n| n.has_tag_name("ph") && n.attribute("type") == Some("body"))
-        })
+        sp_tree
+            .children()
+            .filter(|n| n.has_tag_name("sp"))
+            .find(|sp| {
+                sp.descendants()
+                    .any(|n| n.has_tag_name("ph") && n.attribute("type") == Some("body"))
+            })
     })?;
 
     let tx_body = shape.children().find(|n| n.has_tag_name("txBody"))?;
     let mut notes_lines = Vec::new();
     let mut rtl = false;
 
-    let paragraphs: Vec<roxmltree::Node> = tx_body.descendants().filter(|n| n.has_tag_name("p")).collect();
-    if paragraphs.is_empty() { return None; }
+    let paragraphs: Vec<roxmltree::Node> = tx_body
+        .descendants()
+        .filter(|n| n.has_tag_name("p"))
+        .collect();
+    if paragraphs.is_empty() {
+        return None;
+    }
 
     if let Some(first_p) = paragraphs.first() {
         if let Some(p_pr) = first_p.children().find(|n| n.has_tag_name("pPr")) {
-            if p_pr.attribute("rtl").map(|s| s == "1" || s == "true").unwrap_or(false) {
+            if p_pr
+                .attribute("rtl")
+                .map(|s| s == "1" || s == "true")
+                .unwrap_or(false)
+            {
                 rtl = true;
             }
         }
@@ -1202,7 +1403,9 @@ fn get_speaker_notes(
         notes_lines.push(p_text);
     }
 
-    if notes_lines.iter().all(|s| s.trim().is_empty()) { return None; }
+    if notes_lines.iter().all(|s| s.trim().is_empty()) {
+        return None;
+    }
 
     let mut sb = String::new();
     let dir_attr = if rtl { " dir=\"rtl\"" } else { "" };
@@ -1224,7 +1427,9 @@ fn get_speaker_notes(
 // ==================== Text Lists & Bullet Counters ====================
 
 fn to_alpha(mut n: usize, upper: bool) -> String {
-    if n == 0 { n = 1; }
+    if n == 0 {
+        n = 1;
+    }
     let mut s = String::new();
     while n > 0 {
         n -= 1;
@@ -1237,9 +1442,13 @@ fn to_alpha(mut n: usize, upper: bool) -> String {
 }
 
 fn to_roman(mut n: usize) -> String {
-    if n == 0 { return "0".to_string(); }
+    if n == 0 {
+        return "0".to_string();
+    }
     let values = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
-    let numerals = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"];
+    let numerals = [
+        "M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I",
+    ];
     let mut s = String::new();
     for i in 0..values.len() {
         while n >= values[i] {
@@ -1290,13 +1499,18 @@ fn render_alternate_content(
 ) {
     let is_model_3d = ac.descendants().any(|d| d.has_tag_name("model3d"));
     let is_zoom = ac.descendants().any(|d| d.has_tag_name("sldZm"));
-    if !is_model_3d && !is_zoom { return; }
+    if !is_model_3d && !is_zoom {
+        return;
+    }
 
     let choice = match ac.children().find(|n| n.has_tag_name("Choice")) {
         Some(c) => c,
         None => return,
     };
-    let frame = match choice.children().find(|n| n.has_tag_name("graphicFrame") || n.has_tag_name("sp")) {
+    let frame = match choice
+        .children()
+        .find(|n| n.has_tag_name("graphicFrame") || n.has_tag_name("sp"))
+    {
         Some(f) => f,
         None => return,
     };
@@ -1314,10 +1528,22 @@ fn render_alternate_content(
         None => return,
     };
 
-    let x = off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let y = off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let cx = ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let cy = ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let x = off
+        .attribute("x")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let y = off
+        .attribute("y")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cx = ext
+        .attribute("cx")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cy = ext
+        .attribute("cy")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
 
     let left_pt = x / 12700.0;
     let top_pt = y / 12700.0;
@@ -1325,9 +1551,13 @@ fn render_alternate_content(
     let height_pt = cy / 12700.0;
 
     if is_model_3d {
-        render_model_3d(&choice, slide_path, rels, left_pt, top_pt, width_pt, height_pt, output, package);
+        render_model_3d(
+            &choice, slide_path, rels, left_pt, top_pt, width_pt, height_pt, output, package,
+        );
     } else {
-        render_zoom_fallback(&choice, slide_path, rels, left_pt, top_pt, width_pt, height_pt, output, package);
+        render_zoom_fallback(
+            &choice, slide_path, rels, left_pt, top_pt, width_pt, height_pt, output, package,
+        );
     }
 }
 
@@ -1346,7 +1576,10 @@ fn render_model_3d(
         Some(m) => m,
         None => return,
     };
-    let embed_id = match model3d.attribute((crate::dom_types::NS_R, "embed")).or_else(|| model3d.attribute("r:embed")) {
+    let embed_id = match model3d
+        .attribute((crate::dom_types::NS_R, "embed"))
+        .or_else(|| model3d.attribute("r:embed"))
+    {
         Some(id) => id,
         None => return,
     };
@@ -1366,7 +1599,9 @@ fn render_model_3d(
         }
     }
 
-    if glb_b64.is_empty() { return; }
+    if glb_b64.is_empty() {
+        return;
+    }
 
     static mut MODEL_COUNTER: usize = 0;
     let m_id = unsafe {
@@ -1382,22 +1617,38 @@ fn render_model_3d(
     let mut rot_y = 0.0;
     let mut rot_z = 0.0;
     if let Some(rot) = model3d.descendants().find(|n| n.has_tag_name("rot")) {
-        let ax = rot.attribute("ax").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let ay = rot.attribute("ay").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let az = rot.attribute("az").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let ax = rot
+            .attribute("ax")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let ay = rot
+            .attribute("ay")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let az = rot
+            .attribute("az")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
         rot_x = ax / 60000.0 * std::f64::consts::PI / 180.0;
         rot_y = ay / 60000.0 * std::f64::consts::PI / 180.0;
         rot_z = az / 60000.0 * std::f64::consts::PI / 180.0;
     }
 
     let mut fallback_img_src = None;
-    if let Some(fallback) = choice.parent().and_then(|p| p.children().find(|n| n.has_tag_name("Fallback"))) {
+    if let Some(fallback) = choice
+        .parent()
+        .and_then(|p| p.children().find(|n| n.has_tag_name("Fallback")))
+    {
         if let Some(fb_blip) = fallback.descendants().find(|n| n.has_tag_name("blip")) {
-            if let Some(fb_embed) = fb_blip.attribute((crate::dom_types::NS_R, "embed")).or_else(|| fb_blip.attribute("r:embed")) {
+            if let Some(fb_embed) = fb_blip
+                .attribute((crate::dom_types::NS_R, "embed"))
+                .or_else(|| fb_blip.attribute("r:embed"))
+            {
                 if let Some(rel) = rels.get(fb_embed) {
                     let fb_target = package.resolve_rel_target(slide_path, &rel.target);
                     if let Ok(bytes) = package.read_part_bytes(&fb_target) {
-                        fallback_img_src = Some(format!("data:image/png;base64,{}", base64_encode(&bytes)));
+                        fallback_img_src =
+                            Some(format!("data:image/png;base64,{}", base64_encode(&bytes)));
                     }
                 }
             }
@@ -1412,14 +1663,20 @@ fn render_model_3d(
         "      <div class=\"m3d-label\" style=\"position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:11pt sans-serif;color:#495057;text-align:center;padding:4px;pointer-events:none;\">{}</div>\n",
         label
     ));
-    output.push_str(&format!("      <canvas id=\"{}\" style=\"position:relative;width:100%;height:100%;\"></canvas>\n", canvas_id));
+    output.push_str(&format!(
+        "      <canvas id=\"{}\" style=\"position:relative;width:100%;height:100%;\"></canvas>\n",
+        canvas_id
+    ));
     if let Some(ref fb_src) = fallback_img_src {
         output.push_str(&format!("      <img class=\"m3d-fallback\" src=\"{}\" style=\"width:100%;height:100%;object-fit:contain;display:none;\" />\n", fb_src));
     }
     output.push_str("    </div>\n");
 
     let glb_var_name = format!("_glb_{}", canvas_id);
-    output.push_str(&format!("<script>window.{}='{}';</script>\n", glb_var_name, glb_b64));
+    output.push_str(&format!(
+        "<script>window.{}='{}';</script>\n",
+        glb_var_name, glb_b64
+    ));
 
     output.push_str(&format!(r#"    <script type="module">
     let THREE, GLTFLoader;
@@ -1508,13 +1765,20 @@ fn render_zoom_fallback(
     package: &OxmlPackage,
 ) {
     let mut fallback_img_src = None;
-    if let Some(fallback) = choice.parent().and_then(|p| p.children().find(|n| n.has_tag_name("Fallback"))) {
+    if let Some(fallback) = choice
+        .parent()
+        .and_then(|p| p.children().find(|n| n.has_tag_name("Fallback")))
+    {
         if let Some(fb_blip) = fallback.descendants().find(|n| n.has_tag_name("blip")) {
-            if let Some(fb_embed) = fb_blip.attribute((crate::dom_types::NS_R, "embed")).or_else(|| fb_blip.attribute("r:embed")) {
+            if let Some(fb_embed) = fb_blip
+                .attribute((crate::dom_types::NS_R, "embed"))
+                .or_else(|| fb_blip.attribute("r:embed"))
+            {
                 if let Some(rel) = rels.get(fb_embed) {
                     let fb_target = package.resolve_rel_target(slide_path, &rel.target);
                     if let Ok(bytes) = package.read_part_bytes(&fb_target) {
-                        fallback_img_src = Some(format!("data:image/png;base64,{}", base64_encode(&bytes)));
+                        fallback_img_src =
+                            Some(format!("data:image/png;base64,{}", base64_encode(&bytes)));
                     }
                 }
             }
@@ -1526,7 +1790,10 @@ fn render_zoom_fallback(
         left_pt, top_pt, width_pt, height_pt
     ));
     if let Some(src) = fallback_img_src {
-        output.push_str(&format!("      <img src=\"{}\" style=\"width:100%;height:100%;object-fit:contain;\" />\n", src));
+        output.push_str(&format!(
+            "      <img src=\"{}\" style=\"width:100%;height:100%;object-fit:contain;\" />\n",
+            src
+        ));
     }
     output.push_str("    </div>\n");
 }
@@ -1539,7 +1806,9 @@ fn render_ole_placeholder(
     height_pt: f64,
     output: &mut String,
 ) {
-    let prog_id = gf.descendants().find(|n| n.has_tag_name("oleObj"))
+    let prog_id = gf
+        .descendants()
+        .find(|n| n.has_tag_name("oleObj"))
         .and_then(|n| n.attribute("progId"))
         .unwrap_or("Embedded Object");
     let label = html_escape(&format!("OLE: {}", prog_id));
@@ -1582,15 +1851,24 @@ fn get_layout_and_master_paths(
 
 /// Render the PowerPoint presentation as HTML for browser preview.
 pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
-    let pres_xml = package.read_part_xml("ppt/presentation.xml")
-        .map_err(|e| HandlerError::OperationFailed(format!("Failed to read presentation.xml: {}", e)))?;
+    let pres_xml = package.read_part_xml("ppt/presentation.xml").map_err(|e| {
+        HandlerError::OperationFailed(format!("Failed to read presentation.xml: {}", e))
+    })?;
     let doc = roxmltree::Document::parse(&pres_xml)
         .map_err(|e| HandlerError::OperationFailed(format!("roxmltree parse error: {}", e)))?;
 
-    let sld_sz = doc.descendants().find(|n| n.has_tag_name("sldSz") || n.has_tag_name((crate::dom_types::NS_P, "sldSz")));
+    let sld_sz = doc
+        .descendants()
+        .find(|n| n.has_tag_name("sldSz") || n.has_tag_name((crate::dom_types::NS_P, "sldSz")));
     let (w_pt, h_pt) = if let Some(node) = sld_sz {
-        let cx = node.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(9144000.0);
-        let cy = node.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(6858000.0);
+        let cx = node
+            .attribute("cx")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(9144000.0);
+        let cy = node
+            .attribute("cy")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(6858000.0);
         (cx / 12700.0, cy / 12700.0)
     } else {
         (960.0, 540.0)
@@ -1612,14 +1890,18 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 
     if let Ok(theme_xml) = package.read_part_xml("ppt/theme/theme1.xml") {
         if let Ok(theme_doc) = roxmltree::Document::parse(&theme_xml) {
-            if let Some(scheme) = theme_doc.descendants().find(|n| n.has_tag_name("clrScheme")) {
+            if let Some(scheme) = theme_doc
+                .descendants()
+                .find(|n| n.has_tag_name("clrScheme"))
+            {
                 for child in scheme.children() {
                     let name = child.tag_name().name();
                     if let Some(srgb) = child.descendants().find(|n| n.has_tag_name("srgbClr")) {
                         if let Some(val) = srgb.attribute("val") {
                             theme_colors.insert(name.to_string(), val.to_string());
                         }
-                    } else if let Some(sys) = child.descendants().find(|n| n.has_tag_name("sysClr")) {
+                    } else if let Some(sys) = child.descendants().find(|n| n.has_tag_name("sysClr"))
+                    {
                         if let Some(val) = sys.attribute("lastClr") {
                             theme_colors.insert(name.to_string(), val.to_string());
                         }
@@ -1647,46 +1929,83 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             slide_num, slide_num
         ));
 
-        let slide_xml = package.read_part_xml(&slide.part_path)
-            .map_err(|e| HandlerError::OperationFailed(format!("Failed to read slide part {}: {}", slide.part_path, e)))?;
+        let slide_xml = package.read_part_xml(&slide.part_path).map_err(|e| {
+            HandlerError::OperationFailed(format!(
+                "Failed to read slide part {}: {}",
+                slide.part_path, e
+            ))
+        })?;
         let slide_doc = roxmltree::Document::parse(&slide_xml)
             .map_err(|e| HandlerError::OperationFailed(format!("roxmltree parse error: {}", e)))?;
 
-        let slide_rels = package.part_rels(&slide.part_path)
+        let slide_rels = package
+            .part_rels(&slide.part_path)
             .unwrap_or_else(|_| oxml::rels::Relationships::empty());
 
         let (layout_path, master_path) = get_layout_and_master_paths(package, &slide.part_path);
 
-        let layout_xml = layout_path.as_ref().and_then(|p| package.read_part_xml(p).ok());
-        let layout_doc = layout_xml.as_ref().and_then(|xml| roxmltree::Document::parse(xml).ok());
-        let layout_tree = layout_doc.as_ref().and_then(|doc| doc.descendants().find(|n| n.has_tag_name("spTree")));
+        let layout_xml = layout_path
+            .as_ref()
+            .and_then(|p| package.read_part_xml(p).ok());
+        let layout_doc = layout_xml
+            .as_ref()
+            .and_then(|xml| roxmltree::Document::parse(xml).ok());
+        let layout_tree = layout_doc
+            .as_ref()
+            .and_then(|doc| doc.descendants().find(|n| n.has_tag_name("spTree")));
 
-        let master_xml = master_path.as_ref().and_then(|p| package.read_part_xml(p).ok());
-        let master_doc = master_xml.as_ref().and_then(|xml| roxmltree::Document::parse(xml).ok());
-        let master_tree = master_doc.as_ref().and_then(|doc| doc.descendants().find(|n| n.has_tag_name("spTree")));
-        let master_text_styles = master_doc.as_ref().and_then(|doc| doc.descendants().find(|n| n.has_tag_name("txStyles")));
+        let master_xml = master_path
+            .as_ref()
+            .and_then(|p| package.read_part_xml(p).ok());
+        let master_doc = master_xml
+            .as_ref()
+            .and_then(|xml| roxmltree::Document::parse(xml).ok());
+        let master_tree = master_doc
+            .as_ref()
+            .and_then(|doc| doc.descendants().find(|n| n.has_tag_name("spTree")));
+        let master_text_styles = master_doc
+            .as_ref()
+            .and_then(|doc| doc.descendants().find(|n| n.has_tag_name("txStyles")));
 
         let mut slide_bg_style = String::new();
         if let Some(bg) = slide_doc.descendants().find(|n| n.has_tag_name("bg")) {
             if let Some(bg_pr) = bg.descendants().find(|n| n.has_tag_name("bgPr")) {
-                if let Some(solid_fill) = bg_pr.descendants().find(|n| n.has_tag_name("solidFill")) {
+                if let Some(solid_fill) = bg_pr.descendants().find(|n| n.has_tag_name("solidFill"))
+                {
                     if let Some(color) = resolve_fill_color(&solid_fill, &theme_colors) {
                         slide_bg_style.push_str(&format!("background:{};", color));
                     }
-                } else if let Some(grad_fill) = bg_pr.descendants().find(|n| n.has_tag_name("gradFill")) {
-                    slide_bg_style.push_str(&format!("background:{};", gradient_to_css(&grad_fill, &theme_colors)));
-                } else if let Some(blip_fill) = bg_pr.descendants().find(|n| n.has_tag_name("blipFill")) {
+                } else if let Some(grad_fill) =
+                    bg_pr.descendants().find(|n| n.has_tag_name("gradFill"))
+                {
+                    slide_bg_style.push_str(&format!(
+                        "background:{};",
+                        gradient_to_css(&grad_fill, &theme_colors)
+                    ));
+                } else if let Some(blip_fill) =
+                    bg_pr.descendants().find(|n| n.has_tag_name("blipFill"))
+                {
                     if let Some(blip) = blip_fill.descendants().find(|n| n.has_tag_name("blip")) {
-                        if let Some(embed) = blip.attribute((crate::dom_types::NS_R, "embed")).or_else(|| blip.attribute("r:embed")) {
+                        if let Some(embed) = blip
+                            .attribute((crate::dom_types::NS_R, "embed"))
+                            .or_else(|| blip.attribute("r:embed"))
+                        {
                             if let Some(rel) = slide_rels.get(embed) {
-                                let target_path = package.resolve_rel_target(&slide.part_path, &rel.target);
+                                let target_path =
+                                    package.resolve_rel_target(&slide.part_path, &rel.target);
                                 if let Ok(bytes) = package.read_part_bytes(&target_path) {
                                     let b64 = base64_encode(&bytes);
                                     let mut opacity_style = String::new();
-                                    if let Some(alpha_mod) = blip.children().find(|n| n.has_tag_name("alphaModFix")) {
-                                        if let Some(amt) = alpha_mod.attribute("amt").and_then(|s| s.parse::<f64>().ok()) {
+                                    if let Some(alpha_mod) =
+                                        blip.children().find(|n| n.has_tag_name("alphaModFix"))
+                                    {
+                                        if let Some(amt) = alpha_mod
+                                            .attribute("amt")
+                                            .and_then(|s| s.parse::<f64>().ok())
+                                        {
                                             if amt < 100000.0 {
-                                                opacity_style = format!("opacity:{:.2};", amt / 100000.0);
+                                                opacity_style =
+                                                    format!("opacity:{:.2};", amt / 100000.0);
                                             }
                                         }
                                     }
@@ -1710,14 +2029,37 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 let tag = child.tag_name().name();
                 if tag == "sp" {
                     // Make sure it doesn't leak layout prompt texts
-                    if child.children().any(|n| n.has_tag_name("spPr") && n.children().any(|c| c.has_tag_name("solidFill") || c.has_tag_name("gradFill"))) {
+                    if child.children().any(|n| {
+                        n.has_tag_name("spPr")
+                            && n.children()
+                                .any(|c| c.has_tag_name("solidFill") || c.has_tag_name("gradFill"))
+                    }) {
                         let mut prompt_shape_html = String::new();
-                        render_shape(&child, &slide.part_path, &slide_rels, &theme_colors, &mut prompt_shape_html, package, layout_tree, master_tree, master_text_styles, None);
+                        render_shape(
+                            &child,
+                            &slide.part_path,
+                            &slide_rels,
+                            &theme_colors,
+                            &mut prompt_shape_html,
+                            package,
+                            layout_tree,
+                            master_tree,
+                            master_text_styles,
+                            None,
+                        );
                         slides_html.push_str(&prompt_shape_html);
                     }
                 } else if tag == "pic" {
                     let mut pic_html = String::new();
-                    render_picture(&child, &slide.part_path, &slide_rels, &mut pic_html, package, &theme_colors, None);
+                    render_picture(
+                        &child,
+                        &slide.part_path,
+                        &slide_rels,
+                        &mut pic_html,
+                        package,
+                        &theme_colors,
+                        None,
+                    );
                     slides_html.push_str(&pic_html);
                 }
             }
@@ -1727,28 +2069,72 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             for child in tree.children() {
                 let tag = child.tag_name().name();
                 if tag == "sp" {
-                    if child.children().any(|n| n.has_tag_name("spPr") && n.children().any(|c| c.has_tag_name("solidFill") || c.has_tag_name("gradFill"))) {
+                    if child.children().any(|n| {
+                        n.has_tag_name("spPr")
+                            && n.children()
+                                .any(|c| c.has_tag_name("solidFill") || c.has_tag_name("gradFill"))
+                    }) {
                         let mut prompt_shape_html = String::new();
-                        render_shape(&child, &slide.part_path, &slide_rels, &theme_colors, &mut prompt_shape_html, package, layout_tree, master_tree, master_text_styles, None);
+                        render_shape(
+                            &child,
+                            &slide.part_path,
+                            &slide_rels,
+                            &theme_colors,
+                            &mut prompt_shape_html,
+                            package,
+                            layout_tree,
+                            master_tree,
+                            master_text_styles,
+                            None,
+                        );
                         slides_html.push_str(&prompt_shape_html);
                     }
                 } else if tag == "pic" {
                     let mut pic_html = String::new();
-                    render_picture(&child, &slide.part_path, &slide_rels, &mut pic_html, package, &theme_colors, None);
+                    render_picture(
+                        &child,
+                        &slide.part_path,
+                        &slide_rels,
+                        &mut pic_html,
+                        package,
+                        &theme_colors,
+                        None,
+                    );
                     slides_html.push_str(&pic_html);
                 }
             }
         }
 
         // Render slide actual elements (on top of master/layout background layers)
-        let sp_tree = slide_doc.descendants().find(|n| n.has_tag_name("spTree") || n.has_tag_name((crate::dom_types::NS_P, "spTree")));
+        let sp_tree = slide_doc.descendants().find(|n| {
+            n.has_tag_name("spTree") || n.has_tag_name((crate::dom_types::NS_P, "spTree"))
+        });
         if let Some(tree) = sp_tree {
             for child in tree.children() {
                 let tag = child.tag_name().name();
                 if tag == "sp" {
-                    render_shape(&child, &slide.part_path, &slide_rels, &theme_colors, &mut slides_html, package, layout_tree, master_tree, master_text_styles, None);
+                    render_shape(
+                        &child,
+                        &slide.part_path,
+                        &slide_rels,
+                        &theme_colors,
+                        &mut slides_html,
+                        package,
+                        layout_tree,
+                        master_tree,
+                        master_text_styles,
+                        None,
+                    );
                 } else if tag == "pic" {
-                    render_picture(&child, &slide.part_path, &slide_rels, &mut slides_html, package, &theme_colors, None);
+                    render_picture(
+                        &child,
+                        &slide.part_path,
+                        &slide_rels,
+                        &mut slides_html,
+                        package,
+                        &theme_colors,
+                        None,
+                    );
                 } else if tag == "graphicFrame" {
                     if child.descendants().any(|n| n.has_tag_name("tbl")) {
                         let xfrm = child.descendants().find(|n| n.has_tag_name("xfrm"));
@@ -1756,10 +2142,26 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                             let off = x_node.descendants().find(|n| n.has_tag_name("off"));
                             let ext = x_node.descendants().find(|n| n.has_tag_name("ext"));
                             if let (Some(o), Some(e)) = (off, ext) {
-                                let x = o.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-                                let y = o.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-                                let cx = e.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-                                let cy = e.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
+                                let x = o
+                                    .attribute("x")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
+                                let y = o
+                                    .attribute("y")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
+                                let cx = e
+                                    .attribute("cx")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
+                                let cy = e
+                                    .attribute("cy")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
                                 render_table(&child, &theme_colors, &mut slides_html, x, y, cx, cy);
                             }
                         }
@@ -1769,20 +2171,53 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                             let off = x_node.descendants().find(|n| n.has_tag_name("off"));
                             let ext = x_node.descendants().find(|n| n.has_tag_name("ext"));
                             if let (Some(o), Some(e)) = (off, ext) {
-                                let x = o.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-                                let y = o.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-                                let cx = e.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-                                let cy = e.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
+                                let x = o
+                                    .attribute("x")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
+                                let y = o
+                                    .attribute("y")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
+                                let cx = e
+                                    .attribute("cx")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
+                                let cy = e
+                                    .attribute("cy")
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0)
+                                    / 12700.0;
                                 render_ole_placeholder(&child, x, y, cx, cy, &mut slides_html);
                             }
                         }
                     }
                 } else if tag == "grpSp" {
-                    render_group_shape(&child, &slide.part_path, &slide_rels, &theme_colors, &mut slides_html, package, layout_tree, master_tree, master_text_styles);
+                    render_group_shape(
+                        &child,
+                        &slide.part_path,
+                        &slide_rels,
+                        &theme_colors,
+                        &mut slides_html,
+                        package,
+                        layout_tree,
+                        master_tree,
+                        master_text_styles,
+                    );
                 } else if tag == "cxnSp" {
                     render_connector(&child, &theme_colors, &mut slides_html, None);
                 } else if child.tag_name().name() == "AlternateContent" {
-                    render_alternate_content(&child, &slide.part_path, &slide_rels, &theme_colors, &mut slides_html, package);
+                    render_alternate_content(
+                        &child,
+                        &slide.part_path,
+                        &slide_rels,
+                        &theme_colors,
+                        &mut slides_html,
+                        package,
+                    );
                 }
             }
         }
@@ -1798,7 +2233,8 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 
     let file_name = "Presentation Preview";
 
-    Ok(format!(r#"<!DOCTYPE html>
+    Ok(format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -1827,7 +2263,12 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 {PREVIEW_JS}
 </script>
 </body>
-</html>"#, file_name=file_name, sidebar_thumbs=sidebar_thumbs, slides_html=slides_html, slide_count=slide_count))
+</html>"#,
+        file_name = file_name,
+        sidebar_thumbs = sidebar_thumbs,
+        slides_html = slides_html,
+        slide_count = slide_count
+    ))
 }
 
 fn render_shape(
@@ -1875,24 +2316,44 @@ fn render_shape(
         cy_pt = pos.3 / 12700.0;
     } else if let Some(x_node) = xfrm {
         if let Some(off) = x_node.descendants().find(|n| n.has_tag_name("off")) {
-            let x = off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let y = off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let x = off
+                .attribute("x")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let y = off
+                .attribute("y")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
             x_pt = x / 12700.0;
             y_pt = y / 12700.0;
         }
         if let Some(ext) = x_node.descendants().find(|n| n.has_tag_name("ext")) {
-            let cx = ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let cy = ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let cx = ext
+                .attribute("cx")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let cy = ext
+                .attribute("cy")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
             cx_pt = cx / 12700.0;
             cy_pt = cy / 12700.0;
         }
         if let Some(rot) = x_node.attribute("rot").and_then(|s| s.parse::<f64>().ok()) {
             rot_deg = rot / 60000.0;
         }
-        flip_h = x_node.attribute("flipH").map(|s| s == "1" || s == "true").unwrap_or(false);
-        flip_v = x_node.attribute("flipV").map(|s| s == "1" || s == "true").unwrap_or(false);
+        flip_h = x_node
+            .attribute("flipH")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false);
+        flip_v = x_node
+            .attribute("flipV")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false);
     } else {
-        if let Some((x, y, cx, cy)) = resolve_inherited_position(ph_type, ph_idx, layout_tree, master_tree) {
+        if let Some((x, y, cx, cy)) =
+            resolve_inherited_position(ph_type, ph_idx, layout_tree, master_tree)
+        {
             x_pt = x / 12700.0;
             y_pt = y / 12700.0;
             cx_pt = cx / 12700.0;
@@ -1905,18 +2366,26 @@ fn render_shape(
 
             if let Some(ty) = ph_type {
                 if ty == "title" || ty == "ctrTitle" {
-                    x_pt = margin / 12700.0; y_pt = (widescreen_h / 8.0) / 12700.0;
-                    cx_pt = content_w / 12700.0; cy_pt = (widescreen_h / 4.0) / 12700.0;
+                    x_pt = margin / 12700.0;
+                    y_pt = (widescreen_h / 8.0) / 12700.0;
+                    cx_pt = content_w / 12700.0;
+                    cy_pt = (widescreen_h / 4.0) / 12700.0;
                 } else if ty == "subTitle" {
-                    x_pt = margin / 12700.0; y_pt = (widescreen_h * 3.0 / 8.0) / 12700.0;
-                    cx_pt = content_w / 12700.0; cy_pt = (widescreen_h / 4.0) / 12700.0;
+                    x_pt = margin / 12700.0;
+                    y_pt = (widescreen_h * 3.0 / 8.0) / 12700.0;
+                    cx_pt = content_w / 12700.0;
+                    cy_pt = (widescreen_h / 4.0) / 12700.0;
                 } else {
-                    x_pt = margin / 12700.0; y_pt = (widescreen_h * 3.0 / 8.0) / 12700.0;
-                    cx_pt = content_w / 12700.0; cy_pt = (widescreen_h / 2.0) / 12700.0;
+                    x_pt = margin / 12700.0;
+                    y_pt = (widescreen_h * 3.0 / 8.0) / 12700.0;
+                    cx_pt = content_w / 12700.0;
+                    cy_pt = (widescreen_h / 2.0) / 12700.0;
                 }
             } else if ph_idx.is_some() {
-                x_pt = margin / 12700.0; y_pt = (widescreen_h / 4.0) / 12700.0;
-                cx_pt = content_w / 12700.0; cy_pt = (widescreen_h / 2.0) / 12700.0;
+                x_pt = margin / 12700.0;
+                y_pt = (widescreen_h / 4.0) / 12700.0;
+                cx_pt = content_w / 12700.0;
+                cy_pt = (widescreen_h / 2.0) / 12700.0;
             } else {
                 return;
             }
@@ -1937,32 +2406,54 @@ fn render_shape(
     let mut parsed_outline = None;
 
     if let Some(sp_pr_node) = sp_pr {
-        if let Some(solid_fill) = sp_pr_node.descendants().find(|n| n.has_tag_name("solidFill")) {
+        if let Some(solid_fill) = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("solidFill"))
+        {
             if let Some(color) = resolve_fill_color(&solid_fill, theme_colors) {
                 fill_style = format!("background:{}", color);
                 styles.push(fill_style.clone());
             }
-        } else if let Some(grad_fill) = sp_pr_node.descendants().find(|n| n.has_tag_name("gradFill")) {
+        } else if let Some(grad_fill) = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("gradFill"))
+        {
             fill_style = format!("background:{}", gradient_to_css(&grad_fill, theme_colors));
             styles.push(fill_style.clone());
-        } else if let Some(blip_fill) = sp_pr_node.descendants().find(|n| n.has_tag_name("blipFill")) {
+        } else if let Some(blip_fill) = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("blipFill"))
+        {
             if let Some(blip) = blip_fill.descendants().find(|n| n.has_tag_name("blip")) {
-                if let Some(embed) = blip.attribute((crate::dom_types::NS_R, "embed")).or_else(|| blip.attribute("r:embed")) {
+                if let Some(embed) = blip
+                    .attribute((crate::dom_types::NS_R, "embed"))
+                    .or_else(|| blip.attribute("r:embed"))
+                {
                     if let Some(rel) = rels.get(embed) {
                         let target_path = package.resolve_rel_target(slide_path, &rel.target);
                         if let Ok(bytes) = package.read_part_bytes(&target_path) {
                             let b64 = base64_encode(&bytes);
-                            fill_style = format!("background:url('data:image/png;base64,{}') center/cover no-repeat", b64);
+                            fill_style = format!(
+                                "background:url('data:image/png;base64,{}') center/cover no-repeat",
+                                b64
+                            );
                             styles.push(fill_style.clone());
                         }
                     }
                 }
             }
-        } else if sp_pr_node.descendants().find(|n| n.has_tag_name("noFill")).is_some() {
+        } else if sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("noFill"))
+            .is_some()
+        {
             styles.push("background:transparent".to_string());
         }
 
-        if let Some(prst_geom) = sp_pr_node.descendants().find(|n| n.has_tag_name("prstGeom")) {
+        if let Some(prst_geom) = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("prstGeom"))
+        {
             if let Some(prst) = prst_geom.attribute("prst") {
                 let geom_css = preset_geometry_to_css(prst, cx_pt, cy_pt, &prst_geom);
                 if !geom_css.is_empty() {
@@ -1974,7 +2465,10 @@ fn render_shape(
                     }
                 }
             }
-        } else if let Some(cust_geom) = sp_pr_node.descendants().find(|n| n.has_tag_name("custGeom")) {
+        } else if let Some(cust_geom) = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("custGeom"))
+        {
             let geom_css = custom_geometry_to_clip_path(&cust_geom);
             if !geom_css.is_empty() {
                 clip_path = geom_css;
@@ -1990,22 +2484,35 @@ fn render_shape(
             }
         }
 
-        let effect_list = sp_pr_node.descendants().find(|n| n.has_tag_name("effectLst"));
+        let effect_list = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("effectLst"));
         let mut filter_effects = Vec::new();
         if let Some(ref eff) = effect_list {
             let shadow_css = effect_list_to_shadow_css(eff, theme_colors);
             let glow_css = effect_list_to_glow_css(eff, theme_colors);
-            if !shadow_css.is_empty() { filter_effects.push(shadow_css); }
-            if !glow_css.is_empty() { filter_effects.push(glow_css); }
+            if !shadow_css.is_empty() {
+                filter_effects.push(shadow_css);
+            }
+            if !glow_css.is_empty() {
+                filter_effects.push(glow_css);
+            }
 
             let reflection_css = effect_list_to_reflection_css(eff);
-            if !reflection_css.is_empty() { styles.push(reflection_css); }
+            if !reflection_css.is_empty() {
+                styles.push(reflection_css);
+            }
 
             if let Some(soft_edge) = eff.children().find(|n| n.has_tag_name("softEdge")) {
-                if let Some(rad) = soft_edge.attribute("rad").and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(rad) = soft_edge
+                    .attribute("rad")
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     let edge_px = (rad / 12700.0 * 0.8).max(2.0);
                     styles.push(format!("-webkit-mask-image:linear-gradient(to right,transparent 0,black {:.1}px,black calc(100% - {:.1}px),transparent 100%),linear-gradient(to bottom,transparent 0,black {:.1}px,black calc(100% - {:.1}px),transparent 100%)", edge_px, edge_px, edge_px, edge_px));
-                    styles.push("-webkit-mask-composite:source-in;mask-composite:intersect".to_string());
+                    styles.push(
+                        "-webkit-mask-composite:source-in;mask-composite:intersect".to_string(),
+                    );
                 }
             }
         }
@@ -2016,10 +2523,13 @@ fn render_shape(
 
         if let Some(sp3d) = sp_pr_node.descendants().find(|n| n.has_tag_name("sp3d")) {
             if sp3d.children().any(|n| n.has_tag_name("bevelT")) {
-                let bevel_w = sp3d.children().find(|n| n.has_tag_name("bevelT"))
+                let bevel_w = sp3d
+                    .children()
+                    .find(|n| n.has_tag_name("bevelT"))
                     .and_then(|n| n.attribute("w"))
                     .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(76200.0) / 12700.0;
+                    .unwrap_or(76200.0)
+                    / 12700.0;
                 let bw = (bevel_w * 0.5).max(1.0);
                 styles.push(format!("box-shadow:inset {:.1}px {:.1}px {:.1}px rgba(255,255,255,0.25),inset -{:.1}px -{:.1}px {:.1}px rgba(0,0,0,0.15)", bw, bw, bw * 1.5, bw, bw, bw * 1.5));
             }
@@ -2058,13 +2568,37 @@ fn render_shape(
                     _ => "top",
                 };
             }
-            if body_pr.attribute("wrap").map(|s| s == "none").unwrap_or(false) {
+            if body_pr
+                .attribute("wrap")
+                .map(|s| s == "none")
+                .unwrap_or(false)
+            {
                 wrap_none = true;
             }
-            if let Some(l) = body_pr.attribute("lIns").and_then(|s| s.parse::<f64>().ok()) { l_ins = l / 12700.0; }
-            if let Some(t) = body_pr.attribute("tIns").and_then(|s| s.parse::<f64>().ok()) { t_ins = t / 12700.0; }
-            if let Some(r) = body_pr.attribute("rIns").and_then(|s| s.parse::<f64>().ok()) { r_ins = r / 12700.0; }
-            if let Some(b) = body_pr.attribute("bIns").and_then(|s| s.parse::<f64>().ok()) { b_ins = b / 12700.0; }
+            if let Some(l) = body_pr
+                .attribute("lIns")
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                l_ins = l / 12700.0;
+            }
+            if let Some(t) = body_pr
+                .attribute("tIns")
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                t_ins = t / 12700.0;
+            }
+            if let Some(r) = body_pr
+                .attribute("rIns")
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                r_ins = r / 12700.0;
+            }
+            if let Some(b) = body_pr
+                .attribute("bIns")
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                b_ins = b / 12700.0;
+            }
         }
     }
 
@@ -2086,7 +2620,10 @@ fn render_shape(
         }
     }
 
-    styles.push(format!("padding:{:.2}pt {:.2}pt {:.2}pt {:.2}pt", t_ins, r_ins, b_ins, l_ins));
+    styles.push(format!(
+        "padding:{:.2}pt {:.2}pt {:.2}pt {:.2}pt",
+        t_ins, r_ins, b_ins, l_ins
+    ));
 
     if wrap_none {
         styles.push("overflow:visible".to_string());
@@ -2095,7 +2632,10 @@ fn render_shape(
     let mut shape_href_url = None;
     if let Some(nv) = nv_sp_pr {
         if let Some(hlink) = nv.descendants().find(|n| n.has_tag_name("hlinkClick")) {
-            if let Some(r_id) = hlink.attribute((crate::dom_types::NS_R, "id")).or_else(|| hlink.attribute("r:id")) {
+            if let Some(r_id) = hlink
+                .attribute((crate::dom_types::NS_R, "id"))
+                .or_else(|| hlink.attribute("r:id"))
+            {
                 if let Some(rel) = rels.get(r_id) {
                     shape_href_url = Some(rel.target.clone());
                 }
@@ -2103,7 +2643,11 @@ fn render_shape(
         }
     }
 
-    let path_attr = format!(" data-path=\"/slide[...]/shape[{}]\" title=\"{}\"", id, html_escape(&name));
+    let path_attr = format!(
+        " data-path=\"/slide[...]/shape[{}]\" title=\"{}\"",
+        id,
+        html_escape(&name)
+    );
 
     if let Some(ref url) = shape_href_url {
         output.push_str(&format!("    <a class=\"shape-link\" href=\"{}\" rel=\"noopener\" target=\"_blank\" style=\"display:contents;cursor:pointer;\">\n", html_escape(url)));
@@ -2119,9 +2663,17 @@ fn render_shape(
                 outer_styles.push(s.clone());
             }
         }
-        output.push_str(&format!("    <div class=\"shape\"{} style=\"{}\">\n", path_attr, outer_styles.join(";")));
+        output.push_str(&format!(
+            "    <div class=\"shape\"{} style=\"{}\">\n",
+            path_attr,
+            outer_styles.join(";")
+        ));
         if !fill_styles.is_empty() {
-            output.push_str(&format!("      <div style=\"position:absolute;inset:0;{};{}\"></div>\n", clip_path, fill_styles.join(";")));
+            output.push_str(&format!(
+                "      <div style=\"position:absolute;inset:0;{};{}\"></div>\n",
+                clip_path,
+                fill_styles.join(";")
+            ));
         }
 
         if let Some((bw, ref dt, ref bc)) = parsed_outline {
@@ -2129,22 +2681,47 @@ fn render_shape(
                 let poly_str = &clip_path["clip-path:polygon(".len()..clip_path.len() - 1];
                 let svg_points = poly_str.replace('%', "");
                 let dash_arr = dash_type_to_svg_dasharray(dt, bw);
-                let dash_attr = if !dash_arr.is_empty() { format!(" stroke-dasharray=\"{}\"", dash_arr) } else { "".to_string() };
+                let dash_attr = if !dash_arr.is_empty() {
+                    format!(" stroke-dasharray=\"{}\"", dash_arr)
+                } else {
+                    "".to_string()
+                };
                 output.push_str(&format!("      <svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\">\n"));
                 output.push_str(&format!("        <polygon points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.2}pt\" vector-effect=\"non-scaling-stroke\" stroke-linecap=\"butt\"{}/>\n", svg_points, bc, bw, dash_attr));
                 output.push_str("      </svg>\n");
             }
         }
     } else {
-        output.push_str(&format!("    <div class=\"shape\"{} style=\"{}\">\n", path_attr, styles.join(";")));
+        output.push_str(&format!(
+            "    <div class=\"shape\"{} style=\"{}\">\n",
+            path_attr,
+            styles.join(";")
+        ));
     }
 
     if let Some(tx) = tx_body {
-        let wrap_style = if wrap_none { " style=\"white-space:nowrap;overflow:visible;\"" } else { "" };
-        output.push_str(&format!("      <div class=\"shape-text valign-{}\"{}>\n", valign, wrap_style));
+        let wrap_style = if wrap_none {
+            " style=\"white-space:nowrap;overflow:visible;\""
+        } else {
+            ""
+        };
+        output.push_str(&format!(
+            "      <div class=\"shape-text valign-{}\"{}>\n",
+            valign, wrap_style
+        ));
 
         let mut text_output = String::new();
-        render_text_body_with_context(&tx, theme_colors, &mut text_output, Some(*node), Some(package), layout_tree, master_tree, master_text_styles, rels);
+        render_text_body_with_context(
+            &tx,
+            theme_colors,
+            &mut text_output,
+            Some(*node),
+            Some(package),
+            layout_tree,
+            master_tree,
+            master_text_styles,
+            rels,
+        );
         output.push_str(&text_output);
 
         output.push_str("      </div>\n");
@@ -2153,9 +2730,17 @@ fn render_shape(
     if let Some((bw, ref dt, ref bc)) = parsed_outline {
         if dt != "solid" && clip_path.is_empty() {
             let dash_arr = dash_type_to_svg_dasharray(dt, bw);
-            let dash_attr = if !dash_arr.is_empty() { format!(" stroke-dasharray=\"{}\"", dash_arr) } else { "".to_string() };
+            let dash_attr = if !dash_arr.is_empty() {
+                format!(" stroke-dasharray=\"{}\"", dash_arr)
+            } else {
+                "".to_string()
+            };
             if !border_radius.is_empty() {
-                let rx = if border_radius.contains("50%") { "50%" } else { "6" };
+                let rx = if border_radius.contains("50%") {
+                    "50%"
+                } else {
+                    "6"
+                };
                 output.push_str(&format!("      <svg style=\"position:absolute;inset:0;width:100%;height:100%;overflow:visible\">\n"));
                 output.push_str(&format!("        <rect x=\"{:.1}pt\" y=\"{:.1}pt\" width=\"calc(100% - {:.1}pt)\" height=\"calc(100% - {:.1}pt)\" rx=\"{}\" ry=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.2}pt\" stroke-linecap=\"butt\"{}/>\n", bw/2.0, bw/2.0, bw, bw, rx, rx, bc, bw, dash_attr));
                 output.push_str("      </svg>\n");
@@ -2199,22 +2784,40 @@ fn render_picture(
         cy_pt = pos.3 / 12700.0;
     } else if let Some(x_node) = xfrm {
         if let Some(off) = x_node.descendants().find(|n| n.has_tag_name("off")) {
-            let x = off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let y = off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let x = off
+                .attribute("x")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let y = off
+                .attribute("y")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
             x_pt = x / 12700.0;
             y_pt = y / 12700.0;
         }
         if let Some(ext) = x_node.descendants().find(|n| n.has_tag_name("ext")) {
-            let cx = ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let cy = ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let cx = ext
+                .attribute("cx")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let cy = ext
+                .attribute("cy")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
             cx_pt = cx / 12700.0;
             cy_pt = cy / 12700.0;
         }
         if let Some(rot) = x_node.attribute("rot").and_then(|s| s.parse::<f64>().ok()) {
             rot_deg = rot / 60000.0;
         }
-        flip_h = x_node.attribute("flipH").map(|s| s == "1" || s == "true").unwrap_or(false);
-        flip_v = x_node.attribute("flipV").map(|s| s == "1" || s == "true").unwrap_or(false);
+        flip_h = x_node
+            .attribute("flipH")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false);
+        flip_v = x_node
+            .attribute("flipV")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false);
     } else {
         return;
     }
@@ -2230,7 +2833,9 @@ fn render_picture(
     if let Some(ref sp_pr_node) = sp_pr {
         if let Some(ln) = sp_pr_node.descendants().find(|n| n.has_tag_name("ln")) {
             let border_css = outline_to_css(&ln, theme_colors);
-            if !border_css.is_empty() { styles.push(border_css); }
+            if !border_css.is_empty() {
+                styles.push(border_css);
+            }
         }
     }
 
@@ -2241,15 +2846,23 @@ fn render_picture(
     let mut contrast_pct = None;
 
     let blip_fill = node.descendants().find(|n| n.has_tag_name("blipFill"));
-    let blip = blip_fill.as_ref().and_then(|bf| bf.descendants().find(|n| n.has_tag_name("blip")));
+    let blip = blip_fill
+        .as_ref()
+        .and_then(|bf| bf.descendants().find(|n| n.has_tag_name("blip")));
 
     if let Some(ref sp_pr_node) = sp_pr {
-        let effect_list = sp_pr_node.descendants().find(|n| n.has_tag_name("effectLst"));
+        let effect_list = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("effectLst"));
         if let Some(ref eff) = effect_list {
             let shadow_css = effect_list_to_shadow_css(eff, theme_colors);
             let glow_css = effect_list_to_glow_css(eff, theme_colors);
-            if !shadow_css.is_empty() { filter_effects.push(shadow_css); }
-            if !glow_css.is_empty() { filter_effects.push(glow_css); }
+            if !shadow_css.is_empty() {
+                filter_effects.push(shadow_css);
+            }
+            if !glow_css.is_empty() {
+                filter_effects.push(glow_css);
+            }
             reflection_css = effect_list_to_reflection_css(eff);
         }
     }
@@ -2261,7 +2874,10 @@ fn render_picture(
                 if let Some(bright) = kid.attribute("bright").and_then(|s| s.parse::<f64>().ok()) {
                     brightness_pct = Some(bright / 1000.0);
                 }
-                if let Some(contrast) = kid.attribute("contrast").and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(contrast) = kid
+                    .attribute("contrast")
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     contrast_pct = Some(contrast / 1000.0);
                 }
             } else if tag == "lumOff" {
@@ -2275,43 +2891,76 @@ fn render_picture(
             }
         }
         if let Some(alpha_mod) = b.children().find(|n| n.has_tag_name("alphaModFix")) {
-            if let Some(amt) = alpha_mod.attribute("amt").and_then(|s| s.parse::<f64>().ok()) {
+            if let Some(amt) = alpha_mod
+                .attribute("amt")
+                .and_then(|s| s.parse::<f64>().ok())
+            {
                 opacity_val = amt / 100000.0;
             }
         }
     }
 
-    if let Some(b) = brightness_pct { filter_effects.push(format!("brightness({:.3})", 1.0 + b / 100.0)); }
-    if let Some(c) = contrast_pct { filter_effects.push(format!("contrast({:.3})", 1.0 + c / 100.0)); }
-    if !filter_effects.is_empty() { styles.push(format!("filter:{}", filter_effects.join(" "))); }
-    if opacity_val < 1.0 { styles.push(format!("opacity:{:.3}", opacity_val)); }
-    if !reflection_css.is_empty() { styles.push(reflection_css); }
+    if let Some(b) = brightness_pct {
+        filter_effects.push(format!("brightness({:.3})", 1.0 + b / 100.0));
+    }
+    if let Some(c) = contrast_pct {
+        filter_effects.push(format!("contrast({:.3})", 1.0 + c / 100.0));
+    }
+    if !filter_effects.is_empty() {
+        styles.push(format!("filter:{}", filter_effects.join(" ")));
+    }
+    if opacity_val < 1.0 {
+        styles.push(format!("opacity:{:.3}", opacity_val));
+    }
+    if !reflection_css.is_empty() {
+        styles.push(reflection_css);
+    }
 
     if let Some(ref sp_pr_node) = sp_pr {
-        if let Some(preset_geom) = sp_pr_node.descendants().find(|n| n.has_tag_name("prstGeom")) {
+        if let Some(preset_geom) = sp_pr_node
+            .descendants()
+            .find(|n| n.has_tag_name("prstGeom"))
+        {
             if let Some(preset) = preset_geom.attribute("prst") {
                 let geom_css = preset_geometry_to_css(preset, cx_pt, cy_pt, &preset_geom);
-                if !geom_css.is_empty() { styles.push(geom_css); }
+                if !geom_css.is_empty() {
+                    styles.push(geom_css);
+                }
             }
         }
     }
 
     let mut transforms = Vec::new();
-    if rot_deg != 0.0 { transforms.push(format!("rotate({:.2}deg)", rot_deg)); }
-    if flip_h && flip_v { transforms.push("scale(-1,-1)".to_string()); }
-    else if flip_h { transforms.push("scaleX(-1)".to_string()); }
-    else if flip_v { transforms.push("scaleY(-1)".to_string()); }
-    if !transforms.is_empty() { styles.push(format!("transform:{}", transforms.join(" "))); }
+    if rot_deg != 0.0 {
+        transforms.push(format!("rotate({:.2}deg)", rot_deg));
+    }
+    if flip_h && flip_v {
+        transforms.push("scale(-1,-1)".to_string());
+    } else if flip_h {
+        transforms.push("scaleX(-1)".to_string());
+    } else if flip_v {
+        transforms.push("scaleY(-1)".to_string());
+    }
+    if !transforms.is_empty() {
+        styles.push(format!("transform:{}", transforms.join(" ")));
+    }
 
     let mut data_uri = String::new();
     let mut src_rect = None;
 
     if let Some(ref b) = blip {
-        if let Some(embed) = b.attribute((crate::dom_types::NS_R, "embed")).or_else(|| b.attribute("r:embed")) {
+        if let Some(embed) = b
+            .attribute((crate::dom_types::NS_R, "embed"))
+            .or_else(|| b.attribute("r:embed"))
+        {
             if let Some(rel) = rels.get(embed) {
                 let target_path = package.resolve_rel_target(slide_path, &rel.target);
                 if let Ok(bytes) = package.read_part_bytes(&target_path) {
-                    let ext = std::path::Path::new(&target_path).extension().and_then(|s| s.to_str()).unwrap_or("png").to_lowercase();
+                    let ext = std::path::Path::new(&target_path)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("png")
+                        .to_lowercase();
                     let mime = match ext.as_str() {
                         "jpg" | "jpeg" => "image/jpeg",
                         "gif" => "image/gif",
@@ -2322,7 +2971,9 @@ fn render_picture(
                 }
             }
         }
-        if let Some(ref bf) = blip_fill { src_rect = bf.children().find(|n| n.has_tag_name("srcRect")); }
+        if let Some(ref bf) = blip_fill {
+            src_rect = bf.children().find(|n| n.has_tag_name("srcRect"));
+        }
     }
 
     let img_src = if data_uri.is_empty() {
@@ -2331,9 +2982,17 @@ fn render_picture(
         data_uri
     };
 
-    let id = node.descendants().find(|n| n.has_tag_name("cNvPr")).and_then(|n| n.attribute("id")).unwrap_or("");
+    let id = node
+        .descendants()
+        .find(|n| n.has_tag_name("cNvPr"))
+        .and_then(|n| n.attribute("id"))
+        .unwrap_or("");
     let path_attr = format!(" data-path=\"/slide[...]/picture[{}]\"", id);
-    output.push_str(&format!("    <div class=\"picture\"{} style=\"{}\">", path_attr, styles.join(";")));
+    output.push_str(&format!(
+        "    <div class=\"picture\"{} style=\"{}\">",
+        path_attr,
+        styles.join(";")
+    ));
 
     let mut has_crop = false;
     let mut src_l = 0.0;
@@ -2342,11 +3001,29 @@ fn render_picture(
     let mut src_b = 0.0;
 
     if let Some(ref rect) = src_rect {
-        src_l = rect.attribute("l").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 100000.0;
-        src_t = rect.attribute("t").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 100000.0;
-        src_r = rect.attribute("r").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 100000.0;
-        src_b = rect.attribute("b").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 100000.0;
-        if src_l != 0.0 || src_t != 0.0 || src_r != 0.0 || src_b != 0.0 { has_crop = true; }
+        src_l = rect
+            .attribute("l")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 100000.0;
+        src_t = rect
+            .attribute("t")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 100000.0;
+        src_r = rect
+            .attribute("r")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 100000.0;
+        src_b = rect
+            .attribute("b")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 100000.0;
+        if src_l != 0.0 || src_t != 0.0 || src_r != 0.0 || src_b != 0.0 {
+            has_crop = true;
+        }
     }
 
     let degenerate_crop = has_crop && (src_l + src_r >= 1.0 || src_t + src_b >= 1.0);
@@ -2360,8 +3037,16 @@ fn render_picture(
         let bg_size_h = 100.0 / visible_h;
         let denom_x = src_l + src_r;
         let denom_y = src_t + src_b;
-        let bg_pos_x = if denom_x > 0.0 { (src_l / denom_x) * 100.0 } else { 0.0 };
-        let bg_pos_y = if denom_y > 0.0 { (src_t / denom_y) * 100.0 } else { 0.0 };
+        let bg_pos_x = if denom_x > 0.0 {
+            (src_l / denom_x) * 100.0
+        } else {
+            0.0
+        };
+        let bg_pos_y = if denom_y > 0.0 {
+            (src_t / denom_y) * 100.0
+        } else {
+            0.0
+        };
 
         let bg_style = format!("width:100%;height:100%;background-image:url({});background-repeat:no-repeat;background-size:{:.2}% {:.2}%;background-position:{:.2}% {:.2}%", img_src, bg_size_w, bg_size_h, bg_pos_x, bg_pos_y);
         output.push_str(&format!("<div style=\"{}\"></div>", bg_style));
@@ -2381,7 +3066,15 @@ fn render_picture_with_override_pos(
     theme_colors: &HashMap<String, String>,
     override_pos: (f64, f64, f64, f64),
 ) {
-    render_picture(node, slide_path, rels, output, package, theme_colors, Some(override_pos));
+    render_picture(
+        node,
+        slide_path,
+        rels,
+        output,
+        package,
+        theme_colors,
+        Some(override_pos),
+    );
 }
 
 // ==================== Text & Para Contextual Helpers ====================
@@ -2397,9 +3090,23 @@ fn is_title_placeholder(shape: Option<roxmltree::Node<'_, '_>>) -> bool {
     false
 }
 
-fn render_text_body(node: &roxmltree::Node, theme_colors: &HashMap<String, String>, output: &mut String) {
+fn render_text_body(
+    node: &roxmltree::Node,
+    theme_colors: &HashMap<String, String>,
+    output: &mut String,
+) {
     let dummy_rels = oxml::rels::Relationships::empty();
-    render_text_body_with_context(node, theme_colors, output, None, None, None, None, None, &dummy_rels);
+    render_text_body_with_context(
+        node,
+        theme_colors,
+        output,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &dummy_rels,
+    );
 }
 
 fn render_text_body_with_context(
@@ -2441,11 +3148,27 @@ fn render_text_body_with_context(
         let mut para_styles = Vec::new();
         let p_pr = para.children().find(|n| n.has_tag_name("pPr"));
 
-        let level = p_pr.as_ref().and_then(|n| n.attribute("lvl")).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-        let ph_type = placeholder_shape.and_then(|s| s.descendants().find(|n| n.has_tag_name("ph"))).and_then(|n| n.attribute("type"));
-        let ph_idx = placeholder_shape.and_then(|s| s.descendants().find(|n| n.has_tag_name("ph"))).and_then(|n| n.attribute("idx")).and_then(|s| s.parse::<usize>().ok());
+        let level = p_pr
+            .as_ref()
+            .and_then(|n| n.attribute("lvl"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+        let ph_type = placeholder_shape
+            .and_then(|s| s.descendants().find(|n| n.has_tag_name("ph")))
+            .and_then(|n| n.attribute("type"));
+        let ph_idx = placeholder_shape
+            .and_then(|s| s.descendants().find(|n| n.has_tag_name("ph")))
+            .and_then(|n| n.attribute("idx"))
+            .and_then(|s| s.parse::<usize>().ok());
 
-        let default_font_size = resolve_placeholder_font_size(ph_type, ph_idx, level, layout_tree, master_tree, master_text_styles);
+        let default_font_size = resolve_placeholder_font_size(
+            ph_type,
+            ph_idx,
+            level,
+            layout_tree,
+            master_tree,
+            master_text_styles,
+        );
 
         if let Some(ref pr) = p_pr {
             if let Some(algn) = pr.attribute("algn") {
@@ -2458,23 +3181,47 @@ fn render_text_body_with_context(
                 para_styles.push(format!("text-align:{}", align));
             }
             if let Some(sb) = pr.children().find(|n| n.has_tag_name("spcBfr")) {
-                if let Some(pts) = sb.children().find(|n| n.has_tag_name("spcPts")).and_then(|n| n.attribute("val")).and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(pts) = sb
+                    .children()
+                    .find(|n| n.has_tag_name("spcPts"))
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     para_styles.push(format!("margin-top:{:.2}pt", pts / 100.0));
                 }
             }
             if let Some(sa) = pr.children().find(|n| n.has_tag_name("spcAft")) {
-                if let Some(pts) = sa.children().find(|n| n.has_tag_name("spcPts")).and_then(|n| n.attribute("val")).and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(pts) = sa
+                    .children()
+                    .find(|n| n.has_tag_name("spcPts"))
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     para_styles.push(format!("margin-bottom:{:.2}pt", pts / 100.0));
                 }
             }
             if let Some(ln_spc) = pr.children().find(|n| n.has_tag_name("lnSpc")) {
-                if let Some(pct) = ln_spc.children().find(|n| n.has_tag_name("spcPct")).and_then(|n| n.attribute("val")).and_then(|s| s.parse::<f64>().ok()) {
+                if let Some(pct) = ln_spc
+                    .children()
+                    .find(|n| n.has_tag_name("spcPct"))
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     para_styles.push(format!("line-height:{:.2}", pct / 100000.0));
-                } else if let Some(pts) = ln_spc.children().find(|n| n.has_tag_name("spcPts")).and_then(|n| n.attribute("val")).and_then(|s| s.parse::<f64>().ok()) {
+                } else if let Some(pts) = ln_spc
+                    .children()
+                    .find(|n| n.has_tag_name("spcPts"))
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
                     para_styles.push(format!("line-height:{:.2}pt", pts / 100.0));
                 }
             }
-            if pr.attribute("rtl").map(|s| s == "1" || s == "true").unwrap_or(false) {
+            if pr
+                .attribute("rtl")
+                .map(|s| s == "1" || s == "true")
+                .unwrap_or(false)
+            {
                 para_styles.push("direction:rtl;unicode-bidi:embed".to_string());
             }
             if let Some(mar_l) = pr.attribute("marL").and_then(|s| s.parse::<f64>().ok()) {
@@ -2482,8 +3229,14 @@ fn render_text_body_with_context(
             }
         }
 
-        let has_bullet_char = p_pr.as_ref().and_then(|pr| pr.children().find(|n| n.has_tag_name("buChar"))).is_some();
-        let has_bullet_auto = p_pr.as_ref().and_then(|pr| pr.children().find(|n| n.has_tag_name("buAuto"))).is_some();
+        let has_bullet_char = p_pr
+            .as_ref()
+            .and_then(|pr| pr.children().find(|n| n.has_tag_name("buChar")))
+            .is_some();
+        let has_bullet_auto = p_pr
+            .as_ref()
+            .and_then(|pr| pr.children().find(|n| n.has_tag_name("buAuto")))
+            .is_some();
         let has_bullet = has_bullet_char || has_bullet_auto;
 
         let mut auto_num_glyph = None;
@@ -2496,9 +3249,16 @@ fn render_text_body_with_context(
                         auto_num_counters.insert(scheme_key.clone(), 0);
                         last_auto_key = scheme_key.clone();
                     }
-                    let start_at = bu_auto.attribute("startAt").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                    let start_at = bu_auto
+                        .attribute("startAt")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(1);
                     let count = auto_num_counters.get(&scheme_key).copied().unwrap_or(0);
-                    let index = if count == 0 { start_at } else { start_at + count };
+                    let index = if count == 0 {
+                        start_at
+                    } else {
+                        start_at + count
+                    };
                     auto_num_counters.insert(scheme_key.clone(), count + 1);
                     auto_num_glyph = Some(format_auto_number_glyph(scheme_type, index));
                 }
@@ -2507,18 +3267,24 @@ fn render_text_body_with_context(
             last_auto_key.clear();
         }
 
-        let style_attr = if para_styles.is_empty() { String::new() } else { format!(" style=\"{}\"", para_styles.join(";")) };
+        let style_attr = if para_styles.is_empty() {
+            String::new()
+        } else {
+            format!(" style=\"{}\"", para_styles.join(";"))
+        };
         output.push_str(&format!("        <div class=\"para\"{}>\n", style_attr));
 
         if has_bullet {
-            let bullet_char = p_pr.as_ref()
+            let bullet_char = p_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("buChar")))
                 .and_then(|bu| bu.attribute("char"))
                 .unwrap_or("•");
             let bullet = auto_num_glyph.unwrap_or_else(|| bullet_char.to_string());
 
             let mut bu_styles = Vec::new();
-            let bu_color = p_pr.as_ref()
+            let bu_color = p_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("buClr")))
                 .and_then(|clr| clr.children().find(|n| n.has_tag_name("solidFill")))
                 .and_then(|fill| resolve_fill_color(&fill, theme_colors));
@@ -2527,7 +3293,9 @@ fn render_text_body_with_context(
             } else {
                 if let Some(first_run) = para.children().find(|n| n.has_tag_name("r")) {
                     if let Some(r_pr) = first_run.children().find(|n| n.has_tag_name("rPr")) {
-                        if let Some(solid_fill) = r_pr.children().find(|n| n.has_tag_name("solidFill")) {
+                        if let Some(solid_fill) =
+                            r_pr.children().find(|n| n.has_tag_name("solidFill"))
+                        {
                             if let Some(color) = resolve_fill_color(&solid_fill, theme_colors) {
                                 bu_styles.push(format!("color:{}", color));
                             }
@@ -2558,26 +3326,40 @@ fn render_text_body_with_context(
                 }
             }
 
-            let bu_style_attr = if bu_styles.is_empty() { String::new() } else { format!(" style=\"{}\"", bu_styles.join(";")) };
-            output.push_str(&format!("<span class=\"bullet\"{}>{}</span>", bu_style_attr, html_escape(&bullet)));
+            let bu_style_attr = if bu_styles.is_empty() {
+                String::new()
+            } else {
+                format!(" style=\"{}\"", bu_styles.join(";"))
+            };
+            output.push_str(&format!(
+                "<span class=\"bullet\"{}>{}</span>",
+                bu_style_attr,
+                html_escape(&bullet)
+            ));
         }
 
         let mut has_math = false;
         for child in para.children() {
             if child.tag_name().name() == "oMath" || child.tag_name().name() == "oMathPara" {
                 has_math = true;
-                let math_text = child.descendants()
+                let math_text = child
+                    .descendants()
                     .filter(|n| n.has_tag_name("t"))
                     .filter_map(|n| n.text())
                     .collect::<Vec<&str>>()
                     .join("");
                 if !math_text.is_empty() {
-                    output.push_str(&format!("<span class=\"katex-formula\" data-formula=\"{}\"></span>", html_escape(&math_text)));
+                    output.push_str(&format!(
+                        "<span class=\"katex-formula\" data-formula=\"{}\"></span>",
+                        html_escape(&math_text)
+                    ));
                 }
             }
         }
 
-        let runs = para.children().filter(|n| n.has_tag_name("r") || n.has_tag_name("br"));
+        let runs = para
+            .children()
+            .filter(|n| n.has_tag_name("r") || n.has_tag_name("br"));
         let mut has_any_run = false;
 
         for run in runs {
@@ -2585,7 +3367,14 @@ fn render_text_body_with_context(
             if run.has_tag_name("br") {
                 output.push_str("<br/>");
             } else {
-                render_run(&run, theme_colors, default_font_size, theme_font_fallback, slide_rels, output);
+                render_run(
+                    &run,
+                    theme_colors,
+                    default_font_size,
+                    theme_font_fallback,
+                    slide_rels,
+                    output,
+                );
             }
         }
 
@@ -2609,7 +3398,9 @@ fn render_run(
     if let Some(t) = run.children().find(|n| n.has_tag_name("t")) {
         text = t.text().unwrap_or("").to_string();
     }
-    if text.is_empty() { return; }
+    if text.is_empty() {
+        return;
+    }
 
     let mut run_styles = Vec::new();
     let mut bold = false;
@@ -2621,17 +3412,46 @@ fn render_run(
     let mut hyperlink_url = None;
 
     if let Some(r_pr) = run.children().find(|n| n.has_tag_name("rPr")) {
-        if r_pr.attribute("b").map(|s| s == "1" || s == "true").unwrap_or(false) { bold = true; }
-        if r_pr.attribute("i").map(|s| s == "1" || s == "true").unwrap_or(false) { italic = true; }
-        if let Some(u) = r_pr.attribute("u") { if u != "none" { underline_style = Some(u); } }
-        if let Some(strike) = r_pr.attribute("strike") { if strike != "noStrike" { strike_style = Some(strike); } }
-        if let Some(cap) = r_pr.attribute("cap") {
-            if cap == "all" { text_transform = Some("text-transform:uppercase"); }
-            else if cap == "small" { text_transform = Some("font-variant-caps:all-small-caps"); }
+        if r_pr
+            .attribute("b")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false)
+        {
+            bold = true;
         }
-        if let Some(baseline) = r_pr.attribute("baseline").and_then(|s| s.parse::<i32>().ok()) {
-            if baseline > 0 { baseline_align = Some("vertical-align:super;font-size:smaller"); }
-            else if baseline < 0 { baseline_align = Some("vertical-align:sub;font-size:smaller"); }
+        if r_pr
+            .attribute("i")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false)
+        {
+            italic = true;
+        }
+        if let Some(u) = r_pr.attribute("u") {
+            if u != "none" {
+                underline_style = Some(u);
+            }
+        }
+        if let Some(strike) = r_pr.attribute("strike") {
+            if strike != "noStrike" {
+                strike_style = Some(strike);
+            }
+        }
+        if let Some(cap) = r_pr.attribute("cap") {
+            if cap == "all" {
+                text_transform = Some("text-transform:uppercase");
+            } else if cap == "small" {
+                text_transform = Some("font-variant-caps:all-small-caps");
+            }
+        }
+        if let Some(baseline) = r_pr
+            .attribute("baseline")
+            .and_then(|s| s.parse::<i32>().ok())
+        {
+            if baseline > 0 {
+                baseline_align = Some("vertical-align:super;font-size:smaller");
+            } else if baseline < 0 {
+                baseline_align = Some("vertical-align:sub;font-size:smaller");
+            }
         }
         if let Some(spc) = r_pr.attribute("spc").and_then(|s| s.parse::<f64>().ok()) {
             run_styles.push(format!("letter-spacing:{:.2}pt", spc / 100.0));
@@ -2643,12 +3463,22 @@ fn render_run(
             }
         }
 
-        let latin_typeface = r_pr.children().find(|n| n.has_tag_name("latin")).and_then(|n| n.attribute("typeface"));
-        let ea_typeface = r_pr.children().find(|n| n.has_tag_name("ea")).and_then(|n| n.attribute("typeface"));
+        let latin_typeface = r_pr
+            .children()
+            .find(|n| n.has_tag_name("latin"))
+            .and_then(|n| n.attribute("typeface"));
+        let ea_typeface = r_pr
+            .children()
+            .find(|n| n.has_tag_name("ea"))
+            .and_then(|n| n.attribute("typeface"));
         let typeface = latin_typeface.or(ea_typeface);
 
         let resolved_font = if let Some(font) = typeface {
-            if !font.starts_with('+') { Some(font) } else { theme_font_fallback }
+            if !font.starts_with('+') {
+                Some(font)
+            } else {
+                theme_font_fallback
+            }
         } else {
             theme_font_fallback
         };
@@ -2664,56 +3494,90 @@ fn render_run(
         }
 
         if let Some(hlink) = r_pr.children().find(|n| n.has_tag_name("hlinkClick")) {
-            if let Some(r_id) = hlink.attribute((crate::dom_types::NS_R, "id")).or_else(|| hlink.attribute("r:id")) {
-                if let Some(rel) = slide_rels.get(r_id) { hyperlink_url = Some(rel.target.clone()); }
+            if let Some(r_id) = hlink
+                .attribute((crate::dom_types::NS_R, "id"))
+                .or_else(|| hlink.attribute("r:id"))
+            {
+                if let Some(rel) = slide_rels.get(r_id) {
+                    hyperlink_url = Some(rel.target.clone());
+                }
             }
         }
     } else if let Some(def_sz) = default_font_size {
         run_styles.push(format!("font-size:{:.2}pt", def_sz));
     }
 
-    if bold { run_styles.push("font-weight:bold".to_string()); }
-    if italic { run_styles.push("font-style:italic".to_string()); }
+    if bold {
+        run_styles.push("font-weight:bold".to_string());
+    }
+    if italic {
+        run_styles.push("font-style:italic".to_string());
+    }
     if let Some(u) = underline_style {
         match u {
-            "sng" | "words" => { run_styles.push("text-decoration:underline".to_string()); }
+            "sng" | "words" => {
+                run_styles.push("text-decoration:underline".to_string());
+            }
             "dbl" => {
                 run_styles.push("text-decoration:underline".to_string());
                 run_styles.push("text-decoration-style:double".to_string());
             }
-            "wavy" | "wavyLch" => { run_styles.push("text-decoration:underline wavy".to_string()); }
+            "wavy" | "wavyLch" => {
+                run_styles.push("text-decoration:underline wavy".to_string());
+            }
             "wavyDbl" | "wavyHvy" => {
                 run_styles.push("text-decoration:underline wavy".to_string());
                 run_styles.push("text-decoration-thickness:2px".to_string());
             }
-            "dot" | "sysDot" => { run_styles.push("text-decoration:underline dotted".to_string()); }
+            "dot" | "sysDot" => {
+                run_styles.push("text-decoration:underline dotted".to_string());
+            }
             "dotHvy" => {
                 run_styles.push("text-decoration:underline dotted".to_string());
                 run_styles.push("text-decoration-thickness:2px".to_string());
             }
-            "dash" | "dashLch" | "dashLong" => { run_styles.push("text-decoration:underline dashed".to_string()); }
+            "dash" | "dashLch" | "dashLong" => {
+                run_styles.push("text-decoration:underline dashed".to_string());
+            }
             "dashHvy" | "dashLchHvy" | "dashLongHvy" => {
                 run_styles.push("text-decoration:underline dashed".to_string());
                 run_styles.push("text-decoration-thickness:2px".to_string());
             }
-            _ => { run_styles.push("text-decoration:underline".to_string()); }
+            _ => {
+                run_styles.push("text-decoration:underline".to_string());
+            }
         }
     }
     if let Some(strike) = strike_style {
-        if strike == "dblStrike" { run_styles.push("text-decoration:line-through double".to_string()); }
-        else { run_styles.push("text-decoration:line-through".to_string()); }
+        if strike == "dblStrike" {
+            run_styles.push("text-decoration:line-through double".to_string());
+        } else {
+            run_styles.push("text-decoration:line-through".to_string());
+        }
     }
-    if let Some(t) = text_transform { run_styles.push(t.to_string()); }
-    if let Some(b) = baseline_align { run_styles.push(b.to_string()); }
+    if let Some(t) = text_transform {
+        run_styles.push(t.to_string());
+    }
+    if let Some(b) = baseline_align {
+        run_styles.push(b.to_string());
+    }
 
     let inner = if run_styles.is_empty() {
         html_escape(&text)
     } else {
-        format!("<span style=\"{}\">{}</span>", run_styles.join(";"), html_escape(&text))
+        format!(
+            "<span style=\"{}\">{}</span>",
+            run_styles.join(";"),
+            html_escape(&text)
+        )
     };
 
     if let Some(url) = hyperlink_url {
-        output.push_str(&format!("<a href=\"{}\" rel=\"noopener\" target=\"_blank\">{}</a>", html_escape(&url), inner));
+        output.push_str(&format!(
+            "<a href=\"{}\" rel=\"noopener\" target=\"_blank\">{}</a>",
+            html_escape(&url),
+            inner
+        ));
     } else {
         output.push_str(&inner);
     }
@@ -2739,24 +3603,37 @@ fn render_table(
     let mut rows_count = 0;
     for tr in tbl.children().filter(|n| n.has_tag_name("tr")) {
         rows_count += 1;
-        let h = tr.attribute("h").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let h = tr
+            .attribute("h")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
         row_height_sum_emu += h;
     }
     let row_height_sum_pt = row_height_sum_emu / 12700.0;
-    if row_height_sum_pt > cy_pt { cy_pt = row_height_sum_pt; }
+    if row_height_sum_pt > cy_pt {
+        cy_pt = row_height_sum_pt;
+    }
 
-    let grid_cols: Vec<roxmltree::Node> = tbl.children()
+    let grid_cols: Vec<roxmltree::Node> = tbl
+        .children()
         .find(|n| n.has_tag_name("tblGrid"))
         .map(|n| n.children().filter(|c| c.has_tag_name("gridCol")).collect())
         .unwrap_or_default();
 
     let mut grid_width_sum_emu = 0.0;
     for gc in &grid_cols {
-        let w = gc.attribute("w").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let w = gc
+            .attribute("w")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
         grid_width_sum_emu += w;
     }
     let grid_width_sum_pt = grid_width_sum_emu / 12700.0;
-    let table_width_pt = if grid_width_sum_pt > 0.0 { grid_width_sum_pt } else { cx_pt };
+    let table_width_pt = if grid_width_sum_pt > 0.0 {
+        grid_width_sum_pt
+    } else {
+        cx_pt
+    };
 
     output.push_str(&format!(
         "    <div class=\"table-container\" style=\"left:{:.2}pt;top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;\">\n",
@@ -2767,16 +3644,31 @@ fn render_table(
     if !grid_cols.is_empty() {
         output.push_str("        <colgroup>");
         for gc in &grid_cols {
-            let w = gc.attribute("w").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            if w > 0.0 { output.push_str(&format!("<col style=\"width:{:.2}pt\">", w / 12700.0)); }
-            else { output.push_str(&format!("<col style=\"width:{:.2}%\">", 100.0 / grid_cols.len() as f64)); }
+            let w = gc
+                .attribute("w")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            if w > 0.0 {
+                output.push_str(&format!("<col style=\"width:{:.2}pt\">", w / 12700.0));
+            } else {
+                output.push_str(&format!(
+                    "<col style=\"width:{:.2}%\">",
+                    100.0 / grid_cols.len() as f64
+                ));
+            }
         }
         output.push_str("</colgroup>\n");
     }
 
     let tbl_pr = tbl.children().find(|n| n.has_tag_name("tblPr"));
-    let has_first_row = tbl_pr.and_then(|n| n.attribute("firstRow")).map(|s| s == "1" || s == "true").unwrap_or(false);
-    let has_band_row = tbl_pr.and_then(|n| n.attribute("bandRow")).map(|s| s == "1" || s == "true").unwrap_or(false);
+    let has_first_row = tbl_pr
+        .and_then(|n| n.attribute("firstRow"))
+        .map(|s| s == "1" || s == "true")
+        .unwrap_or(false);
+    let has_band_row = tbl_pr
+        .and_then(|n| n.attribute("bandRow"))
+        .map(|s| s == "1" || s == "true")
+        .unwrap_or(false);
 
     let mut row_index = 0;
     let total_rows = rows_count;
@@ -2784,26 +3676,50 @@ fn render_table(
     let mut rowspan_tracker: HashMap<(usize, usize), usize> = HashMap::new();
 
     for tr in tbl.children().filter(|n| n.has_tag_name("tr")) {
-        let row_h = tr.attribute("h").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let row_style = if row_h > 0.0 { format!(" style=\"height:{:.2}pt\"", row_h / 12700.0) } else { "".to_string() };
+        let row_h = tr
+            .attribute("h")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let row_style = if row_h > 0.0 {
+            format!(" style=\"height:{:.2}pt\"", row_h / 12700.0)
+        } else {
+            "".to_string()
+        };
         output.push_str(&format!("        <tr{}>\n", row_style));
 
         let mut col_index = 0;
         let mut skip_cols = 0;
 
         for tc in tr.children().filter(|n| n.has_tag_name("tc")) {
-            while rowspan_tracker.get(&(row_index, col_index)).copied().unwrap_or(0) > 0 {
+            while rowspan_tracker
+                .get(&(row_index, col_index))
+                .copied()
+                .unwrap_or(0)
+                > 0
+            {
                 let remaining = rowspan_tracker.remove(&(row_index, col_index)).unwrap();
-                if remaining > 1 { rowspan_tracker.insert((row_index + 1, col_index), remaining - 1); }
+                if remaining > 1 {
+                    rowspan_tracker.insert((row_index + 1, col_index), remaining - 1);
+                }
                 col_index += 1;
             }
 
-            if tc.attribute("hMerge").map(|s| s == "1" || s == "true").unwrap_or(false) {
-                if skip_cols > 0 { skip_cols -= 1; }
+            if tc
+                .attribute("hMerge")
+                .map(|s| s == "1" || s == "true")
+                .unwrap_or(false)
+            {
+                if skip_cols > 0 {
+                    skip_cols -= 1;
+                }
                 col_index += 1;
                 continue;
             }
-            if tc.attribute("vMerge").map(|s| s == "1" || s == "true").unwrap_or(false) {
+            if tc
+                .attribute("vMerge")
+                .map(|s| s == "1" || s == "true")
+                .unwrap_or(false)
+            {
                 col_index += 1;
                 continue;
             }
@@ -2813,20 +3729,32 @@ fn render_table(
                 continue;
             }
 
-            let grid_span = tc.attribute("gridSpan").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
-            let row_span = tc.attribute("rowSpan").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+            let grid_span = tc
+                .attribute("gridSpan")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1);
+            let row_span = tc
+                .attribute("rowSpan")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1);
 
-            if grid_span > 1 { skip_cols = grid_span - 1; }
-            if row_span > 1 { rowspan_tracker.insert((row_index + 1, col_index), row_span - 1); }
+            if grid_span > 1 {
+                skip_cols = grid_span - 1;
+            }
+            if row_span > 1 {
+                rowspan_tracker.insert((row_index + 1, col_index), row_span - 1);
+            }
 
             let mut cell_styles = Vec::new();
             let tc_pr = tc.children().find(|n| n.has_tag_name("tcPr"));
 
-            let cell_fill = tc_pr.as_ref()
+            let cell_fill = tc_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("solidFill")))
                 .and_then(|fill| resolve_fill_color(&fill, theme_colors));
 
-            let cell_grad = tc_pr.as_ref()
+            let cell_grad = tc_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("gradFill")))
                 .map(|grad| gradient_to_css(&grad, theme_colors));
 
@@ -2836,17 +3764,24 @@ fn render_table(
                 cell_styles.push(format!("background:{}", grad_css));
             } else {
                 let is_header = has_first_row && row_index == 0;
-                let is_banded_odd = has_band_row && (if has_first_row { row_index > 0 && (row_index - 1) % 2 == 0 } else { row_index % 2 == 0 });
+                let is_banded_odd = has_band_row
+                    && (if has_first_row {
+                        row_index > 0 && (row_index - 1) % 2 == 0
+                    } else {
+                        row_index % 2 == 0
+                    });
 
                 if is_header {
-                    let h_color = theme_colors.get("accent1")
+                    let h_color = theme_colors
+                        .get("accent1")
                         .or_else(|| theme_colors.get("dk2"))
                         .map(|s| format!("#{}", s))
                         .unwrap_or_else(|| "#4f81bd".to_string());
                     cell_styles.push(format!("background:{}", h_color));
                     cell_styles.push("color:#ffffff".to_string());
                 } else if is_banded_odd {
-                    let b_color = theme_colors.get("lt2")
+                    let b_color = theme_colors
+                        .get("lt2")
                         .map(|s| format!("#{}", s))
                         .unwrap_or_else(|| "rgba(128,128,128,0.1)".to_string());
                     cell_styles.push(format!("background:{}", b_color));
@@ -2864,19 +3799,23 @@ fn render_table(
                 }
             }
 
-            let bl = tc_pr.as_ref()
+            let bl = tc_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("lnL")))
                 .and_then(|ln| Some(outline_to_css(&ln, theme_colors)))
                 .unwrap_or_else(|| "1px solid #ccc".to_string());
-            let br = tc_pr.as_ref()
+            let br = tc_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("lnR")))
                 .and_then(|ln| Some(outline_to_css(&ln, theme_colors)))
                 .unwrap_or_else(|| "1px solid #ccc".to_string());
-            let bt = tc_pr.as_ref()
+            let bt = tc_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("lnT")))
                 .and_then(|ln| Some(outline_to_css(&ln, theme_colors)))
                 .unwrap_or_else(|| "1px solid #ccc".to_string());
-            let bb = tc_pr.as_ref()
+            let bb = tc_pr
+                .as_ref()
                 .and_then(|pr| pr.children().find(|n| n.has_tag_name("lnB")))
                 .and_then(|ln| Some(outline_to_css(&ln, theme_colors)))
                 .unwrap_or_else(|| "1px solid #ccc".to_string());
@@ -2886,28 +3825,70 @@ fn render_table(
             cell_styles.push(format!("border-top:{}", bt));
             cell_styles.push(format!("border-bottom:{}", bb));
 
-            let ln_tl_br = tc_pr.as_ref().and_then(|pr| pr.children().find(|n| n.has_tag_name("lnTlToBr")));
-            let ln_bl_tr = tc_pr.as_ref().and_then(|pr| pr.children().find(|n| n.has_tag_name("lnBlToTr")));
-            let tl_br_css = ln_tl_br.as_ref().and_then(|ln| Some(outline_to_css(ln, theme_colors)));
-            let bl_tr_css = ln_bl_tr.as_ref().and_then(|ln| Some(outline_to_css(ln, theme_colors)));
+            let ln_tl_br = tc_pr
+                .as_ref()
+                .and_then(|pr| pr.children().find(|n| n.has_tag_name("lnTlToBr")));
+            let ln_bl_tr = tc_pr
+                .as_ref()
+                .and_then(|pr| pr.children().find(|n| n.has_tag_name("lnBlToTr")));
+            let tl_br_css = ln_tl_br
+                .as_ref()
+                .and_then(|ln| Some(outline_to_css(ln, theme_colors)));
+            let bl_tr_css = ln_bl_tr
+                .as_ref()
+                .and_then(|ln| Some(outline_to_css(ln, theme_colors)));
 
             let has_diag = tl_br_css.is_some() || bl_tr_css.is_some();
-            if has_diag { cell_styles.push("position:relative".to_string()); }
-
-            if let Some(ref pr) = tc_pr {
-                let mar_l = pr.attribute("marL").and_then(|s| s.parse::<f64>().ok()).unwrap_or(91440.0) / 12700.0;
-                let mar_r = pr.attribute("marR").and_then(|s| s.parse::<f64>().ok()).unwrap_or(91440.0) / 12700.0;
-                let mar_t = pr.attribute("marT").and_then(|s| s.parse::<f64>().ok()).unwrap_or(45720.0) / 12700.0;
-                let mar_b = pr.attribute("marB").and_then(|s| s.parse::<f64>().ok()).unwrap_or(45720.0) / 12700.0;
-                cell_styles.push(format!("padding:{:.2}pt {:.2}pt {:.2}pt {:.2}pt", mar_t, mar_r, mar_b, mar_l));
+            if has_diag {
+                cell_styles.push("position:relative".to_string());
             }
 
-            let span_attrs = format!("{}{}",
-                if grid_span > 1 { format!(" colspan=\"{}\"", grid_span) } else { "".to_string() },
-                if row_span > 1 { format!(" rowspan=\"{}\"", row_span) } else { "".to_string() }
+            if let Some(ref pr) = tc_pr {
+                let mar_l = pr
+                    .attribute("marL")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(91440.0)
+                    / 12700.0;
+                let mar_r = pr
+                    .attribute("marR")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(91440.0)
+                    / 12700.0;
+                let mar_t = pr
+                    .attribute("marT")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(45720.0)
+                    / 12700.0;
+                let mar_b = pr
+                    .attribute("marB")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(45720.0)
+                    / 12700.0;
+                cell_styles.push(format!(
+                    "padding:{:.2}pt {:.2}pt {:.2}pt {:.2}pt",
+                    mar_t, mar_r, mar_b, mar_l
+                ));
+            }
+
+            let span_attrs = format!(
+                "{}{}",
+                if grid_span > 1 {
+                    format!(" colspan=\"{}\"", grid_span)
+                } else {
+                    "".to_string()
+                },
+                if row_span > 1 {
+                    format!(" rowspan=\"{}\"", row_span)
+                } else {
+                    "".to_string()
+                }
             );
 
-            let style_attr = if cell_styles.is_empty() { "".to_string() } else { format!(" style=\"{}\"", cell_styles.join(";")) };
+            let style_attr = if cell_styles.is_empty() {
+                "".to_string()
+            } else {
+                format!(" style=\"{}\"", cell_styles.join(";"))
+            };
 
             let mut diag_overlay = String::new();
             if has_diag {
@@ -2925,7 +3906,10 @@ fn render_table(
                 diag_overlay = format!("<svg class=\"cell-diag\" width=\"100%\" height=\"100%\" style=\"position:absolute;inset:0;pointer-events:none;overflow:visible\" preserveAspectRatio=\"none\">{}</svg>", svg_lines);
             }
 
-            output.push_str(&format!("          <td{}{}>{}\n", span_attrs, style_attr, diag_overlay));
+            output.push_str(&format!(
+                "          <td{}{}>{}\n",
+                span_attrs, style_attr, diag_overlay
+            ));
 
             let tx_body = tc.children().find(|n| n.has_tag_name("txBody"));
             if let Some(tx) = tx_body {
@@ -2967,42 +3951,73 @@ fn render_connector(
         cy_pt = pos.3 / 12700.0;
     } else if let Some(x_node) = xfrm {
         if let Some(off) = x_node.descendants().find(|n| n.has_tag_name("off")) {
-            let x = off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let y = off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let x = off
+                .attribute("x")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let y = off
+                .attribute("y")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
             x_pt = x / 12700.0;
             y_pt = y / 12700.0;
         }
         if let Some(ext) = x_node.descendants().find(|n| n.has_tag_name("ext")) {
-            let cx = ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let cy = ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let cx = ext
+                .attribute("cx")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let cy = ext
+                .attribute("cy")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
             cx_pt = cx / 12700.0;
             cy_pt = cy / 12700.0;
         }
         if let Some(rot) = x_node.attribute("rot").and_then(|s| s.parse::<f64>().ok()) {
             rot_deg = rot / 60000.0;
         }
-        flip_h = x_node.attribute("flipH").map(|s| s == "1" || s == "true").unwrap_or(false);
-        flip_v = x_node.attribute("flipV").map(|s| s == "1" || s == "true").unwrap_or(false);
+        flip_h = x_node
+            .attribute("flipH")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false);
+        flip_v = x_node
+            .attribute("flipV")
+            .map(|s| s == "1" || s == "true")
+            .unwrap_or(false);
     } else {
         return;
     }
 
     let sp_pr = node.descendants().find(|n| n.has_tag_name("spPr"));
-    let outline = sp_pr.as_ref().and_then(|pr| pr.children().find(|n| n.has_tag_name("ln")));
-    let default_color = theme_colors.get("dk1").map(|s| format!("#{}", s)).unwrap_or_else(|| "#000000".to_string());
+    let outline = sp_pr
+        .as_ref()
+        .and_then(|pr| pr.children().find(|n| n.has_tag_name("ln")));
+    let default_color = theme_colors
+        .get("dk1")
+        .map(|s| format!("#{}", s))
+        .unwrap_or_else(|| "#000000".to_string());
 
     let mut line_color = default_color;
     let mut line_width = 1.0;
     let mut prst_dash = "solid".to_string();
 
     if let Some(ref ln) = outline {
-        if let Some(color) = ln.children().find(|n| n.has_tag_name("solidFill")).and_then(|f| resolve_fill_color(&f, theme_colors)) {
+        if let Some(color) = ln
+            .children()
+            .find(|n| n.has_tag_name("solidFill"))
+            .and_then(|f| resolve_fill_color(&f, theme_colors))
+        {
             line_color = color;
         }
         if let Some(w) = ln.attribute("w").and_then(|s| s.parse::<f64>().ok()) {
             line_width = w / 12700.0;
         }
-        if let Some(dash) = ln.children().find(|n| n.has_tag_name("prstDash")).and_then(|d| d.attribute("val")) {
+        if let Some(dash) = ln
+            .children()
+            .find(|n| n.has_tag_name("prstDash"))
+            .and_then(|d| d.attribute("val"))
+        {
             prst_dash = dash.to_string();
         }
     }
@@ -3010,8 +4025,16 @@ fn render_connector(
     let padding_pt = line_width + 1.0;
     let render_cx = if cx_pt == 0.0 { padding_pt } else { cx_pt };
     let render_cy = if cy_pt == 0.0 { padding_pt } else { cy_pt };
-    let render_x = if cx_pt == 0.0 { x_pt - padding_pt / 2.0 } else { x_pt };
-    let render_y = if cy_pt == 0.0 { y_pt - padding_pt / 2.0 } else { y_pt };
+    let render_x = if cx_pt == 0.0 {
+        x_pt - padding_pt / 2.0
+    } else {
+        x_pt
+    };
+    let render_y = if cy_pt == 0.0 {
+        y_pt - padding_pt / 2.0
+    } else {
+        y_pt
+    };
 
     let x1 = if flip_h { "100%" } else { "0" };
     let y1 = if flip_v { "100%" } else { "0" };
@@ -3019,20 +4042,44 @@ fn render_connector(
     let y2 = if flip_v { "0" } else { "100%" };
 
     let (svg_x1, svg_y1, svg_x2, svg_y2) = if cy_pt == 0.0 {
-        (if flip_h { "100%" } else { "0" }, "50%", if flip_h { "0" } else { "100%" }, "50%")
+        (
+            if flip_h { "100%" } else { "0" },
+            "50%",
+            if flip_h { "0" } else { "100%" },
+            "50%",
+        )
     } else if cx_pt == 0.0 {
-        ("50%", if flip_v { "100%" } else { "0" }, "50%", if flip_v { "0" } else { "100%" })
+        (
+            "50%",
+            if flip_v { "100%" } else { "0" },
+            "50%",
+            if flip_v { "0" } else { "100%" },
+        )
     } else {
         (x1, y1, x2, y2)
     };
 
     let dash_arr = dash_type_to_svg_dasharray(&prst_dash, line_width);
-    let dash_attr = if !dash_arr.is_empty() { format!(" stroke-dasharray=\"{}\"", dash_arr) } else { "".to_string() };
+    let dash_attr = if !dash_arr.is_empty() {
+        format!(" stroke-dasharray=\"{}\"", dash_arr)
+    } else {
+        "".to_string()
+    };
 
-    let head_end = outline.as_ref().and_then(|ln| ln.children().find(|n| n.has_tag_name("headEnd")));
-    let tail_end = outline.as_ref().and_then(|ln| ln.children().find(|n| n.has_tag_name("tailEnd")));
-    let has_head = head_end.and_then(|he| he.attribute("type")).map(|t| t != "none").unwrap_or(false);
-    let has_tail = tail_end.and_then(|te| te.attribute("type")).map(|t| t != "none").unwrap_or(false);
+    let head_end = outline
+        .as_ref()
+        .and_then(|ln| ln.children().find(|n| n.has_tag_name("headEnd")));
+    let tail_end = outline
+        .as_ref()
+        .and_then(|ln| ln.children().find(|n| n.has_tag_name("tailEnd")));
+    let has_head = head_end
+        .and_then(|he| he.attribute("type"))
+        .map(|t| t != "none")
+        .unwrap_or(false);
+    let has_tail = tail_end
+        .and_then(|te| te.attribute("type"))
+        .map(|t| t != "none")
+        .unwrap_or(false);
 
     let mut marker_defs = String::new();
     let mut marker_start = String::new();
@@ -3053,13 +4100,21 @@ fn render_connector(
         marker_defs.push_str("</defs>");
     }
 
-    let preset = sp_pr.as_ref()
+    let preset = sp_pr
+        .as_ref()
         .and_then(|pr| pr.children().find(|n| n.has_tag_name("prstGeom")))
         .and_then(|g| g.attribute("prst"))
         .unwrap_or("straightConnector1");
 
-    let stroke_attrs = format!("stroke=\"{}\" stroke-width=\"{:.2}pt\" fill=\"none\"{}{}{}", line_color, line_width, dash_attr, marker_start, marker_end);
-    let cxn_transform = if rot_deg != 0.0 { format!(";transform:rotate({:.2}deg)", rot_deg) } else { "".to_string() };
+    let stroke_attrs = format!(
+        "stroke=\"{}\" stroke-width=\"{:.2}pt\" fill=\"none\"{}{}{}",
+        line_color, line_width, dash_attr, marker_start, marker_end
+    );
+    let cxn_transform = if rot_deg != 0.0 {
+        format!(";transform:rotate({:.2}deg)", rot_deg)
+    } else {
+        "".to_string()
+    };
 
     output.push_str(&format!("    <div class=\"connector\" style=\"left:{:.2}pt;top:{:.2}pt;width:{:.2}pt;height:{:.2}pt{}\">\n", render_x, render_y, render_cx, render_cy, cxn_transform));
 
@@ -3070,23 +4125,37 @@ fn render_connector(
             _ => "0,0 50,0 50,100 100,100",
         };
         output.push_str("      <svg width=\"100%\" height=\"100%\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\" style=\"overflow:visible;display:block\">\n");
-        if !marker_defs.is_empty() { output.push_str(&format!("        {}\n", marker_defs)); }
-        output.push_str(&format!("        <polyline points=\"{}\" {}/>\n", points, stroke_attrs));
+        if !marker_defs.is_empty() {
+            output.push_str(&format!("        {}\n", marker_defs));
+        }
+        output.push_str(&format!(
+            "        <polyline points=\"{}\" {}/>\n",
+            points, stroke_attrs
+        ));
         output.push_str("      </svg>\n");
     } else if preset.starts_with("curvedConnector") {
         let d = match preset {
             "curvedConnector2" => "M 0,0 Q 100,0 100,100",
-            "curvedConnector4" | "curvedConnector5" => "M 0,0 C 25,0 25,50 50,50 C 75,50 75,100 100,100",
+            "curvedConnector4" | "curvedConnector5" => {
+                "M 0,0 C 25,0 25,50 50,50 C 75,50 75,100 100,100"
+            }
             _ => "M 0,0 C 50,0 50,100 100,100",
         };
         output.push_str("      <svg width=\"100%\" height=\"100%\" viewBox=\"0 0 100 100\" preserveAspectRatio=\"none\" style=\"overflow:visible;display:block\">\n");
-        if !marker_defs.is_empty() { output.push_str(&format!("        {}\n", marker_defs)); }
+        if !marker_defs.is_empty() {
+            output.push_str(&format!("        {}\n", marker_defs));
+        }
         output.push_str(&format!("        <path d=\"{}\" {}/>\n", d, stroke_attrs));
         output.push_str("      </svg>\n");
     } else {
         output.push_str("      <svg width=\"100%\" height=\"100%\" preserveAspectRatio=\"none\" style=\"overflow:visible;display:block\">\n");
-        if !marker_defs.is_empty() { output.push_str(&format!("        {}\n", marker_defs)); }
-        output.push_str(&format!("        <line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" {}/>\n", svg_x1, svg_y1, svg_x2, svg_y2, stroke_attrs));
+        if !marker_defs.is_empty() {
+            output.push_str(&format!("        {}\n", marker_defs));
+        }
+        output.push_str(&format!(
+            "        <line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" {}/>\n",
+            svg_x1, svg_y1, svg_x2, svg_y2, stroke_attrs
+        ));
         output.push_str("      </svg>\n");
     }
 
@@ -3105,8 +4174,12 @@ fn render_group_shape(
     master_text_styles: Option<roxmltree::Node<'_, '_>>,
 ) {
     let grp_sp_pr = node.children().find(|n| n.has_tag_name("grpSpPr"));
-    let xfrm = grp_sp_pr.as_ref().and_then(|pr| pr.children().find(|n| n.has_tag_name("xfrm")));
-    if xfrm.is_none() { return; }
+    let xfrm = grp_sp_pr
+        .as_ref()
+        .and_then(|pr| pr.children().find(|n| n.has_tag_name("xfrm")));
+    if xfrm.is_none() {
+        return;
+    }
     let xfrm = xfrm.unwrap();
 
     let off = match xfrm.children().find(|n| n.has_tag_name("off")) {
@@ -3118,24 +4191,56 @@ fn render_group_shape(
         None => return,
     };
 
-    let x = off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let y = off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let cx = ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let cy = ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let x = off
+        .attribute("x")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let y = off
+        .attribute("y")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cx = ext
+        .attribute("cx")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cy = ext
+        .attribute("cy")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
 
     let child_off = xfrm.children().find(|n| n.has_tag_name("chOff"));
     let child_ext = xfrm.children().find(|n| n.has_tag_name("chExt"));
 
-    let ch_x = child_off.and_then(|n| n.attribute("x")).and_then(|s| s.parse::<f64>().ok()).unwrap_or(x);
-    let ch_y = child_off.and_then(|n| n.attribute("y")).and_then(|s| s.parse::<f64>().ok()).unwrap_or(y);
-    let ch_cx = child_ext.and_then(|n| n.attribute("cx")).and_then(|s| s.parse::<f64>().ok()).unwrap_or(cx);
-    let ch_cy = child_ext.and_then(|n| n.attribute("cy")).and_then(|s| s.parse::<f64>().ok()).unwrap_or(cy);
+    let ch_x = child_off
+        .and_then(|n| n.attribute("x"))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(x);
+    let ch_y = child_off
+        .and_then(|n| n.attribute("y"))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(y);
+    let ch_cx = child_ext
+        .and_then(|n| n.attribute("cx"))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(cx);
+    let ch_cy = child_ext
+        .and_then(|n| n.attribute("cy"))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(cy);
 
     let scale_x = if ch_cx != 0.0 { cx / ch_cx } else { 1.0 };
     let scale_y = if ch_cy != 0.0 { cy / ch_cy } else { 1.0 };
 
-    let rot_deg = xfrm.attribute("rot").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) / 60000.0;
-    let grp_transform = if rot_deg != 0.0 { format!(";transform:rotate({:.2}deg)", rot_deg) } else { "".to_string() };
+    let rot_deg = xfrm
+        .attribute("rot")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        / 60000.0;
+    let grp_transform = if rot_deg != 0.0 {
+        format!(";transform:rotate({:.2}deg)", rot_deg)
+    } else {
+        "".to_string()
+    };
 
     output.push_str(&format!(
         "    <div class=\"group\" style=\"left:{:.2}pt;top:{:.2}pt;width:{:.2}pt;height:{:.2}pt{}\">\n",
@@ -3147,10 +4252,22 @@ fn render_group_shape(
         let c_off = cx_xfrm.children().find(|n| n.has_tag_name("off"))?;
         let c_ext = cx_xfrm.children().find(|n| n.has_tag_name("ext"))?;
 
-        let ox = c_off.attribute("x").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let oy = c_off.attribute("y").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let ocx = c_ext.attribute("cx").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let ocy = c_ext.attribute("cy").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let ox = c_off
+            .attribute("x")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let oy = c_off
+            .attribute("y")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let ocx = c_ext
+            .attribute("cx")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let ocy = c_ext
+            .attribute("cy")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
 
         Some((
             (ox - ch_x) * scale_x,
@@ -3165,13 +4282,32 @@ fn render_group_shape(
         if tag == "sp" {
             if let Some(pos) = calc_group_child_pos(&child) {
                 let mut shape_html = String::new();
-                render_shape(&child, slide_path, rels, theme_colors, &mut shape_html, package, layout_tree, master_tree, master_text_styles, Some(pos));
+                render_shape(
+                    &child,
+                    slide_path,
+                    rels,
+                    theme_colors,
+                    &mut shape_html,
+                    package,
+                    layout_tree,
+                    master_tree,
+                    master_text_styles,
+                    Some(pos),
+                );
                 output.push_str(&shape_html);
             }
         } else if tag == "pic" {
             if let Some(pos) = calc_group_child_pos(&child) {
                 let mut pic_html = String::new();
-                render_picture_with_override_pos(&child, slide_path, rels, &mut pic_html, package, theme_colors, pos);
+                render_picture_with_override_pos(
+                    &child,
+                    slide_path,
+                    rels,
+                    &mut pic_html,
+                    package,
+                    theme_colors,
+                    pos,
+                );
                 output.push_str(&pic_html);
             }
         } else if tag == "cxnSp" {
@@ -3181,7 +4317,17 @@ fn render_group_shape(
                 output.push_str(&cxn_html);
             }
         } else if tag == "grpSp" {
-            render_group_shape(&child, slide_path, rels, theme_colors, output, package, layout_tree, master_tree, master_text_styles);
+            render_group_shape(
+                &child,
+                slide_path,
+                rels,
+                theme_colors,
+                output,
+                package,
+                layout_tree,
+                master_tree,
+                master_text_styles,
+            );
         }
     }
 
@@ -3204,19 +4350,33 @@ fn base64_encode(data: &[u8]) -> String {
     let mut i = 0;
     while i < data.len() {
         let b0 = data[i] as usize;
-        let b1 = if i + 1 < data.len() { data[i + 1] as usize } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] as usize } else { 0 };
+        let b1 = if i + 1 < data.len() {
+            data[i + 1] as usize
+        } else {
+            0
+        };
+        let b2 = if i + 2 < data.len() {
+            data[i + 2] as usize
+        } else {
+            0
+        };
 
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
         result.push(ALPHABET[(triple >> 18) & 63] as char);
         result.push(ALPHABET[(triple >> 12) & 63] as char);
 
-        if i + 1 < data.len() { result.push(ALPHABET[(triple >> 6) & 63] as char); }
-        else { result.push('='); }
+        if i + 1 < data.len() {
+            result.push(ALPHABET[(triple >> 6) & 63] as char);
+        } else {
+            result.push('=');
+        }
 
-        if i + 2 < data.len() { result.push(ALPHABET[triple & 63] as char); }
-        else { result.push('='); }
+        if i + 2 < data.len() {
+            result.push(ALPHABET[triple & 63] as char);
+        } else {
+            result.push('=');
+        }
 
         i += 3;
     }

@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, OutputFormat};
 use clap::Args;
+use handler_common::{HandlerError, OutputFormat};
 
 /// Persist changes back to the original file
 #[derive(Args)]

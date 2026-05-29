@@ -7,8 +7,8 @@ use oxml::OxmlPackage;
 
 /// ViewAsText: show cells as a formatted text grid.
 pub fn view_as_text(package: &OxmlPackage, opts: &ViewOptions) -> Result<String, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
     let mut output = String::new();
 
@@ -36,7 +36,10 @@ fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> String {
     // Determine column range
     let col_filter = opts.cols.as_ref();
     let min_col: usize = col_filter
-        .and_then(|cols| cols.first().and_then(|c| CellRef::parse(c).map(|cr| cr.col)))
+        .and_then(|cols| {
+            cols.first()
+                .and_then(|c| CellRef::parse(c).map(|cr| cr.col))
+        })
         .unwrap_or(1);
     let max_col: usize = col_filter
         .and_then(|cols| cols.last().and_then(|c| CellRef::parse(c).map(|cr| cr.col)))
@@ -76,7 +79,11 @@ fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> String {
     grid.push_str(&format!("{:>width$}", "", width = row_num_width));
     for col in &col_range {
         let w = col_widths.get(col).unwrap_or(&6);
-        grid.push_str(&format!("{:^>width$}", col_num_to_letters(*col), width = *w));
+        grid.push_str(&format!(
+            "{:^>width$}",
+            col_num_to_letters(*col),
+            width = *w
+        ));
     }
     grid.push('\n');
 
@@ -119,8 +126,8 @@ fn col_num_to_letters(num: usize) -> String {
 
 /// ViewAsOutline: list sheets with summary info.
 pub fn view_as_outline(package: &OxmlPackage) -> Result<String, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
     let mut output = String::new();
     output.push_str(&format!("Workbook: {} sheets\n", model.sheets.len()));
@@ -140,20 +147,24 @@ pub fn view_as_outline(package: &OxmlPackage) -> Result<String, HandlerError> {
 
 /// ViewAsOutline JSON representation.
 pub fn view_as_outline_json(package: &OxmlPackage) -> Result<serde_json::Value, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
-    let sheets_json: Vec<serde_json::Value> = model.sheets.iter().map(|ws| {
-        serde_json::json!({
-            "name": ws.name,
-            "index": ws.index,
-            "path": format!("/{}", ws.name),
-            "cellCount": ws.cells.len(),
-            "maxRow": ws.max_row,
-            "maxCol": ws.max_col,
-            "partPath": ws.part_path,
+    let sheets_json: Vec<serde_json::Value> = model
+        .sheets
+        .iter()
+        .map(|ws| {
+            serde_json::json!({
+                "name": ws.name,
+                "index": ws.index,
+                "path": format!("/{}", ws.name),
+                "cellCount": ws.cells.len(),
+                "maxRow": ws.max_row,
+                "maxCol": ws.max_col,
+                "partPath": ws.part_path,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(serde_json::json!({
         "format": "xlsx",
@@ -163,34 +174,45 @@ pub fn view_as_outline_json(package: &OxmlPackage) -> Result<serde_json::Value, 
 }
 
 /// ViewAsText JSON representation.
-pub fn view_as_text_json(package: &OxmlPackage, _opts: &ViewOptions) -> Result<serde_json::Value, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+pub fn view_as_text_json(
+    package: &OxmlPackage,
+    _opts: &ViewOptions,
+) -> Result<serde_json::Value, HandlerError> {
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
-    let sheets_json: Vec<serde_json::Value> = model.sheets.iter().map(|ws| {
-        let cells_json: Vec<serde_json::Value> = ws.cells.values().map(|cell| {
-            let mut obj = serde_json::json!({
-                "ref": cell.ref_str,
-                "value": cell.display_value,
-                "type": cell_type_label(&cell.value_type),
-            });
-            if let Some(f) = &cell.formula {
-                obj["formula"] = serde_json::Value::String(f.clone());
-            }
-            if let Some(si) = cell.style_index {
-                obj["styleIndex"] = serde_json::Value::Number(si.into());
-            }
-            obj
-        }).collect();
+    let sheets_json: Vec<serde_json::Value> = model
+        .sheets
+        .iter()
+        .map(|ws| {
+            let cells_json: Vec<serde_json::Value> = ws
+                .cells
+                .values()
+                .map(|cell| {
+                    let mut obj = serde_json::json!({
+                        "ref": cell.ref_str,
+                        "value": cell.display_value,
+                        "type": cell_type_label(&cell.value_type),
+                    });
+                    if let Some(f) = &cell.formula {
+                        obj["formula"] = serde_json::Value::String(f.clone());
+                    }
+                    if let Some(si) = cell.style_index {
+                        obj["styleIndex"] = serde_json::Value::Number(si.into());
+                    }
+                    obj
+                })
+                .collect();
 
-        serde_json::json!({
-            "name": ws.name,
-            "path": format!("/{}", ws.name),
-            "maxRow": ws.max_row,
-            "maxCol": ws.max_col,
-            "cells": cells_json,
+            serde_json::json!({
+                "name": ws.name,
+                "path": format!("/{}", ws.name),
+                "maxRow": ws.max_row,
+                "maxCol": ws.max_col,
+                "cells": cells_json,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(serde_json::json!({
         "format": "xlsx",
@@ -200,15 +222,19 @@ pub fn view_as_text_json(package: &OxmlPackage, _opts: &ViewOptions) -> Result<s
 
 /// ViewAsStats: summary statistics.
 pub fn view_as_stats(package: &OxmlPackage) -> Result<String, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
     let total_cells: usize = model.sheets.iter().map(|ws| ws.cells.len()).sum();
-    let total_formulas: usize = model.sheets.iter()
+    let total_formulas: usize = model
+        .sheets
+        .iter()
         .flat_map(|ws| ws.cells.values())
         .filter(|c| c.formula.is_some())
         .count();
-    let max_dimensions = model.sheets.iter()
+    let max_dimensions = model
+        .sheets
+        .iter()
         .map(|ws| format!("{}: {}R x {}C", ws.name, ws.max_row, ws.max_col))
         .collect::<Vec<_>>();
 
@@ -229,11 +255,13 @@ pub fn view_as_stats(package: &OxmlPackage) -> Result<String, HandlerError> {
 
 /// ViewAsStats JSON.
 pub fn view_as_stats_json(package: &OxmlPackage) -> Result<serde_json::Value, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
     let total_cells: usize = model.sheets.iter().map(|ws| ws.cells.len()).sum();
-    let total_formulas: usize = model.sheets.iter()
+    let total_formulas: usize = model
+        .sheets
+        .iter()
         .flat_map(|ws| ws.cells.values())
         .filter(|c| c.formula.is_some())
         .count();
@@ -258,9 +286,13 @@ fn cell_type_label(vt: &CellValueType) -> &'static str {
 }
 
 /// Detect issues in the workbook.
-pub fn view_as_issues(package: &OxmlPackage, issue_type: Option<&str>, limit: Option<usize>) -> Result<Vec<DocumentIssue>, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+pub fn view_as_issues(
+    package: &OxmlPackage,
+    issue_type: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<DocumentIssue>, HandlerError> {
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
     let mut issues = Vec::new();
 
     // Check for missing sheet parts
@@ -280,7 +312,10 @@ pub fn view_as_issues(package: &OxmlPackage, issue_type: Option<&str>, limit: Op
                 issues.push(DocumentIssue {
                     severity: IssueSeverity::Warning,
                     issue_type: "cell-error".to_string(),
-                    description: format!("Cell {} has error value: {}", cell.ref_str, cell.display_value),
+                    description: format!(
+                        "Cell {} has error value: {}",
+                        cell.ref_str, cell.display_value
+                    ),
                     path: Some(format!("/{}/{}", ws.name, cell.ref_str)),
                 });
             }
@@ -343,8 +378,8 @@ pub fn validate(package: &OxmlPackage) -> Result<Vec<ValidationError>, HandlerEr
     }
 
     // Build model to check sheets
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
     for ws in &model.sheets {
         if !package.has_part(&ws.part_path) {
@@ -358,7 +393,8 @@ pub fn validate(package: &OxmlPackage) -> Result<Vec<ValidationError>, HandlerEr
 
         // Check each sheet's worksheet XML has <sheetData>
         if package.has_part(&ws.part_path) {
-            let xml = package.read_part_xml(&ws.part_path)
+            let xml = package
+                .read_part_xml(&ws.part_path)
                 .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
             if !xml.contains("<sheetData") {
                 errors.push(ValidationError {

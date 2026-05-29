@@ -15,5 +15,7 @@ pub fn evaluate_formula(_formula: &str) -> Option<String> {
 pub fn is_simple_arithmetic(formula: &str) -> bool {
     let stripped = formula.trim_start_matches('=');
     // Check if it only contains digits, operators, and parentheses
-    stripped.chars().all(|c| c.is_ascii_digit() || "+-*/() .".contains(c))
+    stripped
+        .chars()
+        .all(|c| c.is_ascii_digit() || "+-*/() .".contains(c))
 }

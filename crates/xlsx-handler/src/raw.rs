@@ -1,7 +1,7 @@
 /// Raw XML access operations for xlsx documents.
 use handler_common::HandlerError;
-use oxml::OxmlPackage;
 use oxml::xml_util;
+use oxml::OxmlPackage;
 use std::collections::HashMap;
 
 /// Apply a raw XPath action to a part XML.
@@ -13,7 +13,8 @@ pub fn raw_set(
     xml: Option<&str>,
 ) -> Result<(), HandlerError> {
     // Read the current part XML
-    let current_xml = package.read_part_xml(part_path)
+    let current_xml = package
+        .read_part_xml(part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Apply the action using xml_util
@@ -21,7 +22,8 @@ pub fn raw_set(
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Write back
-    package.write_part_xml(part_path, &modified_xml)
+    package
+        .write_part_xml(part_path, &modified_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     Ok(())
@@ -41,10 +43,15 @@ pub fn add_part(
             if !package.has_part(ss_path) {
                 let empty_ss = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
                     <sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"0\" uniqueCount=\"0\"/>";
-                package.write_part_xml(ss_path, empty_ss)
+                package
+                    .write_part_xml(ss_path, empty_ss)
                     .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
             }
-            Ok((ss_path.to_string(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml".to_string()))
+            Ok((
+                ss_path.to_string(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
+                    .to_string(),
+            ))
         }
         "style" => {
             // Ensure xl/styles.xml exists
@@ -52,18 +59,24 @@ pub fn add_part(
             if !package.has_part(styles_path) {
                 let empty_styles = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
                     <styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>";
-                package.write_part_xml(styles_path, empty_styles)
+                package
+                    .write_part_xml(styles_path, empty_styles)
                     .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
             }
-            Ok((styles_path.to_string(), "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml".to_string()))
+            Ok((
+                styles_path.to_string(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"
+                    .to_string(),
+            ))
         }
         "image" => {
-            let src_path = properties
-                .and_then(|p| p.get("source"))
-                .ok_or_else(|| HandlerError::InvalidArgument("image requires 'source' property".to_string()))?;
+            let src_path = properties.and_then(|p| p.get("source")).ok_or_else(|| {
+                HandlerError::InvalidArgument("image requires 'source' property".to_string())
+            })?;
 
-            let image_data = std::fs::read(src_path)
-                .map_err(|e| HandlerError::OperationFailed(format!("failed to read image '{}': {}", src_path, e)))?;
+            let image_data = std::fs::read(src_path).map_err(|e| {
+                HandlerError::OperationFailed(format!("failed to read image '{}': {}", src_path, e))
+            })?;
 
             let ext = src_path.rsplit('.').next().unwrap_or("png");
             let next_idx = package.list_parts().len() + 1;
@@ -74,11 +87,15 @@ pub fn add_part(
                 other => ("image/png", format!("xl/media/image{}.{}", next_idx, other)),
             };
 
-            package.write_part(&part_path, image_data)
+            package
+                .write_part(&part_path, image_data)
                 .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
             Ok((part_path, mime_type.to_string()))
         }
-        other => Err(HandlerError::UnsupportedType(format!("xlsx add_part '{}' not supported", other))),
+        other => Err(HandlerError::UnsupportedType(format!(
+            "xlsx add_part '{}' not supported",
+            other
+        ))),
     }
 }

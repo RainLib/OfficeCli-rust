@@ -31,8 +31,8 @@ pub fn strip_prolog(xml: &str) -> &str {
 /// Parse XML and find elements matching an XPath-like expression.
 /// Supports simple XPath: /root/child[N], /root/child[@attr=val]
 pub fn find_elements_by_xpath(xml: &str, xpath: &str) -> Result<Vec<String>, XmlUtilError> {
-    let doc = roxmltree::Document::parse(xml)
-        .map_err(|e| XmlUtilError::ReadError(e.to_string()))?;
+    let doc =
+        roxmltree::Document::parse(xml).map_err(|e| XmlUtilError::ReadError(e.to_string()))?;
 
     let segments = parse_xpath_segments(xpath)?;
     let mut results = Vec::new();
@@ -106,7 +106,11 @@ fn parse_xpath_segments(xpath: &str) -> Result<Vec<XPathSegment>, XmlUtilError> 
             name = original;
         }
 
-        segments.push(XPathSegment { name, index, attr_filter });
+        segments.push(XPathSegment {
+            name,
+            index,
+            attr_filter,
+        });
     }
 
     Ok(segments)
@@ -164,17 +168,28 @@ pub fn apply_xpath_action(
 ) -> Result<String, XmlUtilError> {
     match action {
         "setattr" => {
-            let new = new_xml.ok_or_else(|| XmlUtilError::WriteError("setattr requires attr=value".to_string()))?;
-            let (attr_name, attr_val) = new.split_once('=')
-                .ok_or_else(|| XmlUtilError::WriteError("setattr format: attr=value".to_string()))?;
+            let new = new_xml.ok_or_else(|| {
+                XmlUtilError::WriteError("setattr requires attr=value".to_string())
+            })?;
+            let (attr_name, attr_val) = new.split_once('=').ok_or_else(|| {
+                XmlUtilError::WriteError("setattr format: attr=value".to_string())
+            })?;
             set_attribute_in_xml(xml, xpath, attr_name, attr_val)
         }
         "remove" => remove_element_by_xpath(xml, xpath),
-        _ => Err(XmlUtilError::WriteError(format!("unsupported action: {}", action))),
+        _ => Err(XmlUtilError::WriteError(format!(
+            "unsupported action: {}",
+            action
+        ))),
     }
 }
 
-fn set_attribute_in_xml(xml: &str, _xpath: &str, _attr_name: &str, _attr_val: &str) -> Result<String, XmlUtilError> {
+fn set_attribute_in_xml(
+    xml: &str,
+    _xpath: &str,
+    _attr_name: &str,
+    _attr_val: &str,
+) -> Result<String, XmlUtilError> {
     // Placeholder: will use proper DOM manipulation in full implementation
     Ok(xml.to_string())
 }

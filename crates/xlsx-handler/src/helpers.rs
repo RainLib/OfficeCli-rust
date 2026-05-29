@@ -7,11 +7,13 @@ use quick_xml::Reader;
 /// Parse the workbook.xml to extract the sheet list.
 /// Returns (sheet_name, part_path, rel_id) for each sheet.
 pub fn parse_workbook(package: &OxmlPackage) -> Result<Vec<(String, String, String)>, String> {
-    let xml = package.read_part_xml("xl/workbook.xml")
+    let xml = package
+        .read_part_xml("xl/workbook.xml")
         .map_err(|e| format!("failed to read xl/workbook.xml: {}", e))?;
 
     // Parse relationships for workbook to resolve sheet paths
-    let rels = package.part_rels("xl/workbook.xml")
+    let rels = package
+        .part_rels("xl/workbook.xml")
         .map_err(|e| format!("failed to read workbook rels: {}", e))?;
 
     let mut reader = Reader::from_str(&xml);
@@ -28,13 +30,15 @@ pub fn parse_workbook(package: &OxmlPackage) -> Result<Vec<(String, String, Stri
                 match local_name_ref {
                     b"sheets" => in_sheets = true,
                     b"sheet" if in_sheets => {
-                        let name = e.attributes()
+                        let name = e
+                            .attributes()
                             .filter_map(|a| a.ok())
                             .find(|a| a.key.as_ref() == b"name")
                             .map(|a| String::from_utf8_lossy(a.value.as_ref()).to_string())
                             .unwrap_or_default();
 
-                        let rel_id = e.attributes()
+                        let rel_id = e
+                            .attributes()
                             .filter_map(|a| a.ok())
                             .find(|a| {
                                 let key = a.key.as_ref();
@@ -44,7 +48,8 @@ pub fn parse_workbook(package: &OxmlPackage) -> Result<Vec<(String, String, Stri
                             .unwrap_or_default();
 
                         // Resolve the relationship target to get the part path
-                        let target = rels.get(&rel_id)
+                        let target = rels
+                            .get(&rel_id)
                             .map(|r| r.target.clone())
                             .unwrap_or_default();
                         let part_path = package.resolve_rel_target("xl/workbook.xml", &target);
@@ -75,7 +80,9 @@ pub fn parse_shared_strings(package: &OxmlPackage) -> Vec<String> {
         return Vec::new();
     }
 
-    let xml = package.read_part_xml("xl/sharedStrings.xml").unwrap_or_default();
+    let xml = package
+        .read_part_xml("xl/sharedStrings.xml")
+        .unwrap_or_default();
     let mut reader = Reader::from_str(&xml);
     reader.config_mut().trim_text(true);
 
@@ -124,14 +131,20 @@ pub fn parse_shared_strings(package: &OxmlPackage) -> Vec<String> {
 }
 
 /// Parse a single worksheet XML and extract cells.
-pub fn parse_sheet(package: &OxmlPackage, part_path: &str, shared_strings: &[String]) -> Result<Worksheet, String> {
-    let xml = package.read_part_xml(part_path)
+pub fn parse_sheet(
+    package: &OxmlPackage,
+    part_path: &str,
+    shared_strings: &[String],
+) -> Result<Worksheet, String> {
+    let xml = package
+        .read_part_xml(part_path)
         .map_err(|e| format!("failed to read {}: {}", part_path, e))?;
 
     let mut reader = Reader::from_str(&xml);
     reader.config_mut().trim_text(true);
 
-    let mut cells: std::collections::HashMap<(usize, usize), Cell> = std::collections::HashMap::new();
+    let mut cells: std::collections::HashMap<(usize, usize), Cell> =
+        std::collections::HashMap::new();
     let mut max_col: usize = 0;
     let mut max_row: usize = 0;
 
@@ -146,39 +159,37 @@ pub fn parse_sheet(package: &OxmlPackage, part_path: &str, shared_strings: &[Str
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) => {
-                match e.local_name().as_ref() {
-                    b"c" => {
-                        in_cell = true;
-                        cell_ref_str.clear();
-                        cell_value = None;
-                        cell_formula = None;
-                        cell_value_type = CellValueType::Number;
-                        cell_style_index = None;
+            Ok(Event::Start(e)) => match e.local_name().as_ref() {
+                b"c" => {
+                    in_cell = true;
+                    cell_ref_str.clear();
+                    cell_value = None;
+                    cell_formula = None;
+                    cell_value_type = CellValueType::Number;
+                    cell_style_index = None;
 
-                        for attr in e.attributes().filter_map(|a| a.ok()) {
-                            let key = attr.key.as_ref();
-                            if key == b"r" {
-                                cell_ref_str = String::from_utf8_lossy(attr.value.as_ref()).to_string();
-                            } else if key == b"t" {
-                                cell_value_type = CellValueType::from_attr(
-                                    Some(&String::from_utf8_lossy(attr.value.as_ref()))
-                                );
-                            } else if key == b"s" {
-                                let s_val = String::from_utf8_lossy(attr.value.as_ref());
-                                cell_style_index = s_val.parse::<usize>().ok();
-                            }
+                    for attr in e.attributes().filter_map(|a| a.ok()) {
+                        let key = attr.key.as_ref();
+                        if key == b"r" {
+                            cell_ref_str = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                        } else if key == b"t" {
+                            cell_value_type = CellValueType::from_attr(Some(
+                                &String::from_utf8_lossy(attr.value.as_ref()),
+                            ));
+                        } else if key == b"s" {
+                            let s_val = String::from_utf8_lossy(attr.value.as_ref());
+                            cell_style_index = s_val.parse::<usize>().ok();
                         }
                     }
-                    b"v" if in_cell => {
-                        in_v = true;
-                    }
-                    b"f" if in_cell => {
-                        in_f = true;
-                    }
-                    _ => {}
                 }
-            }
+                b"v" if in_cell => {
+                    in_v = true;
+                }
+                b"f" if in_cell => {
+                    in_f = true;
+                }
+                _ => {}
+            },
             Ok(Event::Text(e)) => {
                 if in_v {
                     cell_value = Some(e.unescape().unwrap_or_default().to_string());
@@ -187,25 +198,27 @@ pub fn parse_sheet(package: &OxmlPackage, part_path: &str, shared_strings: &[Str
                     cell_formula = Some(e.unescape().unwrap_or_default().to_string());
                 }
             }
-            Ok(Event::End(e)) => {
-                match e.local_name().as_ref() {
-                    b"v" => in_v = false,
-                    b"f" => in_f = false,
-                    b"c" => {
-                        in_cell = false;
+            Ok(Event::End(e)) => match e.local_name().as_ref() {
+                b"v" => in_v = false,
+                b"f" => in_f = false,
+                b"c" => {
+                    in_cell = false;
 
-                        let cref = CellRef::parse(&cell_ref_str);
-                        if let Some(cr) = cref {
-                            let display_value = resolve_display_value(
-                                &cell_value_type,
-                                &cell_value,
-                                shared_strings,
-                            );
+                    let cref = CellRef::parse(&cell_ref_str);
+                    if let Some(cr) = cref {
+                        let display_value =
+                            resolve_display_value(&cell_value_type, &cell_value, shared_strings);
 
-                            if cr.col > max_col { max_col = cr.col; }
-                            if cr.row > max_row { max_row = cr.row; }
+                        if cr.col > max_col {
+                            max_col = cr.col;
+                        }
+                        if cr.row > max_row {
+                            max_row = cr.row;
+                        }
 
-                            cells.insert((cr.row, cr.col), Cell {
+                        cells.insert(
+                            (cr.row, cr.col),
+                            Cell {
                                 ref_str: cell_ref_str.clone(),
                                 col: cr.col,
                                 row: cr.row,
@@ -214,12 +227,12 @@ pub fn parse_sheet(package: &OxmlPackage, part_path: &str, shared_strings: &[Str
                                 formula: cell_formula.clone(),
                                 display_value,
                                 style_index: cell_style_index,
-                            });
-                        }
+                            },
+                        );
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             Ok(Event::Empty(e)) => {
                 // Handle <c r="A1"/> cells without v or f children
                 if e.local_name().as_ref() == b"c" {
@@ -232,9 +245,9 @@ pub fn parse_sheet(package: &OxmlPackage, part_path: &str, shared_strings: &[Str
                         if key == b"r" {
                             cell_ref_str = String::from_utf8_lossy(attr.value.as_ref()).to_string();
                         } else if key == b"t" {
-                            cell_value_type = CellValueType::from_attr(
-                                Some(&String::from_utf8_lossy(attr.value.as_ref()))
-                            );
+                            cell_value_type = CellValueType::from_attr(Some(
+                                &String::from_utf8_lossy(attr.value.as_ref()),
+                            ));
                         } else if key == b"s" {
                             let s_val = String::from_utf8_lossy(attr.value.as_ref());
                             cell_style_index = s_val.parse::<usize>().ok();
@@ -243,19 +256,26 @@ pub fn parse_sheet(package: &OxmlPackage, part_path: &str, shared_strings: &[Str
 
                     let cref = CellRef::parse(&cell_ref_str);
                     if let Some(cr) = cref {
-                        if cr.col > max_col { max_col = cr.col; }
-                        if cr.row > max_row { max_row = cr.row; }
+                        if cr.col > max_col {
+                            max_col = cr.col;
+                        }
+                        if cr.row > max_row {
+                            max_row = cr.row;
+                        }
 
-                        cells.insert((cr.row, cr.col), Cell {
-                            ref_str: cell_ref_str.clone(),
-                            col: cr.col,
-                            row: cr.row,
-                            value_type: cell_value_type.clone(),
-                            raw_value: None,
-                            formula: None,
-                            display_value: String::new(),
-                            style_index: cell_style_index,
-                        });
+                        cells.insert(
+                            (cr.row, cr.col),
+                            Cell {
+                                ref_str: cell_ref_str.clone(),
+                                col: cr.col,
+                                row: cr.row,
+                                value_type: cell_value_type.clone(),
+                                raw_value: None,
+                                formula: None,
+                                display_value: String::new(),
+                                style_index: cell_style_index,
+                            },
+                        );
                     }
                 }
                 // Handle <v/> or <f/> empty elements
@@ -312,9 +332,7 @@ fn resolve_display_value(
                 "".to_string()
             }
         }
-        CellValueType::Error => {
-            raw_value.clone().unwrap_or_default()
-        }
+        CellValueType::Error => raw_value.clone().unwrap_or_default(),
         CellValueType::InlineString | CellValueType::Number => {
             raw_value.clone().unwrap_or_default()
         }

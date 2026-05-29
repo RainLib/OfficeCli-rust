@@ -10,7 +10,9 @@ pub enum ValidateError {
 /// Validate an OOXML document against OpenXML schema.
 /// NOTE: Full schema validation requires the OpenXML schema files.
 /// This implementation provides basic structural validation.
-pub fn validate_package(parts: &std::collections::HashMap<String, Vec<u8>>) -> Vec<ValidationError> {
+pub fn validate_package(
+    parts: &std::collections::HashMap<String, Vec<u8>>,
+) -> Vec<ValidationError> {
     let mut errors = Vec::new();
 
     // Check required parts exist

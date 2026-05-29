@@ -3,7 +3,10 @@ use handler_common::InsertPosition;
 use oxml::OxmlPackage;
 
 /// Remove an element from the PPTX presentation.
-pub fn remove_element(package: &mut OxmlPackage, path: &str) -> Result<Option<String>, HandlerError> {
+pub fn remove_element(
+    package: &mut OxmlPackage,
+    path: &str,
+) -> Result<Option<String>, HandlerError> {
     if path.starts_with("/slide[") && !path.contains("/shape") {
         // Remove entire slide
         let slide_num = parse_slide_num(path)?;
@@ -14,9 +17,15 @@ pub fn remove_element(package: &mut OxmlPackage, path: &str) -> Result<Option<St
         let slide_num = parse_slide_num_from_full_path(path)?;
         let shape_idx = parse_shape_idx(path)?;
         remove_shape(package, slide_num, shape_idx)?;
-        Ok(Some(format!("removed shape {} from slide {}", shape_idx, slide_num)))
+        Ok(Some(format!(
+            "removed shape {} from slide {}",
+            shape_idx, slide_num
+        )))
     } else {
-        Err(HandlerError::InvalidPath(format!("PPTX remove path must be /slide[N] or /slide[N]/shape[M]: {}", path)))
+        Err(HandlerError::InvalidPath(format!(
+            "PPTX remove path must be /slide[N] or /slide[N]/shape[M]: {}",
+            path
+        )))
     }
 }
 
@@ -33,12 +42,8 @@ pub fn move_slide(
 
     // Determine target position
     let target_num = match position {
-        InsertPosition::AfterElement(anchor) => {
-            parse_slide_num(&anchor)? + 1
-        }
-        InsertPosition::BeforeElement(anchor) => {
-            parse_slide_num(&anchor)?
-        }
+        InsertPosition::AfterElement(anchor) => parse_slide_num(&anchor)? + 1,
+        InsertPosition::BeforeElement(anchor) => parse_slide_num(&anchor)?,
         InsertPosition::AtIndex(idx) => idx,
         InsertPosition::Append => {
             let pres = crate::navigation::build_presentation(package)?;
@@ -47,12 +52,14 @@ pub fn move_slide(
     };
 
     // Reorder the slide ID list in presentation.xml
-    let pres_xml = package.read_part_xml("ppt/presentation.xml")
+    let pres_xml = package
+        .read_part_xml("ppt/presentation.xml")
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     let modified = reorder_sld_id_list(&pres_xml, source_num, target_num)?;
 
-    package.write_part_xml("ppt/presentation.xml", &modified)
+    package
+        .write_part_xml("ppt/presentation.xml", &modified)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok(format!("/slide[{}]", target_num))
@@ -69,12 +76,15 @@ pub fn copy_slide(
     let source_num = parse_slide_num(source)?;
 
     let pres = crate::navigation::build_presentation(package)?;
-    let source_slide = pres.slides.iter()
+    let source_slide = pres
+        .slides
+        .iter()
         .find(|s| s.index == source_num)
         .ok_or_else(|| HandlerError::PathNotFound(format!("slide {}", source_num)))?;
 
     // Read the source slide XML
-    let source_xml = package.read_part_xml(&source_slide.part_path)
+    let source_xml = package
+        .read_part_xml(&source_slide.part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Create a new slide at the end
@@ -82,7 +92,8 @@ pub fn copy_slide(
     let new_slide_path = format!("ppt/slides/slide{}.xml", new_slide_num);
 
     // Write the copied slide content
-    package.write_part_xml(&new_slide_path, &source_xml)
+    package
+        .write_part_xml(&new_slide_path, &source_xml)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Update presentation.xml to add the new slide reference
@@ -115,7 +126,10 @@ fn reorder_sld_id_list(xml: &str, source: usize, target: usize) -> Result<String
     }
 
     if entries.len() < source {
-        return Err(HandlerError::InvalidPath(format!("slide {} not found in sldIdLst", source)));
+        return Err(HandlerError::InvalidPath(format!(
+            "slide {} not found in sldIdLst",
+            source
+        )));
     }
 
     // Remove the source entry (1-based → 0-based)
@@ -133,20 +147,24 @@ fn reorder_sld_id_list(xml: &str, source: usize, target: usize) -> Result<String
 
     // Rebuild the XML by replacing the sldIdLst content
     // Find </p:sldIdLst> and reconstruct entries before it
-    let sld_id_lst_end = xml.find("</p:sldIdLst>")
+    let sld_id_lst_end = xml
+        .find("</p:sldIdLst>")
         .ok_or_else(|| HandlerError::OperationFailed("no </p:sldIdLst> found".to_string()))?;
 
     // Find <p:sldIdLst> start
-    let sld_id_lst_start = xml.find("<p:sldIdLst")
+    let sld_id_lst_start = xml
+        .find("<p:sldIdLst")
         .ok_or_else(|| HandlerError::OperationFailed("no <p:sldIdLst> found".to_string()))?;
 
     // Find the end of the opening tag of <p:sldIdLst>
-    let sld_id_lst_tag_end = xml[sld_id_lst_start..].find('>')
+    let sld_id_lst_tag_end = xml[sld_id_lst_start..]
+        .find('>')
         .map(|pos| sld_id_lst_start + pos + 1)
         .ok_or_else(|| HandlerError::OperationFailed("malformed <p:sldIdLst>".to_string()))?;
 
     // Build the new entries section
-    let new_entries = entries.iter()
+    let new_entries = entries
+        .iter()
         .map(|(_, entry)| entry.clone())
         .collect::<Vec<String>>()
         .join("\n    ");
@@ -165,23 +183,30 @@ fn remove_slide(package: &mut OxmlPackage, slide_num: usize) -> Result<(), Handl
 
     // Remove the slide part
     if package.has_part(&slide_path) {
-        package.write_part(&slide_path, Vec::<u8>::new())
+        package
+            .write_part(&slide_path, Vec::<u8>::new())
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
     }
 
     Ok(())
 }
 
-fn remove_shape(package: &mut OxmlPackage, slide_num: usize, shape_idx: usize) -> Result<(), HandlerError> {
+fn remove_shape(
+    package: &mut OxmlPackage,
+    slide_num: usize,
+    shape_idx: usize,
+) -> Result<(), HandlerError> {
     let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
 
-    let slide_xml = package.read_part_xml(&slide_path)
+    let slide_xml = package
+        .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Find and remove the Nth <p:sp> element
     let modified = remove_nth_sp(&slide_xml, shape_idx);
 
-    package.write_part_xml(&slide_path, &modified)
+    package
+        .write_part_xml(&slide_path, &modified)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok(())

@@ -19,8 +19,8 @@ use handler_common::{InsertPosition, ViewOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::{mpsc, watch as tokio_watch, Mutex};
 use tower_http::cors::CorsLayer;
 
@@ -149,9 +149,7 @@ pub async fn run_server(
     let doc_id = id.unwrap_or_else(|| get_default_id(file_path));
 
     match tokio::net::TcpListener::bind(("127.0.0.1", actual_port)).await {
-        Ok(listener) => {
-            run_host_server(listener, actual_port, &doc_id, abs_path).await
-        }
+        Ok(listener) => run_host_server(listener, actual_port, &doc_id, abs_path).await,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             register_client(actual_port, &doc_id, abs_path).await
         }
@@ -175,7 +173,8 @@ async fn register_client(port: u16, id: &str, file_path: &str) -> Result<(), any
     let body = serde_json::json!({
         "id": id,
         "file_path": file_path,
-    }).to_string();
+    })
+    .to_string();
 
     let request = format!(
         "POST /register HTTP/1.1\r\n\
@@ -183,7 +182,9 @@ async fn register_client(port: u16, id: &str, file_path: &str) -> Result<(), any
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
          Connection: keep-alive\r\n\r\n{}",
-        port, body.len(), body
+        port,
+        body.len(),
+        body
     );
 
     stream.write_all(request.as_bytes()).await?;
@@ -233,7 +234,9 @@ async fn run_host_server(
         registry: registry.clone(),
     });
 
-    register_document(&state, initial_id, initial_file).await.map_err(|e| anyhow::anyhow!(e))?;
+    register_document(&state, initial_id, initial_file)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let app = Router::new()
         .route("/", get(handle_landing))
@@ -252,7 +255,10 @@ async fn run_host_server(
         .with_state(state);
 
     println!("Watch server started at http://127.0.0.1:{}/", port);
-    println!("Primary document '{}' registered at: http://127.0.0.1:{}/{}/", initial_id, port, initial_id);
+    println!(
+        "Primary document '{}' registered at: http://127.0.0.1:{}/{}/",
+        initial_id, port, initial_id
+    );
     println!("Press Ctrl+C to stop the watch server");
 
     axum::serve(listener, app).await?;
@@ -276,7 +282,8 @@ async fn register_document(
         Err(e) => return Err(format!("Failed to open document: {}", e)),
     };
 
-    let (op_tx, op_rx) = mpsc::channel::<(HandlerOp, tokio::sync::oneshot::Sender<HandlerResult>)>(32);
+    let (op_tx, op_rx) =
+        mpsc::channel::<(HandlerOp, tokio::sync::oneshot::Sender<HandlerResult>)>(32);
     let (update_tx, _) = tokio_watch::channel("init".to_string());
     let (watcher_abort_tx, mut watcher_abort_rx) = mpsc::channel::<()>(1);
 
@@ -518,7 +525,11 @@ async fn handle_register(
     let file_path = req.file_path.trim().to_string();
 
     if id.is_empty() || id.contains('/') || id.contains('\\') || id == "register" || id == "ping" {
-        return (axum::http::StatusCode::BAD_REQUEST, Json(ApiResponse::err("Invalid document ID"))).into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("Invalid document ID")),
+        )
+            .into_response();
     }
 
     match register_document(&state, &id, &file_path).await {
@@ -541,11 +552,15 @@ async fn handle_register(
                 }
             };
 
-            Sse::new(response_stream).keep_alive(KeepAlive::default()).into_response()
+            Sse::new(response_stream)
+                .keep_alive(KeepAlive::default())
+                .into_response()
         }
-        Err(e) => {
-            (axum::http::StatusCode::BAD_REQUEST, Json(ApiResponse::err(e))).into_response()
-        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err(e)),
+        )
+            .into_response(),
     }
 }
 
@@ -658,14 +673,18 @@ async fn handle_redirect_slash(
 
 // ─── Shared document route helpers ─────────────────────────────────────
 
-async fn get_doc(state: &Arc<AppState>, id: &str) -> Result<Arc<ActiveDocument>, impl IntoResponse> {
+async fn get_doc(
+    state: &Arc<AppState>,
+    id: &str,
+) -> Result<Arc<ActiveDocument>, impl IntoResponse> {
     let reg = state.registry.lock().await;
     match reg.get(id).cloned() {
         Some(doc) => Ok(doc),
         None => Err((
             axum::http::StatusCode::NOT_FOUND,
             Json(ApiResponse::err(format!("Document '{}' not found", id))),
-        ).into_response()),
+        )
+            .into_response()),
     }
 }
 
@@ -680,7 +699,13 @@ async fn handle_index(
         Err(r) => return r.into_response(),
     };
 
-    let result = send_op_for_doc(&doc, HandlerOp::ViewHtml { opts: ViewOptions::default() }).await;
+    let result = send_op_for_doc(
+        &doc,
+        HandlerOp::ViewHtml {
+            opts: ViewOptions::default(),
+        },
+    )
+    .await;
 
     if let Some(err) = result.data.get("error").and_then(|e| e.as_str()) {
         let text_res = send_op_for_doc(
@@ -721,7 +746,11 @@ body {{ font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d
         return Html(html).into_response();
     }
 
-    let html = result.data.as_str().unwrap_or("Error rendering HTML preview").to_string();
+    let html = result
+        .data
+        .as_str()
+        .unwrap_or("Error rendering HTML preview")
+        .to_string();
     Html(inject_live_reload(&html)).into_response()
 }
 
@@ -764,7 +793,9 @@ async fn handle_sse(
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 // ─── GET /:id/text — Plain text view ───────────────────────────────────
@@ -812,7 +843,8 @@ async fn handle_mark(
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        )).into_response()
+        ))
+        .into_response()
     } else {
         let _ = doc.update_tx.send(format!("mark:{}", req.path));
         Json(ApiResponse::ok(result.data)).into_response()
@@ -854,7 +886,10 @@ async fn handle_view(
         "outline" => HandlerOp::ViewOutline,
         "stats" => HandlerOp::ViewStats,
         "html" => HandlerOp::ViewHtml { opts },
-        _ => return Json(ApiResponse::err(format!("unsupported view mode: {}", mode))).into_response(),
+        _ => {
+            return Json(ApiResponse::err(format!("unsupported view mode: {}", mode)))
+                .into_response()
+        }
     };
 
     let result = send_op_for_doc(&doc, op).await;
@@ -862,7 +897,8 @@ async fn handle_view(
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        )).into_response()
+        ))
+        .into_response()
     } else {
         Json(ApiResponse::ok(result.data)).into_response()
     }
@@ -893,7 +929,8 @@ async fn handle_get(
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        )).into_response()
+        ))
+        .into_response()
     } else {
         Json(ApiResponse::ok(result.data)).into_response()
     }
@@ -922,7 +959,8 @@ async fn handle_set(
     if result.data.get("error").is_some() {
         Json(ApiResponse::err(
             result.data["error"].as_str().unwrap_or("unknown error"),
-        )).into_response()
+        ))
+        .into_response()
     } else {
         let _ = doc.update_tx.send("set".to_string());
         Json(ApiResponse::ok(result.data)).into_response()
@@ -946,7 +984,11 @@ async fn handle_page_html(
     let result = send_op_for_doc(&doc, HandlerOp::ViewHtml { opts }).await;
 
     if let Some(err) = result.data.get("error").and_then(|e| e.as_str()) {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+        )
+            .into_response()
     } else {
         let html = result.data.as_str().unwrap_or("").to_string();
         Html(html).into_response()

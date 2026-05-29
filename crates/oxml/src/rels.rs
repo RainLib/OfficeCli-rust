@@ -54,9 +54,15 @@ impl Relationships {
                         for attr in e.attributes().filter_map(|a| a.ok()) {
                             match attr.key.local_name().as_ref() {
                                 b"Id" => id = String::from_utf8_lossy(&attr.value).to_string(),
-                                b"Type" => type_uri = String::from_utf8_lossy(&attr.value).to_string(),
-                                b"Target" => target = String::from_utf8_lossy(&attr.value).to_string(),
-                                b"TargetMode" => target_mode = String::from_utf8_lossy(&attr.value).to_string(),
+                                b"Type" => {
+                                    type_uri = String::from_utf8_lossy(&attr.value).to_string()
+                                }
+                                b"Target" => {
+                                    target = String::from_utf8_lossy(&attr.value).to_string()
+                                }
+                                b"TargetMode" => {
+                                    target_mode = String::from_utf8_lossy(&attr.value).to_string()
+                                }
                                 _ => {}
                             }
                         }

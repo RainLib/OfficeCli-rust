@@ -1,10 +1,10 @@
-use crate::reader::PdfReader;
-use crate::navigation::PdfNavigator;
-use crate::view::PdfViewer;
-use crate::text_extract::PdfTextExtractor;
 use crate::content_stream::PdfColor;
-use handler_common::*;
+use crate::navigation::PdfNavigator;
+use crate::reader::PdfReader;
+use crate::text_extract::PdfTextExtractor;
+use crate::view::PdfViewer;
 use handler_common::output_format::BinaryInfo;
+use handler_common::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -18,12 +18,17 @@ impl PdfHandler {
     /// Open a PDF document.
     pub fn open(path: &str, editable: bool) -> Result<Self, HandlerError> {
         let reader = PdfReader::open(path)?;
-        Ok(Self { reader: RefCell::new(reader), editable })
+        Ok(Self {
+            reader: RefCell::new(reader),
+            editable,
+        })
     }
 }
 
 impl DocumentHandler for PdfHandler {
-    fn format_name(&self) -> &str { "pdf" }
+    fn format_name(&self) -> &str {
+        "pdf"
+    }
 
     fn view_as_text(&self, opts: ViewOptions) -> Result<String, HandlerError> {
         let reader = self.reader.borrow();
@@ -45,7 +50,11 @@ impl DocumentHandler for PdfHandler {
         PdfViewer::new(PdfReader::open(reader.file_path())?).view_as_stats()
     }
 
-    fn view_as_issues(&self, issue_type: Option<&str>, limit: Option<usize>) -> Result<Vec<DocumentIssue>, HandlerError> {
+    fn view_as_issues(
+        &self,
+        issue_type: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<DocumentIssue>, HandlerError> {
         let reader = self.reader.borrow();
         PdfViewer::new(PdfReader::open(reader.file_path())?).view_as_issues(issue_type, limit)
     }
@@ -115,13 +124,18 @@ impl DocumentHandler for PdfHandler {
                                     .with_format("bbox_x", serde_json::json!(block.bbox.x))
                                     .with_format("bbox_y", serde_json::json!(block.bbox.y))
                                     .with_format("bbox_width", serde_json::json!(block.bbox.width))
-                                    .with_format("bbox_height", serde_json::json!(block.bbox.height));
+                                    .with_format(
+                                        "bbox_height",
+                                        serde_json::json!(block.bbox.height),
+                                    );
 
                                 if let Some(ref font) = block.style.font_name {
-                                    block_node = block_node.with_format("font", serde_json::json!(font));
+                                    block_node =
+                                        block_node.with_format("font", serde_json::json!(font));
                                 }
                                 if let Some(size) = block.style.font_size {
-                                    block_node = block_node.with_format("font_size", serde_json::json!(size));
+                                    block_node = block_node
+                                        .with_format("font_size", serde_json::json!(size));
                                 }
                                 page_children.push(block_node);
                             }
@@ -138,14 +152,17 @@ impl DocumentHandler for PdfHandler {
         // Check if path targets a specific text block: /page[N]/text[M]
         let text_path = parse_text_block_path(path);
         if let Some((page_num, text_index)) = text_path {
-            let parsed = reader.parse_page_text_blocks(page_num)
+            let parsed = reader
+                .parse_page_text_blocks(page_num)
                 .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
             let block_idx = text_index - 1;
             if block_idx >= parsed.text_blocks.len() {
                 return Err(HandlerError::PathNotFound(format!(
                     "text[{}] not found (page {} has {} text blocks)",
-                    text_index, page_num, parsed.text_blocks.len()
+                    text_index,
+                    page_num,
+                    parsed.text_blocks.len()
                 )));
             }
 
@@ -174,10 +191,11 @@ impl DocumentHandler for PdfHandler {
         }
 
         let nav = PdfNavigator::new(reader.page_count());
-        nav.validate_path(path).map_err(|e| HandlerError::InvalidPath(e))?;
-
-        let page_num = PdfNavigator::page_number_from_path(path)
+        nav.validate_path(path)
             .map_err(|e| HandlerError::InvalidPath(e))?;
+
+        let page_num =
+            PdfNavigator::page_number_from_path(path).map_err(|e| HandlerError::InvalidPath(e))?;
 
         let node = DocumentNode::new(path, "page")
             .with_text(reader.extract_page_text(page_num).unwrap_or_default());
@@ -185,7 +203,8 @@ impl DocumentHandler for PdfHandler {
     }
 
     fn query(&self, selector: &str) -> Result<Vec<DocumentNode>, HandlerError> {
-        let parsed = Selector::parse(selector).map_err(|e| HandlerError::InvalidArgument(e.to_string()))?;
+        let parsed =
+            Selector::parse(selector).map_err(|e| HandlerError::InvalidArgument(e.to_string()))?;
         let reader = self.reader.borrow();
         let mut results = Vec::new();
 
@@ -217,10 +236,16 @@ impl DocumentHandler for PdfHandler {
                                 node = node.with_format("font_size", serde_json::json!(size));
                             }
                             if let Some(ref color) = block.style.fill_color {
-                                node = node.with_format("color", serde_json::json!(format_pdf_color(color)));
+                                node = node.with_format(
+                                    "color",
+                                    serde_json::json!(format_pdf_color(color)),
+                                );
                             }
                             if let Some(ref bg) = block.style.bg_color {
-                                node = node.with_format("bgColor", serde_json::json!(format_pdf_color(bg)));
+                                node = node.with_format(
+                                    "bgColor",
+                                    serde_json::json!(format_pdf_color(bg)),
+                                );
                             }
                             results.push(node);
                         }
@@ -231,34 +256,49 @@ impl DocumentHandler for PdfHandler {
         Ok(results)
     }
 
-    fn set(&self, path: &str, properties: &HashMap<String, String>) -> Result<Vec<String>, HandlerError> {
+    fn set(
+        &self,
+        path: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<Vec<String>, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::SaveError("PDF opened in read-only mode".to_string()));
+            return Err(HandlerError::SaveError(
+                "PDF opened in read-only mode".to_string(),
+            ));
         }
 
         let mut unsupported = Vec::new();
 
-
         // Check if global range paths highlit is requested
         if let Some(range_paths_str) = properties.get("range_paths") {
-            let segments = handler_common::parse_range_paths(range_paths_str)
-                .map_err(|e| HandlerError::InvalidArgument(format!("invalid range paths: {}", e)))?;
-            
+            let segments = handler_common::parse_range_paths(range_paths_str).map_err(|e| {
+                HandlerError::InvalidArgument(format!("invalid range paths: {}", e))
+            })?;
+
             let mut reader = self.reader.borrow_mut();
 
             if properties.contains_key("color") {
                 if let Some(color_str) = properties.get("color") {
                     if let Some(color) = parse_color(color_str) {
-                        crate::modifier::apply_range_text_colors(reader.document_mut(), &color, &segments)?;
+                        crate::modifier::apply_range_text_colors(
+                            reader.document_mut(),
+                            &color,
+                            &segments,
+                        )?;
                     }
                 }
             }
 
             if properties.contains_key("bgColor") || !properties.contains_key("color") {
-                let bg_color = properties.get("bgColor")
+                let bg_color = properties
+                    .get("bgColor")
                     .and_then(|s| parse_color(s))
                     .unwrap_or(PdfColor::Rgb(1.0, 1.0, 0.0)); // default yellow
-                crate::modifier::apply_range_highlights(reader.document_mut(), &bg_color, &segments)?;
+                crate::modifier::apply_range_highlights(
+                    reader.document_mut(),
+                    &bg_color,
+                    &segments,
+                )?;
             }
 
             for (key, _) in properties {
@@ -276,8 +316,12 @@ impl DocumentHandler for PdfHandler {
             let font_val = properties.get("font").map(|s| s.as_str());
             let size_val = properties.get("size").and_then(|s| s.parse::<f32>().ok());
             let color_val = properties.get("color").and_then(|s| parse_color(s));
-            let char_spacing_val = properties.get("charSpacing").and_then(|s| s.parse::<f32>().ok());
-            let word_spacing_val = properties.get("wordSpacing").and_then(|s| s.parse::<f32>().ok());
+            let char_spacing_val = properties
+                .get("charSpacing")
+                .and_then(|s| s.parse::<f32>().ok());
+            let word_spacing_val = properties
+                .get("wordSpacing")
+                .and_then(|s| s.parse::<f32>().ok());
             let bg_color_val = properties.get("bgColor").and_then(|s| parse_color(s));
             let font_file_val = properties.get("fontFile").map(|s| s.as_str());
 
@@ -290,8 +334,7 @@ impl DocumentHandler for PdfHandler {
             // Skipping this check based on ASCII/CJK heuristics is wrong: PowerPoint
             // exports use subsetted fonts that may omit even ASCII glyphs like '*'.
             if let Some(text_str) = text_val {
-                let chars_needed: std::collections::HashSet<char> =
-                    text_str.chars().collect();
+                let chars_needed: std::collections::HashSet<char> = text_str.chars().collect();
                 let _ = crate::font_embedder::ensure_cjk_font_for_chars(
                     reader.document_mut(),
                     page_num,
@@ -334,8 +377,15 @@ impl DocumentHandler for PdfHandler {
             for (key, _) in properties {
                 if !matches!(
                     key.as_str(),
-                    "text" | "content" | "font" | "size" | "color"
-                        | "charSpacing" | "wordSpacing" | "bgColor" | "fontFile"
+                    "text"
+                        | "content"
+                        | "font"
+                        | "size"
+                        | "color"
+                        | "charSpacing"
+                        | "wordSpacing"
+                        | "bgColor"
+                        | "fontFile"
                 ) {
                     unsupported.push(key.clone());
                 }
@@ -349,8 +399,12 @@ impl DocumentHandler for PdfHandler {
             None
         } else {
             let nav = PdfNavigator::new(self.reader.borrow().page_count());
-            nav.validate_path(path).map_err(|e| HandlerError::InvalidPath(e))?;
-            Some(PdfNavigator::page_number_from_path(path).map_err(|e| HandlerError::InvalidPath(e))?)
+            nav.validate_path(path)
+                .map_err(|e| HandlerError::InvalidPath(e))?;
+            Some(
+                PdfNavigator::page_number_from_path(path)
+                    .map_err(|e| HandlerError::InvalidPath(e))?,
+            )
         };
 
         for (key, value) in properties {
@@ -358,15 +412,16 @@ impl DocumentHandler for PdfHandler {
                 "text" | "content" => {
                     let mut reader = self.reader.borrow_mut();
                     if let Some(page) = page_num {
-                        crate::modifier::replace_text_on_page(
-                            reader.document_mut(), page, value,
-                        )?;
+                        crate::modifier::replace_text_on_page(reader.document_mut(), page, value)?;
                     } else {
                         let page_count = reader.page_count();
                         for page in 1..=page_count {
                             crate::modifier::replace_text_on_page(
-                                reader.document_mut(), page, value,
-                            ).ok();
+                                reader.document_mut(),
+                                page,
+                                value,
+                            )
+                            .ok();
                         }
                     }
                 }
@@ -377,20 +432,32 @@ impl DocumentHandler for PdfHandler {
         Ok(unsupported)
     }
 
-    fn add(&self, _parent: &str, element_type: &str, _position: InsertPosition, _properties: &HashMap<String, String>) -> Result<String, HandlerError> {
-        Err(HandlerError::UnsupportedType(format!("PDF does not support adding {}", element_type)))
+    fn add(
+        &self,
+        _parent: &str,
+        element_type: &str,
+        _position: InsertPosition,
+        _properties: &HashMap<String, String>,
+    ) -> Result<String, HandlerError> {
+        Err(HandlerError::UnsupportedType(format!(
+            "PDF does not support adding {}",
+            element_type
+        )))
     }
 
     fn remove(&self, path: &str) -> Result<Option<String>, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::SaveError("PDF opened in read-only mode".to_string()));
+            return Err(HandlerError::SaveError(
+                "PDF opened in read-only mode".to_string(),
+            ));
         }
 
         let nav = PdfNavigator::new(self.reader.borrow().page_count());
-        nav.validate_path(path).map_err(|e| HandlerError::InvalidPath(e))?;
-
-        let page_num = PdfNavigator::page_number_from_path(path)
+        nav.validate_path(path)
             .map_err(|e| HandlerError::InvalidPath(e))?;
+
+        let page_num =
+            PdfNavigator::page_number_from_path(path).map_err(|e| HandlerError::InvalidPath(e))?;
 
         let mut reader = self.reader.borrow_mut();
         crate::modifier::delete_page(reader.document_mut(), page_num)?;
@@ -399,58 +466,102 @@ impl DocumentHandler for PdfHandler {
         Ok(Some(format!("removed page {}", page_num)))
     }
 
-    fn move_element(&self, _source: &str, _target_parent: Option<&str>, _position: InsertPosition) -> Result<String, HandlerError> {
-        Err(HandlerError::UnsupportedMode("PDF does not support moving elements".to_string()))
+    fn move_element(
+        &self,
+        _source: &str,
+        _target_parent: Option<&str>,
+        _position: InsertPosition,
+    ) -> Result<String, HandlerError> {
+        Err(HandlerError::UnsupportedMode(
+            "PDF does not support moving elements".to_string(),
+        ))
     }
 
-    fn copy_from(&self, _source: &str, _target_parent: &str, _position: InsertPosition) -> Result<String, HandlerError> {
-        Err(HandlerError::UnsupportedMode("PDF does not support copying elements".to_string()))
+    fn copy_from(
+        &self,
+        _source: &str,
+        _target_parent: &str,
+        _position: InsertPosition,
+    ) -> Result<String, HandlerError> {
+        Err(HandlerError::UnsupportedMode(
+            "PDF does not support copying elements".to_string(),
+        ))
     }
 
     fn raw(&self, part_path: &str, _opts: RawOptions) -> Result<String, HandlerError> {
         let reader = self.reader.borrow();
-        let page_num = part_path.strip_prefix("/page[")
+        let page_num = part_path
+            .strip_prefix("/page[")
             .and_then(|s| s.strip_suffix("]"))
             .and_then(|s| s.parse::<usize>().ok())
             .ok_or_else(|| HandlerError::InvalidPath(part_path.to_string()))?;
 
         let pages = reader.document().get_pages();
-        let page_id = pages.get(&(page_num as u32))
+        let page_id = pages
+            .get(&(page_num as u32))
             .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
-        reader.document().get_page_content(*page_id)
+        reader
+            .document()
+            .get_page_content(*page_id)
             .map(|content| String::from_utf8_lossy(&content).to_string())
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to get page content: {}", e)))
+            .map_err(|e| {
+                HandlerError::OperationFailed(format!("failed to get page content: {}", e))
+            })
     }
 
-    fn raw_set(&self, part_path: &str, _xpath: &str, action: &str, content: Option<&str>) -> Result<(), HandlerError> {
+    fn raw_set(
+        &self,
+        part_path: &str,
+        _xpath: &str,
+        action: &str,
+        content: Option<&str>,
+    ) -> Result<(), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::SaveError("PDF opened in read-only mode".to_string()));
+            return Err(HandlerError::SaveError(
+                "PDF opened in read-only mode".to_string(),
+            ));
         }
 
-        let page_num = part_path.strip_prefix("/page[")
+        let page_num = part_path
+            .strip_prefix("/page[")
             .and_then(|s| s.strip_suffix("]"))
             .and_then(|s| s.parse::<usize>().ok())
             .ok_or_else(|| HandlerError::InvalidPath(part_path.to_string()))?;
 
         let mut reader = self.reader.borrow_mut();
         let pages = reader.document().get_pages();
-        let page_id = pages.get(&(page_num as u32))
+        let page_id = pages
+            .get(&(page_num as u32))
             .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
         match action {
             "replace_content" => {
-                let new_content = content.ok_or_else(|| HandlerError::InvalidArgument("content required for replace_content".to_string()))?;
+                let new_content = content.ok_or_else(|| {
+                    HandlerError::InvalidArgument(
+                        "content required for replace_content".to_string(),
+                    )
+                })?;
                 let new_bytes = new_content.as_bytes();
                 crate::modifier::replace_page_content(reader.document_mut(), *page_id, new_bytes)?;
                 Ok(())
             }
-            _ => Err(HandlerError::UnsupportedMode(format!("PDF raw_set action '{}' not supported", action))),
+            _ => Err(HandlerError::UnsupportedMode(format!(
+                "PDF raw_set action '{}' not supported",
+                action
+            ))),
         }
     }
 
-    fn add_part(&self, _parent: &str, _part_type: &str, _properties: Option<&HashMap<String, String>>) -> Result<(String, String), HandlerError> {
-        Err(HandlerError::UnsupportedMode("PDF does not support adding parts".to_string()))
+    fn add_part(
+        &self,
+        _parent: &str,
+        _part_type: &str,
+        _properties: Option<&HashMap<String, String>>,
+    ) -> Result<(String, String), HandlerError> {
+        Err(HandlerError::UnsupportedMode(
+            "PDF does not support adding parts".to_string(),
+        ))
     }
 
     fn validate(&self) -> Result<Vec<ValidationError>, HandlerError> {
@@ -459,11 +570,16 @@ impl DocumentHandler for PdfHandler {
         viewer.validate()
     }
 
-    fn try_extract_binary(&self, path: &str, dest: &str) -> Result<Option<BinaryInfo>, HandlerError> {
+    fn try_extract_binary(
+        &self,
+        path: &str,
+        dest: &str,
+    ) -> Result<Option<BinaryInfo>, HandlerError> {
         // PDF binary extraction: extract embedded images from a page
         let page_num = if path.starts_with("/page[") {
             let nav = PdfNavigator::new(self.reader.borrow().page_count());
-            nav.validate_path(path).map_err(|e| HandlerError::InvalidPath(e))?;
+            nav.validate_path(path)
+                .map_err(|e| HandlerError::InvalidPath(e))?;
             PdfNavigator::page_number_from_path(path).map_err(|e| HandlerError::InvalidPath(e))?
         } else {
             return Err(HandlerError::InvalidPath(path.to_string()));
@@ -471,7 +587,8 @@ impl DocumentHandler for PdfHandler {
 
         let reader = self.reader.borrow();
         let pages = reader.document().get_pages();
-        let page_id = pages.get(&(page_num as u32))
+        let page_id = pages
+            .get(&(page_num as u32))
             .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
         let doc = reader.document();
@@ -519,7 +636,9 @@ impl DocumentHandler for PdfHandler {
 
     fn save(&self) -> Result<(), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::SaveError("PDF opened in read-only mode".to_string()));
+            return Err(HandlerError::SaveError(
+                "PDF opened in read-only mode".to_string(),
+            ));
         }
 
         let file_path = self.reader.borrow().file_path().to_string();
@@ -529,7 +648,9 @@ impl DocumentHandler for PdfHandler {
         // key from incremental updates will point to invalid offsets and
         // corrupt the file trailer for subsequent loads.
         reader.document_mut().trailer.remove(b"Prev");
-        reader.document_mut().save(&file_path)
+        reader
+            .document_mut()
+            .save(&file_path)
             .map_err(|e| HandlerError::SaveError(format!("failed to save PDF: {}", e)))?;
         Ok(())
     }
@@ -545,19 +666,27 @@ impl DocumentHandler for PdfHandler {
 /// Returns None if the path doesn't contain a text[N] segment.
 fn parse_text_block_path(path: &str) -> Option<(usize, usize)> {
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
 
     // Parse page[N]
     let page_part = parts[0];
-    if !page_part.starts_with("page") { return None; }
-    let page_num = page_part.strip_prefix("page[")
+    if !page_part.starts_with("page") {
+        return None;
+    }
+    let page_num = page_part
+        .strip_prefix("page[")
         .and_then(|s| s.strip_suffix("]"))
         .and_then(|s| s.parse::<usize>().ok())?;
 
     // Parse text[M]
     let text_part = parts[1];
-    if !text_part.starts_with("text") { return None; }
-    let text_index = text_part.strip_prefix("text[")
+    if !text_part.starts_with("text") {
+        return None;
+    }
+    let text_index = text_part
+        .strip_prefix("text[")
         .and_then(|s| s.strip_suffix("]"))
         .and_then(|s| s.parse::<usize>().ok())?;
 
@@ -580,11 +709,18 @@ fn parse_color(s: &str) -> Option<PdfColor> {
 
     // rgb(r,g,b) format
     if s.starts_with("rgb(") && s.ends_with(')') {
-        let inner = &s[4..s.len()-1];
-        let parts: Vec<f32> = inner.split(',')
+        let inner = &s[4..s.len() - 1];
+        let parts: Vec<f32> = inner
+            .split(',')
             .filter_map(|p| p.trim().parse::<f32>().ok())
             .collect();
-        if parts.len() == 3 { return Some(PdfColor::Rgb(parts[0]/255.0, parts[1]/255.0, parts[2]/255.0)); }
+        if parts.len() == 3 {
+            return Some(PdfColor::Rgb(
+                parts[0] / 255.0,
+                parts[1] / 255.0,
+                parts[2] / 255.0,
+            ));
+        }
     }
 
     None

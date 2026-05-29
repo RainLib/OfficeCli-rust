@@ -1,16 +1,16 @@
-use handler_common::*;
 use handler_common::output_format::{BinaryInfo, RawOptions};
+use handler_common::*;
 use oxml::OxmlPackage;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::navigation;
-use crate::view;
-use crate::mutations;
 use crate::add;
+use crate::mutations;
+use crate::navigation;
 use crate::query;
 use crate::raw;
 use crate::text_offset;
+use crate::view;
 
 pub struct ExcelHandler {
     package: RefCell<OxmlPackage>,
@@ -29,7 +29,9 @@ impl ExcelHandler {
 }
 
 impl DocumentHandler for ExcelHandler {
-    fn format_name(&self) -> &str { "xlsx" }
+    fn format_name(&self) -> &str {
+        "xlsx"
+    }
 
     fn view_as_text(&self, opts: ViewOptions) -> Result<String, HandlerError> {
         let pkg = self.package.borrow();
@@ -56,14 +58,18 @@ impl DocumentHandler for ExcelHandler {
                     crate::dom_types::CellValueType::Boolean => "bool",
                     crate::dom_types::CellValueType::Error => "err",
                 };
-                let style_tag = cell.style_index.map(|si| format!("[s:{}]", si)).unwrap_or_default();
-                let formula_tag = cell.formula.as_ref().map(|f| format!(" [f:{}]", f)).unwrap_or_default();
-                output.push_str(&format!("  {}{}: {}  ({}){}\n",
-                    cell.ref_str,
-                    style_tag,
-                    cell.display_value,
-                    type_label,
-                    formula_tag,
+                let style_tag = cell
+                    .style_index
+                    .map(|si| format!("[s:{}]", si))
+                    .unwrap_or_default();
+                let formula_tag = cell
+                    .formula
+                    .as_ref()
+                    .map(|f| format!(" [f:{}]", f))
+                    .unwrap_or_default();
+                output.push_str(&format!(
+                    "  {}{}: {}  ({}){}\n",
+                    cell.ref_str, style_tag, cell.display_value, type_label, formula_tag,
                 ));
             }
             output.push('\n');
@@ -92,7 +98,11 @@ impl DocumentHandler for ExcelHandler {
         view::view_as_stats(&pkg)
     }
 
-    fn view_as_issues(&self, issue_type: Option<&str>, limit: Option<usize>) -> Result<Vec<DocumentIssue>, HandlerError> {
+    fn view_as_issues(
+        &self,
+        issue_type: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<DocumentIssue>, HandlerError> {
         let pkg = self.package.borrow();
         crate::view::view_as_issues(&pkg, issue_type, limit)
     }
@@ -127,17 +137,31 @@ impl DocumentHandler for ExcelHandler {
         query::query_cells(&pkg, selector)
     }
 
-    fn set(&self, path: &str, properties: &HashMap<String, String>) -> Result<Vec<String>, HandlerError> {
+    fn set(
+        &self,
+        path: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<Vec<String>, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("package opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         mutations::set_cell_properties(&mut pkg, path, properties)
     }
 
-    fn add(&self, parent: &str, element_type: &str, position: InsertPosition, properties: &HashMap<String, String>) -> Result<String, HandlerError> {
+    fn add(
+        &self,
+        parent: &str,
+        element_type: &str,
+        position: InsertPosition,
+        properties: &HashMap<String, String>,
+    ) -> Result<String, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("package opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         add::add_element(&mut pkg, parent, element_type, position, properties)
@@ -145,23 +169,39 @@ impl DocumentHandler for ExcelHandler {
 
     fn remove(&self, path: &str) -> Result<Option<String>, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("package opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         mutations::remove_element(&mut pkg, path)
     }
 
-    fn move_element(&self, source: &str, target_parent: Option<&str>, _position: InsertPosition) -> Result<String, HandlerError> {
+    fn move_element(
+        &self,
+        source: &str,
+        target_parent: Option<&str>,
+        _position: InsertPosition,
+    ) -> Result<String, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("package opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         mutations::move_cell(&mut pkg, source, target_parent)
     }
 
-    fn copy_from(&self, source: &str, target_parent: &str, _position: InsertPosition) -> Result<String, HandlerError> {
+    fn copy_from(
+        &self,
+        source: &str,
+        target_parent: &str,
+        _position: InsertPosition,
+    ) -> Result<String, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("package opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         mutations::copy_cell(&mut pkg, source, target_parent)
@@ -173,17 +213,32 @@ impl DocumentHandler for ExcelHandler {
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))
     }
 
-    fn raw_set(&self, part_path: &str, xpath: &str, action: &str, xml: Option<&str>) -> Result<(), HandlerError> {
+    fn raw_set(
+        &self,
+        part_path: &str,
+        xpath: &str,
+        action: &str,
+        xml: Option<&str>,
+    ) -> Result<(), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("package opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         raw::raw_set(&mut pkg, part_path, xpath, action, xml)
     }
 
-    fn add_part(&self, parent: &str, part_type: &str, properties: Option<&HashMap<String, String>>) -> Result<(String, String), HandlerError> {
+    fn add_part(
+        &self,
+        parent: &str,
+        part_type: &str,
+        properties: Option<&HashMap<String, String>>,
+    ) -> Result<(String, String), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("package opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         crate::raw::add_part(&mut pkg, parent, part_type, properties)
@@ -194,16 +249,24 @@ impl DocumentHandler for ExcelHandler {
         crate::view::validate(&pkg)
     }
 
-    fn try_extract_binary(&self, path: &str, dest: &str) -> Result<Option<BinaryInfo>, HandlerError> {
+    fn try_extract_binary(
+        &self,
+        path: &str,
+        dest: &str,
+    ) -> Result<Option<BinaryInfo>, HandlerError> {
         let pkg = self.package.borrow();
         let content_types = pkg.content_types();
 
         // Search for media parts (images, charts, etc.)
         let media_path = if path.starts_with("/image") {
             let parts = pkg.list_parts();
-            if let Some(idx_str) = path.strip_prefix("/image[").and_then(|s| s.strip_suffix(']')) {
+            if let Some(idx_str) = path
+                .strip_prefix("/image[")
+                .and_then(|s| s.strip_suffix(']'))
+            {
                 if let Ok(idx) = idx_str.parse::<usize>() {
-                    let image_parts: Vec<&String> = parts.into_iter()
+                    let image_parts: Vec<&String> = parts
+                        .into_iter()
                         .filter(|p| p.starts_with("xl/media/"))
                         .collect();
                     if idx > 0 && idx <= image_parts.len() {
@@ -211,24 +274,32 @@ impl DocumentHandler for ExcelHandler {
                     } else {
                         None
                     }
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else if pkg.has_part(path) {
             Some(path.to_string())
         } else {
             None
         };
 
-        let part_path = media_path
-            .ok_or_else(|| HandlerError::PathNotFound(format!("binary part for path '{}'", path)))?;
+        let part_path = media_path.ok_or_else(|| {
+            HandlerError::PathNotFound(format!("binary part for path '{}'", path))
+        })?;
 
-        let bytes = pkg.read_part_bytes(&part_path)
+        let bytes = pkg
+            .read_part_bytes(&part_path)
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-        std::fs::write(dest, bytes)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to write to '{}': {}", dest, e)))?;
+        std::fs::write(dest, bytes).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to write to '{}': {}", dest, e))
+        })?;
 
-        let content_type = content_types.content_type_for(&part_path)
+        let content_type = content_types
+            .content_type_for(&part_path)
             .cloned()
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
@@ -240,7 +311,9 @@ impl DocumentHandler for ExcelHandler {
 
     fn save(&self) -> Result<(), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::SaveError("package opened in read-only mode".to_string()));
+            return Err(HandlerError::SaveError(
+                "package opened in read-only mode".to_string(),
+            ));
         }
         let mut pkg = self.package.borrow_mut();
         pkg.save()

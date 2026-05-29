@@ -48,14 +48,23 @@ struct JsonRpcError {
 
 impl JsonRpcResponse {
     fn success(id: Option<Value>, result: Value) -> Self {
-        Self { jsonrpc: "2.0".to_string(), id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
     fn error(id: Option<Value>, code: i64, message: String) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
             result: None,
-            error: Some(JsonRpcError { code, message, data: None }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
         }
     }
 }
@@ -73,7 +82,9 @@ fn get_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "view".to_string(),
-            description: "View document content in various modes (text, annotated, outline, stats, html)".to_string(),
+            description:
+                "View document content in various modes (text, annotated, outline, stats, html)"
+                    .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -226,7 +237,8 @@ fn get_tool_definitions() -> Vec<ToolDefinition> {
 
 fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, String> {
     // All document tools require "file" parameter (except info)
-    let file = params.get("file")
+    let file = params
+        .get("file")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing required parameter: file".to_string())?;
 
@@ -237,14 +249,25 @@ fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, St
 
     match name {
         "view" => {
-            let mode = params.get("mode")
+            let mode = params
+                .get("mode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("text");
             let opts = ViewOptions {
-                start_line: params.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize),
-                end_line: params.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize),
-                max_lines: params.get("max_lines").and_then(|v| v.as_u64()).map(|v| v as usize),
-                cols: params.get("cols")
+                start_line: params
+                    .get("start_line")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                end_line: params
+                    .get("end_line")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                max_lines: params
+                    .get("max_lines")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                cols: params
+                    .get("cols")
                     .and_then(|v| v.as_str())
                     .map(|c| c.split(',').map(|s| s.to_string()).collect()),
                 page: None,
@@ -256,36 +279,44 @@ fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, St
                 "outline" => handler.view_as_outline(),
                 "stats" => handler.view_as_stats(),
                 "html" => handler.view_as_html(opts),
-                other => Err(HandlerError::UnsupportedMode(format!("view mode '{}' not supported", other))),
+                other => Err(HandlerError::UnsupportedMode(format!(
+                    "view mode '{}' not supported",
+                    other
+                ))),
             };
 
-            result.map(|t| serde_json::Value::String(t))
+            result
+                .map(|t| serde_json::Value::String(t))
                 .map_err(|e| e.to_string())
         }
         "get" => {
-            let path = params.get("path")
+            let path = params
+                .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: path".to_string())?;
-            let depth = params.get("depth")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1) as usize;
-            handler.get(path, depth)
+            let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+            handler
+                .get(path, depth)
                 .map(|node| serde_json::to_value(node).unwrap_or_default())
                 .map_err(|e| e.to_string())
         }
         "query" => {
-            let selector = params.get("selector")
+            let selector = params
+                .get("selector")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: selector".to_string())?;
-            handler.query(selector)
+            handler
+                .query(selector)
                 .map(|nodes| serde_json::to_value(nodes).unwrap_or_default())
                 .map_err(|e| e.to_string())
         }
         "set" => {
-            let path = params.get("path")
+            let path = params
+                .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: path".to_string())?;
-            let properties: HashMap<String, String> = params.get("properties")
+            let properties: HashMap<String, String> = params
+                .get("properties")
                 .and_then(|v| v.as_object())
                 .map(|obj| {
                     obj.iter()
@@ -294,19 +325,23 @@ fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, St
                 })
                 .unwrap_or_default();
 
-            handler.set(path, &properties)
+            handler
+                .set(path, &properties)
                 .map(|unsupported| serde_json::json!({"result": "OK", "unsupported": unsupported}))
                 .map_err(|e| e.to_string())
         }
         "add" => {
-            let parent = params.get("parent")
+            let parent = params
+                .get("parent")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: parent".to_string())?;
-            let element_type = params.get("type")
+            let element_type = params
+                .get("type")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: type".to_string())?;
             let position = mcp_parse_position(params.get("position").and_then(|v| v.as_str()));
-            let properties: HashMap<String, String> = params.get("properties")
+            let properties: HashMap<String, String> = params
+                .get("properties")
                 .and_then(|v| v.as_object())
                 .map(|obj| {
                     obj.iter()
@@ -315,55 +350,66 @@ fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, St
                 })
                 .unwrap_or_default();
 
-            handler.add(parent, element_type, position, &properties)
+            handler
+                .add(parent, element_type, position, &properties)
                 .map(|new_path| serde_json::json!({"path": new_path}))
                 .map_err(|e| e.to_string())
         }
         "remove" => {
-            let path = params.get("path")
+            let path = params
+                .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: path".to_string())?;
-            handler.remove(path)
+            handler
+                .remove(path)
                 .map(|result| serde_json::json!({"removed": result}))
                 .map_err(|e| e.to_string())
         }
         "move" => {
-            let source = params.get("source")
+            let source = params
+                .get("source")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: source".to_string())?;
             let target = params.get("target").and_then(|v| v.as_str());
             let position = mcp_parse_position(params.get("position").and_then(|v| v.as_str()));
-            handler.move_element(source, target, position)
+            handler
+                .move_element(source, target, position)
                 .map(|new_path| serde_json::json!({"path": new_path}))
                 .map_err(|e| e.to_string())
         }
-        "validate" => {
-            handler.validate()
-                .map(|errors| serde_json::to_value(errors).unwrap_or_default())
-                .map_err(|e| e.to_string())
-        }
-        "extract_text" => {
-            handler.extract_text_with_offsets()
-                .map(|map| serde_json::to_value(map).unwrap_or_default())
-                .map_err(|e| e.to_string())
-        }
-        "save" => {
-            handler.save()
-                .map(|_| serde_json::json!({"result": "saved"}))
-                .map_err(|e| e.to_string())
-        }
+        "validate" => handler
+            .validate()
+            .map(|errors| serde_json::to_value(errors).unwrap_or_default())
+            .map_err(|e| e.to_string()),
+        "extract_text" => handler
+            .extract_text_with_offsets()
+            .map(|map| serde_json::to_value(map).unwrap_or_default())
+            .map_err(|e| e.to_string()),
+        "save" => handler
+            .save()
+            .map(|_| serde_json::json!({"result": "saved"}))
+            .map_err(|e| e.to_string()),
         "raw" => {
-            let part = params.get("part")
+            let part = params
+                .get("part")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required parameter: part".to_string())?;
             let opts = handler_common::RawOptions {
-                start_row: params.get("start_row").and_then(|v| v.as_u64()).map(|v| v as usize),
-                end_row: params.get("end_row").and_then(|v| v.as_u64()).map(|v| v as usize),
-                cols: params.get("cols")
+                start_row: params
+                    .get("start_row")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                end_row: params
+                    .get("end_row")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                cols: params
+                    .get("cols")
                     .and_then(|v| v.as_str())
                     .map(|c| c.split(',').map(|s| s.to_string()).collect()),
             };
-            handler.raw(part, opts)
+            handler
+                .raw(part, opts)
                 .map(|content| serde_json::Value::String(content))
                 .map_err(|e| e.to_string())
         }
@@ -416,11 +462,7 @@ pub fn run_server() -> Result<(), anyhow::Error> {
         let req: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                let resp = JsonRpcResponse::error(
-                    None,
-                    -32700,
-                    format!("Parse error: {}", e),
-                );
+                let resp = JsonRpcResponse::error(None, -32700, format!("Parse error: {}", e));
                 let resp_str = serde_json::to_string(&resp)?;
                 stdout.write_all(resp_str.as_bytes())?;
                 stdout.write_all(b"\n")?;
@@ -457,22 +499,22 @@ fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
 
         "tools/list" => {
             let tools = get_tool_definitions();
-            JsonRpcResponse::success(
-                req.id,
-                serde_json::json!({ "tools": tools }),
-            )
+            JsonRpcResponse::success(req.id, serde_json::json!({ "tools": tools }))
         }
 
         "tools/call" => {
-            let params_obj = req.params
+            let params_obj = req
+                .params
                 .and_then(|p| serde_json::from_value::<HashMap<String, Value>>(p).ok())
                 .unwrap_or_default();
 
-            let tool_name = params_obj.get("name")
+            let tool_name = params_obj
+                .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let call_params = params_obj.get("arguments")
+            let call_params = params_obj
+                .get("arguments")
                 .and_then(|v| serde_json::from_value::<HashMap<String, Value>>(v.clone()).ok())
                 .unwrap_or_default();
 
@@ -512,10 +554,6 @@ fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
             JsonRpcResponse::success(req.id, serde_json::json!({}))
         }
 
-        other => JsonRpcResponse::error(
-            req.id,
-            -32601,
-            format!("Method not found: {}", other),
-        ),
+        other => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", other)),
     }
 }

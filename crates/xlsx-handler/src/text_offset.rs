@@ -2,16 +2,18 @@
 /// Maps each cell's display text to a path for AI agent navigation.
 use crate::dom_types::*;
 use crate::helpers;
-use handler_common::TextOffsetMap;
 use handler_common::HandlerError;
+use handler_common::TextOffsetMap;
 use oxml::OxmlPackage;
 
 /// Build a TextOffsetMap for the workbook.
 /// Each cell gets a span: path = "/SheetName/A1", element_type = "cell".
 /// Cells are ordered sheet-by-sheet, row-by-row, col-by-col.
-pub fn build_text_offset_map_internal(package: &OxmlPackage) -> Result<TextOffsetMap, HandlerError> {
-    let model = helpers::build_workbook_model(package)
-        .map_err(|e| HandlerError::OperationFailed(e))?;
+pub fn build_text_offset_map_internal(
+    package: &OxmlPackage,
+) -> Result<TextOffsetMap, HandlerError> {
+    let model =
+        helpers::build_workbook_model(package).map_err(|e| HandlerError::OperationFailed(e))?;
 
     let mut map = TextOffsetMap::empty("xlsx");
 

@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, InsertPosition, OutputFormat};
 use clap::Args;
+use handler_common::{HandlerError, InsertPosition, OutputFormat};
 use std::collections::HashMap;
 
 /// Execute multiple commands from a batch file
@@ -27,24 +27,21 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
     }
 
     // Auto-save after batch operations if any mutation was performed
-    let has_mutations = results.iter().any(|r| {
-        matches!(r.op.as_str(), "set" | "add" | "remove" | "move")
-            && r.result.is_ok()
-    });
+    let has_mutations = results
+        .iter()
+        .any(|r| matches!(r.op.as_str(), "set" | "add" | "remove" | "move") && r.result.is_ok());
     if has_mutations {
         handler.save()?;
     }
 
     let output = if format == OutputFormat::Json {
-        serde_json::to_string_pretty(&results)
-            .map_err(|e| HandlerError::JsonError(e))?
+        serde_json::to_string_pretty(&results).map_err(|e| HandlerError::JsonError(e))?
     } else {
-        results.iter()
-            .map(|r| {
-                match &r.result {
-                    Ok(val) => format!("{}: OK — {}", r.op, val),
-                    Err(e) => format!("{}: ERROR — {}", r.op, e),
-                }
+        results
+            .iter()
+            .map(|r| match &r.result {
+                Ok(val) => format!("{}: OK — {}", r.op, val),
+                Err(e) => format!("{}: ERROR — {}", r.op, e),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -66,7 +63,10 @@ struct BatchResult {
     result: Result<String, String>,
 }
 
-fn execute_batch_op(handler: &dyn handler_common::DocumentHandler, op: &BatchOp) -> Result<String, String> {
+fn execute_batch_op(
+    handler: &dyn handler_common::DocumentHandler,
+    op: &BatchOp,
+) -> Result<String, String> {
     match op.command.as_str() {
         "set" => {
             let path = op.params.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -83,7 +83,11 @@ fn execute_batch_op(handler: &dyn handler_common::DocumentHandler, op: &BatchOp)
             }
         }
         "add" => {
-            let parent = op.params.get("parent").and_then(|v| v.as_str()).unwrap_or("");
+            let parent = op
+                .params
+                .get("parent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let element_type = op.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let position = parse_position(&op.params);
             let properties = string_map(&op.params, "properties");
@@ -100,7 +104,11 @@ fn execute_batch_op(handler: &dyn handler_common::DocumentHandler, op: &BatchOp)
             }
         }
         "move" => {
-            let source = op.params.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let source = op
+                .params
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let target = op.params.get("target").and_then(|v| v.as_str());
             let position = parse_position(&op.params);
             match handler.move_element(source, target, position) {
@@ -109,7 +117,11 @@ fn execute_batch_op(handler: &dyn handler_common::DocumentHandler, op: &BatchOp)
             }
         }
         "get" => {
-            let path = op.params.get("path").and_then(|v| v.as_str()).unwrap_or("/");
+            let path = op
+                .params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("/");
             let depth = op.params.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
             match handler.get(path, depth) {
                 Ok(node) => Ok(serde_json::to_string(&node).unwrap_or_default()),
@@ -117,9 +129,15 @@ fn execute_batch_op(handler: &dyn handler_common::DocumentHandler, op: &BatchOp)
             }
         }
         "view" => {
-            let mode = op.params.get("mode").and_then(|v| v.as_str()).unwrap_or("text");
+            let mode = op
+                .params
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text");
             match mode {
-                "text" => match handler.view_as_text(handler_common::output_format::ViewOptions::default()) {
+                "text" => match handler
+                    .view_as_text(handler_common::output_format::ViewOptions::default())
+                {
                     Ok(t) => Ok(t),
                     Err(e) => Err(e.to_string()),
                 },
@@ -152,7 +170,8 @@ fn parse_position(params: &HashMap<String, serde_json::Value>) -> InsertPosition
 }
 
 fn string_map(params: &HashMap<String, serde_json::Value>, key: &str) -> HashMap<String, String> {
-    params.get(key)
+    params
+        .get(key)
         .and_then(|v| v.as_object())
         .map(|obj| {
             obj.iter()

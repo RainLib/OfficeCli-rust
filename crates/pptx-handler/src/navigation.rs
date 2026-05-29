@@ -1,5 +1,5 @@
+use crate::dom_types::{Paragraph, Presentation, Run, Shape, Slide, NS_A, NS_P, NS_R};
 use handler_common::PathSegment;
-use crate::dom_types::{Presentation, Slide, Shape, Paragraph, Run, NS_P, NS_A, NS_R};
 
 /// Parse a pptx path string into segments.
 /// Paths:
@@ -10,7 +10,11 @@ pub fn parse_path(path: &str) -> Vec<PathSegment> {
     if path.is_empty() || path == "/" {
         return Vec::new();
     }
-    let path = if path.starts_with('/') { &path[1..] } else { path };
+    let path = if path.starts_with('/') {
+        &path[1..]
+    } else {
+        path
+    };
     path.split('/')
         .filter(|s| !s.is_empty())
         .map(|seg| {
@@ -36,16 +40,20 @@ pub fn parse_path(path: &str) -> Vec<PathSegment> {
 }
 
 /// Build the Presentation model by parsing presentation.xml and each slide.
-pub fn build_presentation(package: &oxml::OxmlPackage) -> Result<Presentation, handler_common::HandlerError> {
+pub fn build_presentation(
+    package: &oxml::OxmlPackage,
+) -> Result<Presentation, handler_common::HandlerError> {
     // 1. Read presentation.xml
-    let pres_xml = package.read_part_xml("ppt/presentation.xml")
+    let pres_xml = package
+        .read_part_xml("ppt/presentation.xml")
         .map_err(|e| handler_common::HandlerError::OperationFailed(e.to_string()))?;
 
     // 2. Parse <p:sldIdLst> to get slide IDs and their rId targets
     let slide_id_entries = parse_slide_id_list(&pres_xml)?;
 
     // 3. Read presentation.xml.rels to resolve rId -> part path
-    let pres_rels = package.part_rels("ppt/presentation.xml")
+    let pres_rels = package
+        .part_rels("ppt/presentation.xml")
         .map_err(|e| handler_common::HandlerError::OperationFailed(e.to_string()))?;
 
     // 4. For each slide ID entry, resolve the part path and parse the slide
@@ -81,35 +89,38 @@ pub fn build_presentation(package: &oxml::OxmlPackage) -> Result<Presentation, h
 
 /// Parse <p:sldIdLst> from presentation.xml.
 /// Uses roxmltree for namespace-aware attribute parsing (r:id requires namespace resolution).
-fn parse_slide_id_list(xml: &str) -> Result<Vec<crate::dom_types::SlideIdEntry>, handler_common::HandlerError> {
+fn parse_slide_id_list(
+    xml: &str,
+) -> Result<Vec<crate::dom_types::SlideIdEntry>, handler_common::HandlerError> {
     // Directly use roxmltree — it handles namespace-qualified attributes correctly
     parse_slide_id_list_roxml(xml)
 }
 
 /// Fallback: use roxmltree for namespace-aware parsing of sldIdLst.
-fn parse_slide_id_list_roxml(xml: &str) -> Result<Vec<crate::dom_types::SlideIdEntry>, handler_common::HandlerError> {
+fn parse_slide_id_list_roxml(
+    xml: &str,
+) -> Result<Vec<crate::dom_types::SlideIdEntry>, handler_common::HandlerError> {
     let mut entries = Vec::new();
 
-    let doc = roxmltree::Document::parse(xml)
-        .map_err(|e| handler_common::HandlerError::OperationFailed(
-            format!("roxmltree parse error: {}", e)
-        ))?;
+    let doc = roxmltree::Document::parse(xml).map_err(|e| {
+        handler_common::HandlerError::OperationFailed(format!("roxmltree parse error: {}", e))
+    })?;
 
     // Find <p:sldIdLst> element
-    let sld_id_lst = doc.descendants()
+    let sld_id_lst = doc
+        .descendants()
         .find(|n| n.has_tag_name((NS_P, "sldIdLst")));
 
     // Also try without namespace
-    let sld_id_lst = sld_id_lst.or_else(|| {
-        doc.descendants().find(|n| n.has_tag_name("sldIdLst"))
-    });
+    let sld_id_lst = sld_id_lst.or_else(|| doc.descendants().find(|n| n.has_tag_name("sldIdLst")));
 
     if let Some(lst) = sld_id_lst {
         for child in lst.children() {
             if child.has_tag_name((NS_P, "sldId")) || child.has_tag_name("sldId") {
                 let id = child.attribute("id").unwrap_or("").to_string();
                 // The r:id attribute in OOXML is namespaced
-                let r_id = child.attribute((NS_R, "id"))
+                let r_id = child
+                    .attribute((NS_R, "id"))
                     .or_else(|| child.attribute("r:id"))
                     .unwrap_or("")
                     .to_string();
@@ -134,7 +145,8 @@ pub fn parse_slide_shapes(xml: &str) -> Vec<Shape> {
     };
 
     // Find the <p:spTree> element (shape tree)
-    let sp_tree = doc.descendants()
+    let sp_tree = doc
+        .descendants()
         .find(|n| n.has_tag_name((NS_P, "spTree")))
         .or_else(|| doc.descendants().find(|n| n.has_tag_name("spTree")));
 
@@ -175,8 +187,7 @@ fn parse_shape_node(sp: &roxmltree::Node) -> Option<Shape> {
                 if nv_child.has_tag_name((NS_P, "nvPr")) || nv_child.has_tag_name("nvPr") {
                     for ph_child in nv_child.children() {
                         if ph_child.has_tag_name((NS_P, "ph")) || ph_child.has_tag_name("ph") {
-                            placeholder_type = ph_child.attribute("type")
-                                .map(|t| t.to_string());
+                            placeholder_type = ph_child.attribute("type").map(|t| t.to_string());
                         }
                     }
                 }

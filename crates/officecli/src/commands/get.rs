@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, OutputFormat};
 use clap::Args;
+use handler_common::{HandlerError, OutputFormat};
 
 /// Retrieve a specific element at a path with its content and metadata
 #[derive(Args)]
@@ -25,7 +25,10 @@ pub fn handle_get(cmd: GetCommand, format: OutputFormat) -> Result<String, Handl
     }
 }
 
-fn format_node_text(node: &handler_common::DocumentNode, _depth: usize) -> Result<String, HandlerError> {
+fn format_node_text(
+    node: &handler_common::DocumentNode,
+    _depth: usize,
+) -> Result<String, HandlerError> {
     let mut result = String::new();
     result.push_str(&format!("Path: {}\n", node.path));
     result.push_str(&format!("Type: {}\n", node.element_type));

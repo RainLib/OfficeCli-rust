@@ -1,11 +1,16 @@
 use handler_common::{HandlerError, RawOptions};
-use oxml::OxmlPackage;
 use oxml::xml_util;
+use oxml::OxmlPackage;
 use std::collections::HashMap;
 
 /// Read raw XML from a PPTX part.
-pub fn read_raw(package: &OxmlPackage, part_path: &str, opts: RawOptions) -> Result<String, HandlerError> {
-    let xml = package.read_part_xml(part_path)
+pub fn read_raw(
+    package: &OxmlPackage,
+    part_path: &str,
+    opts: RawOptions,
+) -> Result<String, HandlerError> {
+    let xml = package
+        .read_part_xml(part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     if opts.start_row.is_some() || opts.end_row.is_some() {
@@ -32,13 +37,15 @@ pub fn apply_raw_set(
     action: &str,
     xml: Option<&str>,
 ) -> Result<(), HandlerError> {
-    let original = package.read_part_xml(part_path)
+    let original = package
+        .read_part_xml(part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     let modified = xml_util::apply_xpath_action(&original, xpath, action, xml)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-    package.write_part_xml(part_path, &modified)
+    package
+        .write_part_xml(part_path, &modified)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok(())
@@ -53,13 +60,16 @@ pub fn add_part(
 ) -> Result<(String, String), HandlerError> {
     match part_type {
         "image" => {
-            let src_path = properties
-                .and_then(|p| p.get("source"))
-                .ok_or_else(|| HandlerError::InvalidArgument("image requires 'source' property (file path)".to_string()))?;
+            let src_path = properties.and_then(|p| p.get("source")).ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "image requires 'source' property (file path)".to_string(),
+                )
+            })?;
 
             // Read the image file
-            let image_data = std::fs::read(src_path)
-                .map_err(|e| HandlerError::OperationFailed(format!("failed to read image '{}': {}", src_path, e)))?;
+            let image_data = std::fs::read(src_path).map_err(|e| {
+                HandlerError::OperationFailed(format!("failed to read image '{}': {}", src_path, e))
+            })?;
 
             // Determine image format from extension
             let ext = src_path.rsplit('.').next().unwrap_or("png");
@@ -70,36 +80,54 @@ pub fn add_part(
                 "gif" => ("image/gif", format!("ppt/media/image{}.gif", next_idx)),
                 "bmp" => ("image/bmp", format!("ppt/media/image{}.bmp", next_idx)),
                 "svg" => ("image/svg+xml", format!("ppt/media/image{}.svg", next_idx)),
-                other => ("image/png", format!("ppt/media/image{}.{}", next_idx, other)),
+                other => (
+                    "image/png",
+                    format!("ppt/media/image{}.{}", next_idx, other),
+                ),
             };
 
             // Add the image part to the package
-            package.write_part(&part_path, image_data)
+            package
+                .write_part(&part_path, image_data)
                 .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
             // Add relationship to parent slide
             let rel_id = format!("rId{}", package.list_parts().len() + 10);
             if parent.starts_with("/slide[") {
-                let slide_num = parent[7..].find(']')
-                    .and_then(|pos| parent[7..7+pos].parse::<usize>().ok())
+                let slide_num = parent[7..]
+                    .find(']')
+                    .and_then(|pos| parent[7..7 + pos].parse::<usize>().ok())
                     .ok_or_else(|| HandlerError::InvalidPath(parent.to_string()))?;
                 let _slide_path = format!("ppt/slides/slide{}.xml", slide_num);
                 let rels_path = format!("ppt/slides/_rels/slide{}.xml.rels", slide_num);
 
-                let rel_type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
-                let target = format!("../media/{}", part_path.split('/').last().unwrap_or("image.png"));
+                let rel_type =
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+                let target = format!(
+                    "../media/{}",
+                    part_path.split('/').last().unwrap_or("image.png")
+                );
 
                 add_relationship(package, &rels_path, &rel_id, rel_type, &target);
             }
 
             Ok((part_path, mime_type.to_string()))
         }
-        other => Err(HandlerError::UnsupportedType(format!("PPTX add_part '{}' not supported", other))),
+        other => Err(HandlerError::UnsupportedType(format!(
+            "PPTX add_part '{}' not supported",
+            other
+        ))),
     }
 }
 
 /// Add a relationship entry to a .rels file.
-fn add_relationship(package: &mut OxmlPackage, rels_path: &str, id: &str, type_: &str, target: &str) {
+fn add_relationship(
+    package: &mut OxmlPackage,
+    rels_path: &str,
+    id: &str,
+    type_: &str,
+    target: &str,
+) {
     if let Ok(rels_xml) = package.read_part_xml(rels_path) {
         let new_rel = format!(
             "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",

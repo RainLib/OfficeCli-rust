@@ -14,7 +14,10 @@ pub fn add_element(
         "slide" => add_slide(package, parent),
         "shape" | "textbox" => add_shape(package, parent, element_type, properties),
         "text" => add_text_to_shape(package, parent, properties),
-        other => Err(HandlerError::UnsupportedType(format!("PPTX add '{}' not supported", other))),
+        other => Err(HandlerError::UnsupportedType(format!(
+            "PPTX add '{}' not supported",
+            other
+        ))),
     }
 }
 
@@ -24,7 +27,8 @@ fn add_slide(package: &mut OxmlPackage, _parent: &str) -> Result<String, Handler
     let slide_num = pres.slides.len() + 1;
     let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
 
-    let slide_xml = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    let slide_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
        xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
@@ -34,9 +38,11 @@ fn add_slide(package: &mut OxmlPackage, _parent: &str) -> Result<String, Handler
       <p:grpSpPr/>
     </p:spTree>
   </p:cSld>
-</p:sld>"#);
+</p:sld>"#
+    );
 
-    package.write_part_xml(&slide_path, &slide_xml)
+    package
+        .write_part_xml(&slide_path, &slide_xml)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Update presentation.xml to add the new slide reference
@@ -56,10 +62,14 @@ fn add_shape(
     let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
 
     let text = properties.get("text").cloned().unwrap_or_default();
-    let name = properties.get("name").cloned().unwrap_or_else(|| element_type.to_string());
+    let name = properties
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| element_type.to_string());
 
     // Get the existing slide XML
-    let slide_xml = package.read_part_xml(&slide_path)
+    let slide_xml = package
+        .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Find next shape ID
@@ -71,12 +81,15 @@ fn add_shape(
     // Insert the shape into the spTree in the slide XML
     let modified = insert_shape_in_sp_tree(&slide_xml, &shape_xml);
 
-    package.write_part_xml(&slide_path, &modified)
+    package
+        .write_part_xml(&slide_path, &modified)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Determine shape index (count existing shapes + 1)
     let pres = crate::navigation::build_presentation(package)?;
-    let slide = pres.slides.iter()
+    let slide = pres
+        .slides
+        .iter()
         .find(|s| s.index == slide_num)
         .ok_or_else(|| HandlerError::PathNotFound(format!("slide {}", slide_num)))?;
     let shape_idx = slide.shapes.len() + 1;
@@ -94,8 +107,12 @@ fn add_text_to_shape(
     Ok(parent.to_string())
 }
 
-pub fn update_presentation_slides(package: &mut OxmlPackage, slide_num: usize) -> Result<(), HandlerError> {
-    let pres_xml = package.read_part_xml("ppt/presentation.xml")
+pub fn update_presentation_slides(
+    package: &mut OxmlPackage,
+    slide_num: usize,
+) -> Result<(), HandlerError> {
+    let pres_xml = package
+        .read_part_xml("ppt/presentation.xml")
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Add slide ID entry: <p:sldId id="256+N" r:id="rIdN"/>
@@ -114,12 +131,14 @@ pub fn update_presentation_slides(package: &mut OxmlPackage, slide_num: usize) -
         pres_xml
     };
 
-    package.write_part_xml("ppt/presentation.xml", &modified)
+    package
+        .write_part_xml("ppt/presentation.xml", &modified)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Update presentation relationships
     let rels_path = "ppt/_rels/presentation.xml.rels";
-    let rels_xml = package.read_part_xml(rels_path)
+    let rels_xml = package
+        .read_part_xml(rels_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     let new_rel = format!(
@@ -135,7 +154,8 @@ pub fn update_presentation_slides(package: &mut OxmlPackage, slide_num: usize) -
         rels_xml
     };
 
-    package.write_part_xml(rels_path, &modified_rels)
+    package
+        .write_part_xml(rels_path, &modified_rels)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok(())
@@ -143,7 +163,8 @@ pub fn update_presentation_slides(package: &mut OxmlPackage, slide_num: usize) -
 
 fn create_text_shape_xml(id: usize, name: &str, text: &str) -> String {
     let escaped_text = xml_escape_text(text);
-    format!(r#"<p:sp>
+    format!(
+        r#"<p:sp>
   <p:nvSpPr>
     <p:cNvPr id="{id}" name="{name}"/>
     <p:cNvSpPr txBox="1"/>
@@ -158,7 +179,8 @@ fn create_text_shape_xml(id: usize, name: &str, text: &str) -> String {
     <a:lstStyle/>
     <a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>{escaped_text}</a:t></a:r></a:p>
   </p:txBody>
-</p:sp>"#)
+</p:sp>"#
+    )
 }
 
 fn insert_shape_in_sp_tree(slide_xml: &str, shape_xml: &str) -> String {
@@ -178,7 +200,9 @@ fn find_max_id(xml: &str) -> usize {
     for part in xml.split("id=\"") {
         if let Some(end) = part.find('"') {
             if let Ok(id) = part[..end].parse::<usize>() {
-                if id > max_id { max_id = id; }
+                if id > max_id {
+                    max_id = id;
+                }
             }
         }
     }

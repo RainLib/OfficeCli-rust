@@ -1,5 +1,5 @@
-use handler_common::{TextOffsetMap, HandlerError};
 use crate::dom_types::{WordDom, WordElementType};
+use handler_common::{HandlerError, TextOffsetMap};
 
 /// Build a TextOffsetMap from the Word DOM.
 /// Each paragraph contributes its text, and each run gets its own span.
@@ -7,7 +7,8 @@ use crate::dom_types::{WordDom, WordElementType};
 pub fn extract_text_with_offsets(dom: &WordDom) -> Result<TextOffsetMap, HandlerError> {
     let mut map = TextOffsetMap::empty("docx");
 
-    let body = dom.body()
+    let body = dom
+        .body()
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
     let mut para_idx = 0;
@@ -21,7 +22,11 @@ pub fn extract_text_with_offsets(dom: &WordDom) -> Result<TextOffsetMap, Handler
 
                 if para_idx > 1 {
                     // Add paragraph separator (newline) between paragraphs
-                    map.push_span("\n", &format!("/body/p[{}]/break", para_idx), "paragraph-break");
+                    map.push_span(
+                        "\n",
+                        &format!("/body/p[{}]/break", para_idx),
+                        "paragraph-break",
+                    );
                 }
 
                 // Walk runs within the paragraph
@@ -40,10 +45,12 @@ pub fn extract_text_with_offsets(dom: &WordDom) -> Result<TextOffsetMap, Handler
                         for hl_child in &p_child.children {
                             if hl_child.element_type == WordElementType::Run {
                                 hyperlink_run_idx += 1;
-                                let hl_path = format!("{}/hyperlink[{}]/r[{}]",
+                                let hl_path = format!(
+                                    "{}/hyperlink[{}]/r[{}]",
                                     para_path,
                                     count_hyperlinks_before(&child.children, p_child),
-                                    hyperlink_run_idx);
+                                    hyperlink_run_idx
+                                );
                                 let run_text = extract_run_text(hl_child);
                                 if !run_text.is_empty() {
                                     map.push_span(&run_text, &hl_path, "run");
@@ -64,7 +71,11 @@ pub fn extract_text_with_offsets(dom: &WordDom) -> Result<TextOffsetMap, Handler
                 let tbl_path = format!("/body/tbl[{}]", tbl_idx);
 
                 if para_idx > 0 || tbl_idx > 1 {
-                    map.push_span("\n", &format!("/body/tbl[{}]/break", tbl_idx), "paragraph-break");
+                    map.push_span(
+                        "\n",
+                        &format!("/body/tbl[{}]/break", tbl_idx),
+                        "paragraph-break",
+                    );
                 }
 
                 let mut row_idx = 0;
@@ -86,14 +97,22 @@ pub fn extract_text_with_offsets(dom: &WordDom) -> Result<TextOffsetMap, Handler
 
                                 // Tab separator between cells in same row
                                 if cell_idx < count_cells_in_row(&tbl_child.children) {
-                                    map.push_span("\t", &format!("{}/tc[{}]/sep", row_path, cell_idx), "cell-separator");
+                                    map.push_span(
+                                        "\t",
+                                        &format!("{}/tc[{}]/sep", row_path, cell_idx),
+                                        "cell-separator",
+                                    );
                                 }
                             }
                         }
 
                         // Newline between rows
                         if row_idx < count_rows_in_table(&child.children) {
-                            map.push_span("\n", &format!("{}/tr[{}]/break", tbl_path, row_idx), "row-break");
+                            map.push_span(
+                                "\n",
+                                &format!("{}/tr[{}]/break", tbl_path, row_idx),
+                                "row-break",
+                            );
                         }
                     }
                 }
@@ -119,7 +138,11 @@ fn extract_run_text(run: &crate::dom_types::WordNode) -> String {
                 result.push('\t');
             }
             WordElementType::Break => {
-                let break_type = child.attributes.get("type").map(|s| s.as_str()).unwrap_or("");
+                let break_type = child
+                    .attributes
+                    .get("type")
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
                 if break_type == "page" {
                     result.push('\n');
                 } else {
@@ -149,7 +172,10 @@ fn extract_cell_text(cell: &crate::dom_types::WordNode) -> String {
 }
 
 /// Count hyperlink elements before the current one in the children list.
-fn count_hyperlinks_before(children: &[crate::dom_types::WordNode], current: &crate::dom_types::WordNode) -> usize {
+fn count_hyperlinks_before(
+    children: &[crate::dom_types::WordNode],
+    current: &crate::dom_types::WordNode,
+) -> usize {
     let mut count = 0;
     for child in children {
         if child.element_type == WordElementType::Hyperlink {
@@ -164,14 +190,16 @@ fn count_hyperlinks_before(children: &[crate::dom_types::WordNode], current: &cr
 
 /// Count cells in a table row.
 fn count_cells_in_row(children: &[crate::dom_types::WordNode]) -> usize {
-    children.iter()
+    children
+        .iter()
         .filter(|c| c.element_type == WordElementType::TableCell)
         .count()
 }
 
 /// Count rows in a table.
 fn count_rows_in_table(children: &[crate::dom_types::WordNode]) -> usize {
-    children.iter()
+    children
+        .iter()
         .filter(|c| c.element_type == WordElementType::TableRow)
         .count()
 }

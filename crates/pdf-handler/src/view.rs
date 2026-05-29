@@ -1,5 +1,5 @@
 use crate::reader::PdfReader;
-use handler_common::{DocumentIssue, IssueSeverity, HandlerError, ValidationError, ViewOptions};
+use handler_common::{DocumentIssue, HandlerError, IssueSeverity, ValidationError, ViewOptions};
 
 /// PDF view modes implementation.
 pub struct PdfViewer {
@@ -7,7 +7,9 @@ pub struct PdfViewer {
 }
 
 impl PdfViewer {
-    pub fn new(reader: PdfReader) -> Self { Self { reader } }
+    pub fn new(reader: PdfReader) -> Self {
+        Self { reader }
+    }
 
     pub fn view_as_text(&self, opts: &ViewOptions) -> Result<String, HandlerError> {
         let full_text = self.reader.extract_all_text();
@@ -16,7 +18,9 @@ impl PdfViewer {
         let end = opts.end_line.unwrap_or(lines.len());
         let max = opts.max_lines.unwrap_or(lines.len());
         let end = end.min(lines.len()).min(start + max);
-        if start >= lines.len() { return Ok(String::new()); }
+        if start >= lines.len() {
+            return Ok(String::new());
+        }
         Ok(lines[start..end].join("\n"))
     }
 
@@ -32,15 +36,29 @@ impl PdfViewer {
             if let Some(parsed) = self.reader.parse_page_text_blocks(page_num) {
                 for block in &parsed.text_blocks {
                     block_num += 1;
-                    if block_num < start { continue; }
-                    if block_num > end || block_num >= start + max { break; }
+                    if block_num < start {
+                        continue;
+                    }
+                    if block_num > end || block_num >= start + max {
+                        break;
+                    }
                     let bbox = &block.bbox;
                     let style = &block.style;
                     let font_info = style.font_name.as_deref().unwrap_or("-");
-                    let size_info = style.font_size.map(|s| format!("{:.0}", s)).unwrap_or("-".to_string());
+                    let size_info = style
+                        .font_size
+                        .map(|s| format!("{:.0}", s))
+                        .unwrap_or("-".to_string());
                     result.push_str(&format!(
                         "  {} | ({:.0},{:.0}) w={:.1} h={:.0} [{} {}] {}\n",
-                        block_num, bbox.x, bbox.y, bbox.width, bbox.height, font_info, size_info, block.text
+                        block_num,
+                        bbox.x,
+                        bbox.y,
+                        bbox.width,
+                        bbox.height,
+                        font_info,
+                        size_info,
+                        block.text
                     ));
                 }
             }
@@ -63,7 +81,11 @@ impl PdfViewer {
                     };
                     let bbox = &block.bbox;
                     let font = block.style.font_name.as_deref().unwrap_or("-");
-                    let size = block.style.font_size.map(|s| format!("{:.0}", s)).unwrap_or("-".to_string());
+                    let size = block
+                        .style
+                        .font_size
+                        .map(|s| format!("{:.0}", s))
+                        .unwrap_or("-".to_string());
                     result.push_str(&format!(
                         "    text[{}]: ({:.0},{:.0}) {:.1}×{:.0} [{} {}] \"{}\"\n",
                         block.index, bbox.x, bbox.y, bbox.width, bbox.height, font, size, preview
@@ -88,11 +110,19 @@ impl PdfViewer {
                 total_lines += page_text.lines().count();
             }
         }
-        Ok(format!("PDF Statistics\n  Pages: {}\n  Total chars: {}\n  Total lines: {}\n",
-            self.reader.page_count(), total_chars, total_lines))
+        Ok(format!(
+            "PDF Statistics\n  Pages: {}\n  Total chars: {}\n  Total lines: {}\n",
+            self.reader.page_count(),
+            total_chars,
+            total_lines
+        ))
     }
 
-    pub fn view_as_issues(&self, issue_type: Option<&str>, limit: Option<usize>) -> Result<Vec<DocumentIssue>, HandlerError> {
+    pub fn view_as_issues(
+        &self,
+        issue_type: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<DocumentIssue>, HandlerError> {
         let mut issues = Vec::new();
         let limit = limit.unwrap_or(50);
         for page_num in 1..=self.reader.page_count() {
@@ -107,7 +137,9 @@ impl PdfViewer {
                 }
             }
         }
-        if let Some(filter) = issue_type { issues.retain(|i| i.issue_type == filter); }
+        if let Some(filter) = issue_type {
+            issues.retain(|i| i.issue_type == filter);
+        }
         Ok(issues)
     }
 

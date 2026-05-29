@@ -1,7 +1,7 @@
+use crate::dom_types::{WordDom, WordElementType, WordNode};
+use crate::navigation::{navigate_to_element, navigate_to_element_mut, parse_path};
 use handler_common::{HandlerError, InsertPosition};
 use std::collections::HashMap;
-use crate::dom_types::{WordDom, WordNode, WordElementType};
-use crate::navigation::{parse_path, navigate_to_element, navigate_to_element_mut};
 
 /// Add a new element at the given parent path.
 pub fn add_element(
@@ -37,7 +37,10 @@ fn resolve_add_type(name: &str) -> Result<AddType, HandlerError> {
         "tbl" | "table" => Ok(AddType::Table),
         "tr" | "row" => Ok(AddType::TableRow),
         "tc" | "cell" => Ok(AddType::TableCell),
-        other => Err(HandlerError::UnsupportedType(format!("cannot add element type: {}", other))),
+        other => Err(HandlerError::UnsupportedType(format!(
+            "cannot add element type: {}",
+            other
+        ))),
     }
 }
 
@@ -49,18 +52,19 @@ fn add_paragraph(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let segments = parse_path(parent)?;
-    let first_seg = segments.first()
-        .ok_or_else(|| HandlerError::InvalidPath("parent path must start with /body".to_string()))?;
+    let first_seg = segments.first().ok_or_else(|| {
+        HandlerError::InvalidPath("parent path must start with /body".to_string())
+    })?;
 
     if first_seg.name != "body" {
-        return Err(HandlerError::InvalidPath(
-            format!("paragraphs can only be added under /body, got: {}", parent),
-        ));
+        return Err(HandlerError::InvalidPath(format!(
+            "paragraphs can only be added under /body, got: {}",
+            parent
+        )));
     }
 
     let para_id = crate::helpers::generate_para_id();
-    let mut para = WordNode::new(WordElementType::Paragraph)
-        .with_attribute("paraId", &para_id);
+    let mut para = WordNode::new(WordElementType::Paragraph).with_attribute("paraId", &para_id);
 
     // Add paragraph properties if provided
     if let Some(ppr) = crate::helpers::build_paragraph_properties(properties) {
@@ -70,9 +74,15 @@ fn add_paragraph(
     // If "text" property is provided, add a run with that text
     if let Some(text) = properties.get("text") {
         let mut run = WordNode::new(WordElementType::Run);
-        let run_props: HashMap<String, String> = properties.iter()
-            .filter(|(k, _)| k.as_str() != "text" && k.as_str() != "style" && k.as_str() != "alignment" &&
-                     !k.starts_with("indent") && !k.starts_with("spacing"))
+        let run_props: HashMap<String, String> = properties
+            .iter()
+            .filter(|(k, _)| {
+                k.as_str() != "text"
+                    && k.as_str() != "style"
+                    && k.as_str() != "alignment"
+                    && !k.starts_with("indent")
+                    && !k.starts_with("spacing")
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         if let Some(rpr) = crate::helpers::build_run_properties(&run_props) {
@@ -80,7 +90,9 @@ fn add_paragraph(
         }
         let mut text_node = WordNode::new(WordElementType::Text).with_text(text);
         if text.starts_with(' ') || text.ends_with(' ') {
-            text_node.attributes.insert("xml:space".to_string(), "preserve".to_string());
+            text_node
+                .attributes
+                .insert("xml:space".to_string(), "preserve".to_string());
             text_node.preserve_space = true;
         }
         run.children.push(text_node);
@@ -88,11 +100,16 @@ fn add_paragraph(
     }
 
     // Get body and determine insertion index
-    let body_idx = dom.root.children.iter()
+    let body_idx = dom
+        .root
+        .children
+        .iter()
         .position(|c| c.element_type == WordElementType::Body)
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
-    let content_items: Vec<usize> = dom.root.children[body_idx].children.iter()
+    let content_items: Vec<usize> = dom.root.children[body_idx]
+        .children
+        .iter()
         .enumerate()
         .filter(|(_, c)| c.element_type.is_body_child())
         .map(|(i, _)| i)
@@ -102,7 +119,11 @@ fn add_paragraph(
 
     match insert_idx {
         Some(idx) => {
-            let real_idx = if idx < content_items.len() { content_items[idx] } else { dom.root.children[body_idx].children.len() };
+            let real_idx = if idx < content_items.len() {
+                content_items[idx]
+            } else {
+                dom.root.children[body_idx].children.len()
+            };
             dom.root.children[body_idx].children.insert(real_idx, para);
         }
         None => {
@@ -137,7 +158,8 @@ fn add_run(
     // Build the run node
     let mut run = WordNode::new(WordElementType::Run);
 
-    let run_props: HashMap<String, String> = properties.iter()
+    let run_props: HashMap<String, String> = properties
+        .iter()
         .filter(|(k, _)| k.as_str() != "text")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
@@ -148,7 +170,9 @@ fn add_run(
     if let Some(text) = properties.get("text") {
         let mut text_node = WordNode::new(WordElementType::Text).with_text(text);
         if text.starts_with(' ') || text.ends_with(' ') {
-            text_node.attributes.insert("xml:space".to_string(), "preserve".to_string());
+            text_node
+                .attributes
+                .insert("xml:space".to_string(), "preserve".to_string());
             text_node.preserve_space = true;
         }
         run.children.push(text_node);
@@ -157,7 +181,9 @@ fn add_run(
     // Now get mutable access
     let para = navigate_to_element_mut(dom, parent)?;
 
-    let existing_runs: Vec<usize> = para.children.iter()
+    let existing_runs: Vec<usize> = para
+        .children
+        .iter()
         .enumerate()
         .filter(|(_, c)| c.element_type == WordElementType::Run)
         .map(|(i, _)| i)
@@ -167,7 +193,11 @@ fn add_run(
 
     match insert_idx {
         Some(idx) => {
-            let real_idx = if idx < existing_runs.len() { existing_runs[idx] } else { para.children.len() };
+            let real_idx = if idx < existing_runs.len() {
+                existing_runs[idx]
+            } else {
+                para.children.len()
+            };
             para.children.insert(real_idx, run);
         }
         None => {
@@ -179,30 +209,38 @@ fn add_run(
 }
 
 /// Add an empty table to the body.
-fn add_table(dom: &mut WordDom, parent: &str, position: InsertPosition) -> Result<String, HandlerError> {
+fn add_table(
+    dom: &mut WordDom,
+    parent: &str,
+    position: InsertPosition,
+) -> Result<String, HandlerError> {
     let segments = parse_path(parent)?;
-    let first_seg = segments.first()
-        .ok_or_else(|| HandlerError::InvalidPath("parent path must start with /body".to_string()))?;
+    let first_seg = segments.first().ok_or_else(|| {
+        HandlerError::InvalidPath("parent path must start with /body".to_string())
+    })?;
 
     if first_seg.name != "body" {
-        return Err(HandlerError::InvalidPath("tables can only be added under /body".to_string()));
+        return Err(HandlerError::InvalidPath(
+            "tables can only be added under /body".to_string(),
+        ));
     }
 
     let tbl_pr = WordNode::new(WordElementType::TableProperties);
     let cell = WordNode::new(WordElementType::TableCell)
-        .with_children(vec![
-            WordNode::new(WordElementType::Paragraph)
-        ]);
-    let row = WordNode::new(WordElementType::TableRow)
-        .with_children(vec![cell]);
-    let table = WordNode::new(WordElementType::Table)
-        .with_children(vec![tbl_pr, row]);
+        .with_children(vec![WordNode::new(WordElementType::Paragraph)]);
+    let row = WordNode::new(WordElementType::TableRow).with_children(vec![cell]);
+    let table = WordNode::new(WordElementType::Table).with_children(vec![tbl_pr, row]);
 
-    let body_idx = dom.root.children.iter()
+    let body_idx = dom
+        .root
+        .children
+        .iter()
         .position(|c| c.element_type == WordElementType::Body)
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
-    let content_items: Vec<usize> = dom.root.children[body_idx].children.iter()
+    let content_items: Vec<usize> = dom.root.children[body_idx]
+        .children
+        .iter()
         .enumerate()
         .filter(|(_, c)| c.element_type.is_body_child())
         .map(|(i, _)| i)
@@ -212,7 +250,11 @@ fn add_table(dom: &mut WordDom, parent: &str, position: InsertPosition) -> Resul
 
     match insert_idx {
         Some(idx) => {
-            let real_idx = if idx < content_items.len() { content_items[idx] } else { dom.root.children[body_idx].children.len() };
+            let real_idx = if idx < content_items.len() {
+                content_items[idx]
+            } else {
+                dom.root.children[body_idx].children.len()
+            };
             dom.root.children[body_idx].children.insert(real_idx, table);
         }
         None => {
@@ -230,27 +272,42 @@ fn add_table(dom: &mut WordDom, parent: &str, position: InsertPosition) -> Resul
 }
 
 /// Add a row to a table.
-fn add_table_row(dom: &mut WordDom, parent: &str, position: InsertPosition) -> Result<String, HandlerError> {
+fn add_table_row(
+    dom: &mut WordDom,
+    parent: &str,
+    position: InsertPosition,
+) -> Result<String, HandlerError> {
     // First check table structure (immutable)
     let col_count = {
         let table = navigate_to_element(dom, parent)?;
-        table.children.iter()
+        table
+            .children
+            .iter()
             .find(|c| c.element_type == WordElementType::TableRow)
-            .map(|row| row.children.iter().filter(|c| c.element_type == WordElementType::TableCell).count())
+            .map(|row| {
+                row.children
+                    .iter()
+                    .filter(|c| c.element_type == WordElementType::TableCell)
+                    .count()
+            })
             .unwrap_or(1)
     };
 
     let mut cells = Vec::new();
     for _ in 0..col_count {
-        cells.push(WordNode::new(WordElementType::TableCell)
-            .with_children(vec![WordNode::new(WordElementType::Paragraph)]));
+        cells.push(
+            WordNode::new(WordElementType::TableCell)
+                .with_children(vec![WordNode::new(WordElementType::Paragraph)]),
+        );
     }
     let row = WordNode::new(WordElementType::TableRow).with_children(cells);
 
     // Now get mutable access
     let table = navigate_to_element_mut(dom, parent)?;
 
-    let existing_rows: Vec<usize> = table.children.iter()
+    let existing_rows: Vec<usize> = table
+        .children
+        .iter()
         .enumerate()
         .filter(|(_, c)| c.element_type == WordElementType::TableRow)
         .map(|(i, _)| i)
@@ -260,7 +317,11 @@ fn add_table_row(dom: &mut WordDom, parent: &str, position: InsertPosition) -> R
 
     match insert_idx {
         Some(idx) => {
-            let real_idx = if idx < existing_rows.len() { existing_rows[idx] } else { table.children.len() };
+            let real_idx = if idx < existing_rows.len() {
+                existing_rows[idx]
+            } else {
+                table.children.len()
+            };
             table.children.insert(real_idx, row);
         }
         None => {
@@ -268,7 +329,9 @@ fn add_table_row(dom: &mut WordDom, parent: &str, position: InsertPosition) -> R
         }
     }
 
-    let row_count = table.children.iter()
+    let row_count = table
+        .children
+        .iter()
         .filter(|c| c.element_type == WordElementType::TableRow)
         .count();
     Ok(format!("{}/tr[{}]", parent, row_count))
@@ -284,18 +347,17 @@ fn add_table_cell(
     let mut para = WordNode::new(WordElementType::Paragraph);
     if let Some(text) = properties.get("text") {
         let run = WordNode::new(WordElementType::Run)
-            .with_children(vec![
-                WordNode::new(WordElementType::Text).with_text(text),
-            ]);
+            .with_children(vec![WordNode::new(WordElementType::Text).with_text(text)]);
         para.children.push(run);
     }
 
-    let cell = WordNode::new(WordElementType::TableCell)
-        .with_children(vec![para]);
+    let cell = WordNode::new(WordElementType::TableCell).with_children(vec![para]);
 
     let row = navigate_to_element_mut(dom, parent)?;
 
-    let existing_cells: Vec<usize> = row.children.iter()
+    let existing_cells: Vec<usize> = row
+        .children
+        .iter()
         .enumerate()
         .filter(|(_, c)| c.element_type == WordElementType::TableCell)
         .map(|(i, _)| i)
@@ -305,7 +367,11 @@ fn add_table_cell(
 
     match insert_idx {
         Some(idx) => {
-            let real_idx = if idx < existing_cells.len() { existing_cells[idx] } else { row.children.len() };
+            let real_idx = if idx < existing_cells.len() {
+                existing_cells[idx]
+            } else {
+                row.children.len()
+            };
             row.children.insert(real_idx, cell);
         }
         None => {
@@ -313,7 +379,9 @@ fn add_table_cell(
         }
     }
 
-    let cell_count = row.children.iter()
+    let cell_count = row
+        .children
+        .iter()
         .filter(|c| c.element_type == WordElementType::TableCell)
         .count();
     Ok(format!("{}/tc[{}]", parent, cell_count))

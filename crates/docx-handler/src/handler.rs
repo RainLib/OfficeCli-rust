@@ -1,17 +1,17 @@
-use handler_common::*;
 use handler_common::output_format::{BinaryInfo, RawOptions};
+use handler_common::*;
 use oxml::OxmlPackage;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::dom_types::{WordDom, WordNode, WordElementType};
-use crate::navigation::{navigate_to_element, navigate_to_element_mut};
-use crate::view::*;
-use crate::text_offset::extract_text_with_offsets;
 use crate::add::add_element;
-use crate::mutations::{set_properties, remove_element, move_element};
+use crate::dom_types::{WordDom, WordElementType, WordNode};
+use crate::mutations::{move_element, remove_element, set_properties};
+use crate::navigation::{navigate_to_element, navigate_to_element_mut};
 use crate::query::query_elements;
 use crate::raw::read_raw;
+use crate::text_offset::extract_text_with_offsets;
+use crate::view::*;
 
 const DOCUMENT_PART: &str = "word/document.xml";
 const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -25,13 +25,17 @@ impl WordHandler {
     pub fn open(path: &str, editable: bool) -> Result<Self, HandlerError> {
         let package = OxmlPackage::open(path, editable)
             .map_err(|e| HandlerError::OpenError(e.to_string()))?;
-        Ok(Self { package: RefCell::new(package), editable })
+        Ok(Self {
+            package: RefCell::new(package),
+            editable,
+        })
     }
 
     /// Parse the document.xml from the ZIP package into a WordDom tree.
     fn parse_dom(&self) -> Result<WordDom, HandlerError> {
         let package = self.package.borrow();
-        let xml = package.read_part_xml(DOCUMENT_PART)
+        let xml = package
+            .read_part_xml(DOCUMENT_PART)
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
         parse_document_xml(&xml)
     }
@@ -39,18 +43,23 @@ impl WordHandler {
     /// Serialize the DOM back to XML and write it to the package.
     fn write_dom(&self, dom: &WordDom) -> Result<(), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let xml = serialize_dom(dom);
         let mut package = self.package.borrow_mut();
-        package.write_part_xml(DOCUMENT_PART, &xml)
+        package
+            .write_part_xml(DOCUMENT_PART, &xml)
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
         Ok(())
     }
 }
 
 impl DocumentHandler for WordHandler {
-    fn format_name(&self) -> &str { "docx" }
+    fn format_name(&self) -> &str {
+        "docx"
+    }
 
     fn view_as_text(&self, opts: ViewOptions) -> Result<String, HandlerError> {
         let dom = self.parse_dom()?;
@@ -72,7 +81,11 @@ impl DocumentHandler for WordHandler {
         view_as_stats(&dom)
     }
 
-    fn view_as_issues(&self, issue_type: Option<&str>, limit: Option<usize>) -> Result<Vec<DocumentIssue>, HandlerError> {
+    fn view_as_issues(
+        &self,
+        issue_type: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<DocumentIssue>, HandlerError> {
         let dom = self.parse_dom()?;
         Ok(view_as_issues(&dom, issue_type, limit))
     }
@@ -102,14 +115,16 @@ impl DocumentHandler for WordHandler {
 
         // Special case: root path "/" returns the document structure
         if path == "/" {
-            let body = dom.body()
+            let body = dom
+                .body()
                 .ok_or_else(|| HandlerError::PathNotFound("body element not found".to_string()))?;
             let mut root_node = DocumentNode::new("/", "document");
 
             if depth > 0 {
                 // Show top-level body children
                 let mut children = Vec::new();
-                let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                let mut type_counts: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
                 for child in &body.children {
                     let type_name_str = child.element_type.to_path_name();
                     let type_name = type_name_str.to_string();
@@ -127,7 +142,7 @@ impl DocumentHandler for WordHandler {
                     children.push(
                         DocumentNode::new(&child_path, type_name_str)
                             .with_text(&text)
-                            .with_preview(&preview)
+                            .with_preview(&preview),
                     );
                 }
                 root_node = root_node.with_children(children);
@@ -148,7 +163,11 @@ impl DocumentHandler for WordHandler {
         };
 
         let style = node.heading_level().map(|l| {
-            if l == 0 { "Title".to_string() } else { format!("Heading{}", l) }
+            if l == 0 {
+                "Title".to_string()
+            } else {
+                format!("Heading{}", l)
+            }
         });
 
         let mut doc_node = DocumentNode::new(path, element_type_str);
@@ -172,12 +191,16 @@ impl DocumentHandler for WordHandler {
                     if let WordElementType::Unknown(ref name) = child.element_type {
                         if name == "pStyle" {
                             if let Some(val) = child.attributes.get("val") {
-                                doc_node = doc_node.with_format("style", serde_json::Value::String(val.clone()));
+                                doc_node = doc_node
+                                    .with_format("style", serde_json::Value::String(val.clone()));
                             }
                         }
                         if name == "jc" {
                             if let Some(val) = child.attributes.get("val") {
-                                doc_node = doc_node.with_format("alignment", serde_json::Value::String(val.clone()));
+                                doc_node = doc_node.with_format(
+                                    "alignment",
+                                    serde_json::Value::String(val.clone()),
+                                );
                             }
                         }
                     }
@@ -198,26 +221,33 @@ impl DocumentHandler for WordHandler {
                     }
                     if name == "u" {
                         if let Some(val) = child.attributes.get("val") {
-                            doc_node = doc_node.with_format("underline", serde_json::Value::String(val.clone()));
+                            doc_node = doc_node
+                                .with_format("underline", serde_json::Value::String(val.clone()));
                         }
                     }
                     if name == "sz" {
                         if let Some(val) = child.attributes.get("val") {
                             if let Ok(hp) = val.parse::<f32>() {
-                                doc_node = doc_node.with_format("fontSize", serde_json::Value::Number(
-                                    serde_json::Number::from_f64(hp as f64 / 2.0).unwrap_or(serde_json::Number::from(12))
-                                ));
+                                doc_node = doc_node.with_format(
+                                    "fontSize",
+                                    serde_json::Value::Number(
+                                        serde_json::Number::from_f64(hp as f64 / 2.0)
+                                            .unwrap_or(serde_json::Number::from(12)),
+                                    ),
+                                );
                             }
                         }
                     }
                     if name == "color" {
                         if let Some(val) = child.attributes.get("val") {
-                            doc_node = doc_node.with_format("color", serde_json::Value::String(val.clone()));
+                            doc_node = doc_node
+                                .with_format("color", serde_json::Value::String(val.clone()));
                         }
                     }
                     if name == "rFonts" {
                         if let Some(val) = child.attributes.get("ascii") {
-                            doc_node = doc_node.with_format("font", serde_json::Value::String(val.clone()));
+                            doc_node = doc_node
+                                .with_format("font", serde_json::Value::String(val.clone()));
                         }
                     }
                 }
@@ -238,14 +268,21 @@ impl DocumentHandler for WordHandler {
         query_elements(&dom, selector)
     }
 
-    fn set(&self, path: &str, properties: &HashMap<String, String>) -> Result<Vec<String>, HandlerError> {
+    fn set(
+        &self,
+        path: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<Vec<String>, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let mut dom = self.parse_dom()?;
         let result = if let Some(range_paths_str) = properties.get("range_paths") {
-            let segments = handler_common::parse_range_paths(range_paths_str)
-                .map_err(|e| HandlerError::InvalidArgument(format!("invalid range paths: {}", e)))?;
+            let segments = handler_common::parse_range_paths(range_paths_str).map_err(|e| {
+                HandlerError::InvalidArgument(format!("invalid range paths: {}", e))
+            })?;
             apply_docx_range_highlights(&mut dom, properties, &segments)?
         } else {
             set_properties(&mut dom, path, properties)?
@@ -262,7 +299,9 @@ impl DocumentHandler for WordHandler {
         properties: &HashMap<String, String>,
     ) -> Result<String, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let mut dom = self.parse_dom()?;
         let new_path = add_element(&mut dom, parent, element_type, position, properties)?;
@@ -272,7 +311,9 @@ impl DocumentHandler for WordHandler {
 
     fn remove(&self, path: &str) -> Result<Option<String>, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let mut dom = self.parse_dom()?;
         let result = remove_element(&mut dom, path)?;
@@ -287,7 +328,9 @@ impl DocumentHandler for WordHandler {
         position: InsertPosition,
     ) -> Result<String, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let mut dom = self.parse_dom()?;
         let new_path = move_element(&mut dom, source, target_parent, position)?;
@@ -302,12 +345,20 @@ impl DocumentHandler for WordHandler {
         position: InsertPosition,
     ) -> Result<String, HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let mut dom = self.parse_dom()?;
         let source_node = navigate_to_element(&dom, source)?.clone();
         let elem_type = source_node.element_type.to_path_name();
-        let new_path = add_element(&mut dom, target_parent, elem_type, position, &HashMap::new())?;
+        let new_path = add_element(
+            &mut dom,
+            target_parent,
+            elem_type,
+            position,
+            &HashMap::new(),
+        )?;
         let target_node = navigate_to_element_mut(&mut dom, &new_path)?;
         *target_node = source_node;
         self.write_dom(&dom)?;
@@ -327,7 +378,9 @@ impl DocumentHandler for WordHandler {
         xml: Option<&str>,
     ) -> Result<(), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let mut package = self.package.borrow_mut();
         crate::raw::apply_raw_set(&mut *package, part_path, xpath, action, xml)
@@ -340,7 +393,9 @@ impl DocumentHandler for WordHandler {
         properties: Option<&HashMap<String, String>>,
     ) -> Result<(String, String), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::OperationFailed("document opened in read-only mode".to_string()));
+            return Err(HandlerError::OperationFailed(
+                "document opened in read-only mode".to_string(),
+            ));
         }
         let mut package = self.package.borrow_mut();
         crate::raw::add_part(&mut *package, parent, part_type, properties)
@@ -360,7 +415,11 @@ impl DocumentHandler for WordHandler {
         Ok(errors)
     }
 
-    fn try_extract_binary(&self, path: &str, dest: &str) -> Result<Option<BinaryInfo>, HandlerError> {
+    fn try_extract_binary(
+        &self,
+        path: &str,
+        dest: &str,
+    ) -> Result<Option<BinaryInfo>, HandlerError> {
         // Resolve path to a part in the package (e.g. images are in word/media/)
         let pkg = self.package.borrow();
         let content_types = pkg.content_types();
@@ -370,9 +429,13 @@ impl DocumentHandler for WordHandler {
             // Try to find an image part in word/media/
             let parts = pkg.list_parts();
             // If path is like /image[N], find the Nth image
-            if let Some(idx_str) = path.strip_prefix("/image[").and_then(|s| s.strip_suffix(']')) {
+            if let Some(idx_str) = path
+                .strip_prefix("/image[")
+                .and_then(|s| s.strip_suffix(']'))
+            {
                 if let Ok(idx) = idx_str.parse::<usize>() {
-                    let image_parts: Vec<&String> = parts.into_iter()
+                    let image_parts: Vec<&String> = parts
+                        .into_iter()
                         .filter(|p| p.starts_with("word/media/"))
                         .collect();
                     if idx > 0 && idx <= image_parts.len() {
@@ -380,28 +443,39 @@ impl DocumentHandler for WordHandler {
                     } else {
                         None
                     }
-                } else { None }
+                } else {
+                    None
+                }
             } else {
                 // Try matching by name
-                parts.into_iter()
+                parts
+                    .into_iter()
                     .find(|p| p.starts_with("word/media/"))
                     .map(|p| p.to_string())
             }
         } else {
             // Try the path directly as a part path
-            if pkg.has_part(path) { Some(path.to_string()) } else { None }
+            if pkg.has_part(path) {
+                Some(path.to_string())
+            } else {
+                None
+            }
         };
 
-        let part_path = media_path
-            .ok_or_else(|| HandlerError::PathNotFound(format!("binary part for path '{}'", path)))?;
+        let part_path = media_path.ok_or_else(|| {
+            HandlerError::PathNotFound(format!("binary part for path '{}'", path))
+        })?;
 
-        let bytes = pkg.read_part_bytes(&part_path)
+        let bytes = pkg
+            .read_part_bytes(&part_path)
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-        std::fs::write(dest, bytes)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to write to '{}': {}", dest, e)))?;
+        std::fs::write(dest, bytes).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to write to '{}': {}", dest, e))
+        })?;
 
-        let content_type = content_types.content_type_for(&part_path)
+        let content_type = content_types
+            .content_type_for(&part_path)
             .cloned()
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
@@ -413,9 +487,13 @@ impl DocumentHandler for WordHandler {
 
     fn save(&self) -> Result<(), HandlerError> {
         if !self.editable {
-            return Err(HandlerError::SaveError("document opened in read-only mode".to_string()));
+            return Err(HandlerError::SaveError(
+                "document opened in read-only mode".to_string(),
+            ));
         }
-        self.package.borrow_mut().save()
+        self.package
+            .borrow_mut()
+            .save()
             .map_err(|e| HandlerError::SaveError(e.to_string()))?;
         Ok(())
     }
@@ -432,52 +510,63 @@ fn apply_docx_range_highlights(
     segments: &[PathRangeSegment],
 ) -> Result<Vec<String>, HandlerError> {
     let mut unsupported = Vec::new();
-    
+
     let mut run_props = properties.clone();
     run_props.remove("range_paths");
-    if !run_props.contains_key("bgColor") && !run_props.contains_key("highlight") && !run_props.contains_key("bg") {
+    if !run_props.contains_key("bgColor")
+        && !run_props.contains_key("highlight")
+        && !run_props.contains_key("bg")
+    {
         run_props.insert("highlight".to_string(), "yellow".to_string());
     }
 
     for seg in segments {
         let path_segs = crate::navigation::parse_path(&seg.path)?;
         if path_segs.len() < 2 {
-            return Err(HandlerError::InvalidPath(format!("invalid run path: {}", seg.path)));
+            return Err(HandlerError::InvalidPath(format!(
+                "invalid run path: {}",
+                seg.path
+            )));
         }
-        
+
         let parent_segs = &path_segs[..path_segs.len() - 1];
         let mut parent_path_str = String::new();
         for s in parent_segs {
             parent_path_str.push('/');
             parent_path_str.push_str(&s.to_path_fragment());
         }
-        
+
         let parent = navigate_to_element_mut(dom, &parent_path_str)?;
         let last_seg = &path_segs[path_segs.len() - 1];
         let target_type = crate::navigation::resolve_element_type_from_name(&last_seg.name);
-        
+
         let matching_indices: Vec<usize> = parent.children.iter()
             .enumerate()
             .filter(|(_, c)| c.element_type == target_type ||
                 matches!(&c.element_type, WordElementType::Unknown(ref n) if n == &last_seg.name))
             .map(|(i, _)| i)
             .collect();
-            
+
         let idx = last_seg.index.unwrap_or(1);
         if idx == 0 || idx > matching_indices.len() {
-            return Err(HandlerError::PathNotFound(format!("run index {} out of range at {}", idx, seg.path)));
+            return Err(HandlerError::PathNotFound(format!(
+                "run index {} out of range at {}",
+                idx, seg.path
+            )));
         }
-        
+
         let child_idx = matching_indices[idx - 1];
         let run = &parent.children[child_idx];
-        
+
         let start = seg.start;
         let end = seg.end;
-        
+
         let new_runs = match (start, end) {
             (None, None) => {
                 let mut new_run = run.clone();
-                new_run.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                new_run
+                    .children
+                    .retain(|c| c.element_type != WordElementType::RunProperties);
                 if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
                     new_run.children.insert(0, new_rpr);
                 }
@@ -490,7 +579,8 @@ fn apply_docx_range_highlights(
                     result.push(l);
                 }
                 if let Some(mut r) = right {
-                    r.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                    r.children
+                        .retain(|c| c.element_type != WordElementType::RunProperties);
                     if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
                         r.children.insert(0, new_rpr);
                     }
@@ -502,7 +592,8 @@ fn apply_docx_range_highlights(
                 let (left, right) = crate::helpers::split_run_at_offset(run, e);
                 let mut result = Vec::new();
                 if let Some(mut l) = left {
-                    l.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                    l.children
+                        .retain(|c| c.element_type != WordElementType::RunProperties);
                     if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
                         l.children.insert(0, new_rpr);
                     }
@@ -523,7 +614,8 @@ fn apply_docx_range_highlights(
                     let local_e = e.saturating_sub(s);
                     let (mid, right) = crate::helpers::split_run_at_offset(&r, local_e);
                     if let Some(mut m) = mid {
-                        m.children.retain(|c| c.element_type != WordElementType::RunProperties);
+                        m.children
+                            .retain(|c| c.element_type != WordElementType::RunProperties);
                         if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
                             m.children.insert(0, new_rpr);
                         }
@@ -536,17 +628,17 @@ fn apply_docx_range_highlights(
                 result
             }
         };
-        
+
         parent.children.splice(child_idx..=child_idx, new_runs);
         // Removed modified path push
     }
-    
+
     for (key, _) in properties {
         if !matches!(key.as_str(), "range_paths" | "bgColor" | "highlight" | "bg") {
             unsupported.push(key.clone());
         }
     }
-    
+
     Ok(unsupported)
 }
 
@@ -570,7 +662,9 @@ fn build_node_from_roxmltree(node: roxmltree::Node) -> WordNode {
 
     let element_type = if ns == W_NS || ns.is_empty() {
         WordElementType::from_local_name(local_name)
-    } else if local_name == "inline" && ns.starts_with("http://schemas.openxmlformats.org/drawingml") {
+    } else if local_name == "inline"
+        && ns.starts_with("http://schemas.openxmlformats.org/drawingml")
+    {
         WordElementType::InlineImage
     } else {
         WordElementType::Unknown(local_name.to_string())
@@ -596,8 +690,14 @@ fn build_node_from_roxmltree(node: roxmltree::Node) -> WordNode {
     word_node.attributes = attrs;
 
     // For w:t and delText, store text directly and clear children
-    if element_type == WordElementType::Text || element_type == WordElementType::Unknown("delText".into()) {
-        word_node.text_content = if text_content.is_empty() { None } else { Some(text_content) };
+    if element_type == WordElementType::Text
+        || element_type == WordElementType::Unknown("delText".into())
+    {
+        word_node.text_content = if text_content.is_empty() {
+            None
+        } else {
+            Some(text_content)
+        };
         word_node.children = Vec::new();
         if word_node.attributes.get("xml:space").map(|s| s.as_str()) == Some("preserve") {
             word_node.preserve_space = true;
@@ -614,7 +714,8 @@ fn build_node_from_roxmltree(node: roxmltree::Node) -> WordNode {
 // ============================================================
 
 fn serialize_dom(dom: &WordDom) -> String {
-    let mut output = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
+    let mut output =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
     serialize_node_to_string(&mut output, &dom.root, true);
     output
 }
@@ -628,8 +729,12 @@ fn serialize_node_to_string(output: &mut String, node: &WordNode, is_root: bool)
     };
 
     // w:t and w:delText: text element
-    if node.element_type == WordElementType::Text || node.element_type == WordElementType::Unknown("delText".into()) {
-        let space_attr = if node.preserve_space || node.attributes.get("xml:space").map(|s| s.as_str()) == Some("preserve") {
+    if node.element_type == WordElementType::Text
+        || node.element_type == WordElementType::Unknown("delText".into())
+    {
+        let space_attr = if node.preserve_space
+            || node.attributes.get("xml:space").map(|s| s.as_str()) == Some("preserve")
+        {
             " xml:space=\"preserve\""
         } else {
             ""
@@ -645,12 +750,20 @@ fn serialize_node_to_string(output: &mut String, node: &WordNode, is_root: bool)
     // Build attribute string
     let mut attr_str = String::new();
     if is_root && node.element_type == WordElementType::Document {
-        attr_str.push_str(" xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"");
-        attr_str.push_str(" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"");
-        attr_str.push_str(" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"");
+        attr_str
+            .push_str(" xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"");
+        attr_str.push_str(
+            " xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"",
+        );
+        attr_str
+            .push_str(" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"");
     }
     for (key, val) in &node.attributes {
-        attr_str.push_str(&format!(" {}=\"{}\"", escape_xml_text(key), escape_xml_text(val)));
+        attr_str.push_str(&format!(
+            " {}=\"{}\"",
+            escape_xml_text(key),
+            escape_xml_text(val)
+        ));
     }
 
     if node.children.is_empty() && node.text_content.is_none() {

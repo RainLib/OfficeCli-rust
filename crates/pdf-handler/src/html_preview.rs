@@ -194,7 +194,10 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
                 }
             });
 
-            let bg_style_str = bg_color_style.as_ref().map(|bg| format!("background-color:{};", bg)).unwrap_or_default();
+            let bg_style_str = bg_color_style
+                .as_ref()
+                .map(|bg| format!("background-color:{};", bg))
+                .unwrap_or_default();
 
             // Map font resources to standard styles
             let mut font_family = "sans-serif".to_string();
@@ -233,20 +236,39 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
     if let Some(&page_id) = pages.get(&(page_num as u32)) {
         if let Ok(page_dict) = reader.document().get_dictionary(page_id) {
             if let Ok(annots_obj) = page_dict.get(b"Annots") {
-                if let Ok(lopdf::Object::Array(annots_arr)) = reader.document().dereference(annots_obj).map(|(_, o)| o) {
+                if let Ok(lopdf::Object::Array(annots_arr)) =
+                    reader.document().dereference(annots_obj).map(|(_, o)| o)
+                {
                     for annot_ref in annots_arr {
-                        if let Ok((_, lopdf::Object::Dictionary(annot_dict))) = reader.document().dereference(annot_ref) {
-                            if let Ok(subtype) = annot_dict.get(b"Subtype").and_then(|v| v.as_name_str()) {
+                        if let Ok((_, lopdf::Object::Dictionary(annot_dict))) =
+                            reader.document().dereference(annot_ref)
+                        {
+                            if let Ok(subtype) =
+                                annot_dict.get(b"Subtype").and_then(|v| v.as_name_str())
+                            {
                                 if subtype == "Highlight" {
                                     // Extract color /C
                                     let mut r = 255;
                                     let mut g = 255;
                                     let mut b = 0;
-                                    if let Ok(lopdf::Object::Array(c_arr)) = annot_dict.get(b"C").and_then(|o| reader.document().dereference(o).map(|(_, val)| val)) {
+                                    if let Ok(lopdf::Object::Array(c_arr)) =
+                                        annot_dict.get(b"C").and_then(|o| {
+                                            reader.document().dereference(o).map(|(_, val)| val)
+                                        })
+                                    {
                                         if c_arr.len() >= 3 {
-                                            let c_r = c_arr[0].as_float().or_else(|_| c_arr[0].as_i64().map(|x| x as f32)).unwrap_or(1.0);
-                                            let c_g = c_arr[1].as_float().or_else(|_| c_arr[1].as_i64().map(|x| x as f32)).unwrap_or(1.0);
-                                            let c_b = c_arr[2].as_float().or_else(|_| c_arr[2].as_i64().map(|x| x as f32)).unwrap_or(0.0);
+                                            let c_r = c_arr[0]
+                                                .as_float()
+                                                .or_else(|_| c_arr[0].as_i64().map(|x| x as f32))
+                                                .unwrap_or(1.0);
+                                            let c_g = c_arr[1]
+                                                .as_float()
+                                                .or_else(|_| c_arr[1].as_i64().map(|x| x as f32))
+                                                .unwrap_or(1.0);
+                                            let c_b = c_arr[2]
+                                                .as_float()
+                                                .or_else(|_| c_arr[2].as_i64().map(|x| x as f32))
+                                                .unwrap_or(0.0);
                                             r = (c_r * 255.0).clamp(0.0, 255.0) as u8;
                                             g = (c_g * 255.0).clamp(0.0, 255.0) as u8;
                                             b = (c_b * 255.0).clamp(0.0, 255.0) as u8;
@@ -254,17 +276,59 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
                                     }
 
                                     let mut highlight_rects = Vec::new();
-                                    if let Ok(lopdf::Object::Array(quads)) = annot_dict.get(b"QuadPoints").and_then(|o| reader.document().dereference(o).map(|(_, val)| val)) {
+                                    if let Ok(lopdf::Object::Array(quads)) =
+                                        annot_dict.get(b"QuadPoints").and_then(|o| {
+                                            reader.document().dereference(o).map(|(_, val)| val)
+                                        })
+                                    {
                                         let mut idx = 0;
                                         while idx + 7 < quads.len() {
-                                            let x1 = quads[idx].as_float().or_else(|_| quads[idx].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                            let y1 = quads[idx+1].as_float().or_else(|_| quads[idx+1].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                            let x2 = quads[idx+2].as_float().or_else(|_| quads[idx+2].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                            let y2 = quads[idx+3].as_float().or_else(|_| quads[idx+3].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                            let x3 = quads[idx+4].as_float().or_else(|_| quads[idx+4].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                            let y3 = quads[idx+5].as_float().or_else(|_| quads[idx+5].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                            let x4 = quads[idx+6].as_float().or_else(|_| quads[idx+6].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                            let y4 = quads[idx+7].as_float().or_else(|_| quads[idx+7].as_i64().map(|x| x as f32)).unwrap_or(0.0);
+                                            let x1 = quads[idx]
+                                                .as_float()
+                                                .or_else(|_| quads[idx].as_i64().map(|x| x as f32))
+                                                .unwrap_or(0.0);
+                                            let y1 = quads[idx + 1]
+                                                .as_float()
+                                                .or_else(|_| {
+                                                    quads[idx + 1].as_i64().map(|x| x as f32)
+                                                })
+                                                .unwrap_or(0.0);
+                                            let x2 = quads[idx + 2]
+                                                .as_float()
+                                                .or_else(|_| {
+                                                    quads[idx + 2].as_i64().map(|x| x as f32)
+                                                })
+                                                .unwrap_or(0.0);
+                                            let y2 = quads[idx + 3]
+                                                .as_float()
+                                                .or_else(|_| {
+                                                    quads[idx + 3].as_i64().map(|x| x as f32)
+                                                })
+                                                .unwrap_or(0.0);
+                                            let x3 = quads[idx + 4]
+                                                .as_float()
+                                                .or_else(|_| {
+                                                    quads[idx + 4].as_i64().map(|x| x as f32)
+                                                })
+                                                .unwrap_or(0.0);
+                                            let y3 = quads[idx + 5]
+                                                .as_float()
+                                                .or_else(|_| {
+                                                    quads[idx + 5].as_i64().map(|x| x as f32)
+                                                })
+                                                .unwrap_or(0.0);
+                                            let x4 = quads[idx + 6]
+                                                .as_float()
+                                                .or_else(|_| {
+                                                    quads[idx + 6].as_i64().map(|x| x as f32)
+                                                })
+                                                .unwrap_or(0.0);
+                                            let y4 = quads[idx + 7]
+                                                .as_float()
+                                                .or_else(|_| {
+                                                    quads[idx + 7].as_i64().map(|x| x as f32)
+                                                })
+                                                .unwrap_or(0.0);
 
                                             let x = x1.min(x2).min(x3).min(x4);
                                             let y = y1.min(y2).min(y3).min(y4);
@@ -277,12 +341,36 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
                                     }
 
                                     if highlight_rects.is_empty() {
-                                        if let Ok(lopdf::Object::Array(rect_arr)) = annot_dict.get(b"Rect").and_then(|o| reader.document().dereference(o).map(|(_, val)| val)) {
+                                        if let Ok(lopdf::Object::Array(rect_arr)) =
+                                            annot_dict.get(b"Rect").and_then(|o| {
+                                                reader.document().dereference(o).map(|(_, val)| val)
+                                            })
+                                        {
                                             if rect_arr.len() == 4 {
-                                                let x0 = rect_arr[0].as_float().or_else(|_| rect_arr[0].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                                let y0 = rect_arr[1].as_float().or_else(|_| rect_arr[1].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                                let x1 = rect_arr[2].as_float().or_else(|_| rect_arr[2].as_i64().map(|x| x as f32)).unwrap_or(0.0);
-                                                let y1 = rect_arr[3].as_float().or_else(|_| rect_arr[3].as_i64().map(|x| x as f32)).unwrap_or(0.0);
+                                                let x0 = rect_arr[0]
+                                                    .as_float()
+                                                    .or_else(|_| {
+                                                        rect_arr[0].as_i64().map(|x| x as f32)
+                                                    })
+                                                    .unwrap_or(0.0);
+                                                let y0 = rect_arr[1]
+                                                    .as_float()
+                                                    .or_else(|_| {
+                                                        rect_arr[1].as_i64().map(|x| x as f32)
+                                                    })
+                                                    .unwrap_or(0.0);
+                                                let x1 = rect_arr[2]
+                                                    .as_float()
+                                                    .or_else(|_| {
+                                                        rect_arr[2].as_i64().map(|x| x as f32)
+                                                    })
+                                                    .unwrap_or(0.0);
+                                                let y1 = rect_arr[3]
+                                                    .as_float()
+                                                    .or_else(|_| {
+                                                        rect_arr[3].as_i64().map(|x| x as f32)
+                                                    })
+                                                    .unwrap_or(0.0);
                                                 highlight_rects.push((x0, y0, x1 - x0, y1 - y0));
                                             }
                                         }

@@ -1,5 +1,5 @@
-use handler_common::{HandlerError, OutputFormat, InsertPosition};
 use clap::Args;
+use handler_common::{HandlerError, InsertPosition, OutputFormat};
 use std::collections::HashMap;
 
 /// Insert a new element (paragraph, table, slide, image) into the document
@@ -58,11 +58,15 @@ pub fn parse_position(input: Option<&str>) -> InsertPosition {
 }
 
 fn parse_properties(props: &[String]) -> HashMap<String, String> {
-    props.iter()
+    props
+        .iter()
         .filter_map(|p| {
             let parts: Vec<&str> = p.splitn(2, '=').collect();
-            if parts.len() == 2 { Some((parts[0].to_string(), parts[1].to_string())) }
-            else { None }
+            if parts.len() == 2 {
+                Some((parts[0].to_string(), parts[1].to_string()))
+            } else {
+                None
+            }
         })
         .collect()
 }

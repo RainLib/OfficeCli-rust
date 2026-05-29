@@ -4,7 +4,8 @@ use handler_common::HandlerError;
 /// Resolve a paraId-based path to an index-based path.
 /// E.g., given "p[@paraId=12345678]" find the paragraph index and return "/body/p[3]".
 pub fn resolve_para_id_path(dom: &WordDom, para_id: &str) -> Result<String, HandlerError> {
-    let body = dom.body()
+    let body = dom
+        .body()
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
     let mut para_idx = 0;
@@ -17,9 +18,10 @@ pub fn resolve_para_id_path(dom: &WordDom, para_id: &str) -> Result<String, Hand
         }
     }
 
-    Err(HandlerError::PathNotFound(
-        format!("paragraph with paraId={} not found", para_id),
-    ))
+    Err(HandlerError::PathNotFound(format!(
+        "paragraph with paraId={} not found",
+        para_id
+    )))
 }
 
 /// Find all paragraphs that have paraId attributes.

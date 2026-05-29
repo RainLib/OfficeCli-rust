@@ -85,7 +85,9 @@ impl TextOffsetMap {
         if offset >= self.full_text.len() {
             return None;
         }
-        self.spans.iter().find(|span| offset >= span.start && offset < span.end)
+        self.spans
+            .iter()
+            .find(|span| offset >= span.start && offset < span.end)
     }
 
     /// Find all spans whose path matches the given path prefix.

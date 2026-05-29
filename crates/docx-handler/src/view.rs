@@ -1,5 +1,5 @@
-use handler_common::{DocumentIssue, HandlerError, IssueSeverity, ViewOptions};
 use crate::dom_types::{WordDom, WordElementType};
+use handler_common::{DocumentIssue, HandlerError, IssueSeverity, ViewOptions};
 
 /// Render the document as plain text.
 /// Each paragraph on its own line. Tables are rendered with tab-separated cells.
@@ -13,7 +13,8 @@ pub fn view_as_text(dom: &WordDom, opts: ViewOptions) -> Result<String, HandlerE
 ///   /body/p[1]: Hello world
 ///   /body/p[2]: Second paragraph
 pub fn view_as_annotated(dom: &WordDom, opts: ViewOptions) -> Result<String, HandlerError> {
-    let body = dom.body()
+    let body = dom
+        .body()
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
     let mut result = String::new();
@@ -79,7 +80,11 @@ pub fn view_as_outline(dom: &WordDom) -> Result<String, HandlerError> {
 
     let mut result = String::new();
     for entry in &outline {
-        let indent: usize = if entry.level == 0 { 0 } else { (entry.level as usize - 1) * 2 };
+        let indent: usize = if entry.level == 0 {
+            0
+        } else {
+            (entry.level as usize - 1) * 2
+        };
         if entry.level == 0 {
             result.push_str("# ");
         } else {
@@ -127,8 +132,12 @@ pub fn view_as_stats_json(dom: &WordDom) -> Result<serde_json::Value, HandlerErr
 }
 
 /// Render annotated view as JSON.
-pub fn view_as_text_json(dom: &WordDom, opts: ViewOptions) -> Result<serde_json::Value, HandlerError> {
-    let body = dom.body()
+pub fn view_as_text_json(
+    dom: &WordDom,
+    opts: ViewOptions,
+) -> Result<serde_json::Value, HandlerError> {
+    let body = dom
+        .body()
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
     let mut paragraphs = Vec::new();
@@ -194,13 +203,16 @@ pub fn view_as_text_json(dom: &WordDom, opts: ViewOptions) -> Result<serde_json:
 /// Render outline as JSON.
 pub fn view_as_outline_json(dom: &WordDom) -> Result<serde_json::Value, HandlerError> {
     let outline = dom.outline();
-    let entries: Vec<serde_json::Value> = outline.iter().map(|e| {
-        serde_json::json!({
-            "level": e.level,
-            "text": e.text,
-            "path": format!("/body/p[{}]", e.para_index + 1),
+    let entries: Vec<serde_json::Value> = outline
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "level": e.level,
+                "text": e.text,
+                "path": format!("/body/p[{}]", e.para_index + 1),
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(serde_json::json!({
         "format": "docx",
@@ -209,7 +221,11 @@ pub fn view_as_outline_json(dom: &WordDom) -> Result<serde_json::Value, HandlerE
 }
 
 /// Check for common document issues.
-pub fn view_as_issues(dom: &WordDom, issue_type: Option<&str>, limit: Option<usize>) -> Vec<DocumentIssue> {
+pub fn view_as_issues(
+    dom: &WordDom,
+    issue_type: Option<&str>,
+    limit: Option<usize>,
+) -> Vec<DocumentIssue> {
     let mut issues = Vec::new();
     let max = limit.unwrap_or(50);
 
@@ -225,7 +241,9 @@ pub fn view_as_issues(dom: &WordDom, issue_type: Option<&str>, limit: Option<usi
                     description: "Empty paragraph".to_string(),
                     path: Some(format!("/body/p[{}]", i + 1)),
                 });
-                if issues.len() >= max { return issues; }
+                if issues.len() >= max {
+                    return issues;
+                }
             }
         }
     }
@@ -241,7 +259,9 @@ pub fn view_as_issues(dom: &WordDom, issue_type: Option<&str>, limit: Option<usi
                     description: format!("Paragraph has {} words (over 200)", word_count),
                     path: Some(format!("/body/p[{}]", i + 1)),
                 });
-                if issues.len() >= max { return issues; }
+                if issues.len() >= max {
+                    return issues;
+                }
             }
         }
     }
@@ -257,7 +277,9 @@ pub fn view_as_issues(dom: &WordDom, issue_type: Option<&str>, limit: Option<usi
                     description: "Paragraph contains double spaces".to_string(),
                     path: Some(format!("/body/p[{}]", i + 1)),
                 });
-                if issues.len() >= max { return issues; }
+                if issues.len() >= max {
+                    return issues;
+                }
             }
         }
     }

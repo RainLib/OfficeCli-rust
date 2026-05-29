@@ -107,7 +107,11 @@ impl ContentTypes {
                                 .find(|a| a.key.local_name().as_ref() == b"ContentType")
                                 .and_then(|a| String::from_utf8(a.value.to_vec()).ok());
                             if let (Some(pn), Some(ct)) = (pn, ct) {
-                                let pn = if pn.starts_with('/') { pn[1..].to_string() } else { pn };
+                                let pn = if pn.starts_with('/') {
+                                    pn[1..].to_string()
+                                } else {
+                                    pn
+                                };
                                 overrides.insert(pn, ct);
                             }
                         }
@@ -121,7 +125,10 @@ impl ContentTypes {
             buf.clear();
         }
 
-        Ok(Self { defaults, overrides })
+        Ok(Self {
+            defaults,
+            overrides,
+        })
     }
 
     /// Get content type for a part by its path (checks overrides first, then defaults).

@@ -1,16 +1,20 @@
-use handler_common::{DocumentNode, HandlerError, Selector};
 use crate::dom_types::{WordDom, WordElementType};
+use handler_common::{DocumentNode, HandlerError, Selector};
 
 /// Query the document DOM using a CSS-like selector.
 /// Supports:
 /// - Element type: "p" finds all paragraphs
 /// - Attribute filter: "p[@style=Normal]" finds paragraphs with Normal style
 /// - Style shorthand: "r[bold]" finds bold runs
-pub fn query_elements(dom: &WordDom, selector_str: &str) -> Result<Vec<DocumentNode>, HandlerError> {
+pub fn query_elements(
+    dom: &WordDom,
+    selector_str: &str,
+) -> Result<Vec<DocumentNode>, HandlerError> {
     let selector = Selector::parse(selector_str)
         .map_err(|e| HandlerError::InvalidArgument(format!("invalid selector: {}", e)))?;
 
-    let body = dom.body()
+    let body = dom
+        .body()
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
     let mut results = Vec::new();
@@ -36,7 +40,8 @@ fn walk_and_match(
     }
 
     // Recurse into children (with path indexing)
-    let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for child in &node.children {
         let name = child.element_type.to_path_name();
@@ -165,13 +170,17 @@ fn build_document_node(node: &crate::dom_types::WordNode, path: &str) -> Documen
     };
 
     let style = node.heading_level().map(|l| {
-        if l == 0 { "Title".to_string() } else { format!("Heading{}", l) }
+        if l == 0 {
+            "Title".to_string()
+        } else {
+            format!("Heading{}", l)
+        }
     });
 
     let child_count = node.children.len();
 
-    let mut doc_node = DocumentNode::new(path, element_type)
-        .with_preview(preview.unwrap_or_default());
+    let mut doc_node =
+        DocumentNode::new(path, element_type).with_preview(preview.unwrap_or_default());
 
     if !text.is_empty() {
         doc_node = doc_node.with_text(&text);

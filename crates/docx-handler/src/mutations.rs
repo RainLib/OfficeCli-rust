@@ -1,8 +1,8 @@
+use crate::dom_types::{WordDom, WordElementType, WordNode};
+use crate::helpers::{build_paragraph_properties, build_run_properties};
+use crate::navigation::{navigate_to_element, navigate_to_element_mut, parse_path};
 use handler_common::{HandlerError, InsertPosition};
 use std::collections::HashMap;
-use crate::dom_types::{WordDom, WordNode, WordElementType};
-use crate::navigation::{parse_path, navigate_to_element, navigate_to_element_mut};
-use crate::helpers::{build_run_properties, build_paragraph_properties};
 
 /// Set properties on an element at a given path.
 /// Supported property changes:
@@ -32,9 +32,10 @@ pub fn set_properties(
         "tbl" => set_table_properties(dom, path, properties),
         "tr" => set_row_properties(dom, path, properties),
         "tc" => set_cell_properties(dom, path, properties),
-        other => Err(HandlerError::UnsupportedProperty(
-            format!("cannot set properties on element type: {}", other),
-        )),
+        other => Err(HandlerError::UnsupportedProperty(format!(
+            "cannot set properties on element type: {}",
+            other
+        ))),
     }
 }
 
@@ -52,15 +53,23 @@ fn set_paragraph_properties(
     }
 
     // Build or replace paragraph properties
-    let ppr_props: HashMap<String, String> = properties.iter()
-        .filter(|(k, _)| k.as_str() != "text" && k.starts_with("style") || k.starts_with("alignment") ||
-                 k.starts_with("indent") || k.starts_with("spacing") || k.as_str() == "pStyle" || k.as_str() == "jc")
+    let ppr_props: HashMap<String, String> = properties
+        .iter()
+        .filter(|(k, _)| {
+            k.as_str() != "text" && k.starts_with("style")
+                || k.starts_with("alignment")
+                || k.starts_with("indent")
+                || k.starts_with("spacing")
+                || k.as_str() == "pStyle"
+                || k.as_str() == "jc"
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     if !ppr_props.is_empty() {
         // Remove existing pPr if present
-        para.children.retain(|c| c.element_type != WordElementType::ParagraphProperties);
+        para.children
+            .retain(|c| c.element_type != WordElementType::ParagraphProperties);
 
         // Add new pPr
         if let Some(new_ppr) = build_paragraph_properties(&ppr_props) {
@@ -76,24 +85,24 @@ fn set_paragraph_properties(
 fn set_paragraph_text(para: &mut WordNode, new_text: &str) {
     // Remove all existing runs (and hyperlinks that contain runs)
     para.children.retain(|c| {
-        c.element_type != WordElementType::Run &&
-        c.element_type != WordElementType::Hyperlink &&
-        c.element_type != WordElementType::BookmarkStart &&
-        c.element_type != WordElementType::BookmarkEnd
+        c.element_type != WordElementType::Run
+            && c.element_type != WordElementType::Hyperlink
+            && c.element_type != WordElementType::BookmarkStart
+            && c.element_type != WordElementType::BookmarkEnd
     });
 
     // Add a new run with the text
     let text_node = if new_text.starts_with(' ') || new_text.ends_with(' ') {
         let mut tn = WordNode::new(WordElementType::Text).with_text(new_text);
-        tn.attributes.insert("xml:space".to_string(), "preserve".to_string());
+        tn.attributes
+            .insert("xml:space".to_string(), "preserve".to_string());
         tn.preserve_space = true;
         tn
     } else {
         WordNode::new(WordElementType::Text).with_text(new_text)
     };
 
-    let run = WordNode::new(WordElementType::Run)
-        .with_children(vec![text_node]);
+    let run = WordNode::new(WordElementType::Run).with_children(vec![text_node]);
 
     para.children.push(run);
 }
@@ -109,7 +118,9 @@ fn set_run_properties(
     // Check if text property is set
     if let Some(new_text) = properties.get("text") {
         // Replace the w:t content
-        let text_children: Vec<usize> = run.children.iter()
+        let text_children: Vec<usize> = run
+            .children
+            .iter()
             .enumerate()
             .filter(|(_, c)| c.element_type == WordElementType::Text)
             .map(|(i, _)| i)
@@ -119,7 +130,8 @@ fn set_run_properties(
             // Add a new w:t element
             let text_node = if new_text.starts_with(' ') || new_text.ends_with(' ') {
                 let mut tn = WordNode::new(WordElementType::Text).with_text(new_text);
-                tn.attributes.insert("xml:space".to_string(), "preserve".to_string());
+                tn.attributes
+                    .insert("xml:space".to_string(), "preserve".to_string());
                 tn.preserve_space = true;
                 tn
             } else {
@@ -131,7 +143,9 @@ fn set_run_properties(
             for idx in text_children {
                 run.children[idx].text_content = Some(new_text.to_string());
                 if new_text.starts_with(' ') || new_text.ends_with(' ') {
-                    run.children[idx].attributes.insert("xml:space".to_string(), "preserve".to_string());
+                    run.children[idx]
+                        .attributes
+                        .insert("xml:space".to_string(), "preserve".to_string());
                     run.children[idx].preserve_space = true;
                 }
             }
@@ -139,14 +153,16 @@ fn set_run_properties(
     }
 
     // Build or replace run properties
-    let run_props: HashMap<String, String> = properties.iter()
+    let run_props: HashMap<String, String> = properties
+        .iter()
         .filter(|(k, _)| k.as_str() != "text")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     if !run_props.is_empty() {
         // Remove existing rPr
-        run.children.retain(|c| c.element_type != WordElementType::RunProperties);
+        run.children
+            .retain(|c| c.element_type != WordElementType::RunProperties);
 
         // Add new rPr
         if let Some(new_rpr) = build_run_properties(&run_props) {
@@ -168,7 +184,9 @@ fn set_text_content(
         let text_node = navigate_to_element_mut(dom, path)?;
         text_node.text_content = Some(new_text.to_string());
         if new_text.starts_with(' ') || new_text.ends_with(' ') {
-            text_node.attributes.insert("xml:space".to_string(), "preserve".to_string());
+            text_node
+                .attributes
+                .insert("xml:space".to_string(), "preserve".to_string());
             text_node.preserve_space = true;
         }
         Ok(vec![path.to_string()])
@@ -187,7 +205,9 @@ fn set_table_properties(
 ) -> Result<Vec<String>, HandlerError> {
     let table = navigate_to_element_mut(dom, path)?;
     // Remove existing tblPr
-    table.children.retain(|c| c.element_type != WordElementType::TableProperties);
+    table
+        .children
+        .retain(|c| c.element_type != WordElementType::TableProperties);
 
     let mut tbl_pr = WordNode::new(WordElementType::TableProperties);
     let mut children = Vec::new();
@@ -225,15 +245,16 @@ fn set_row_properties(
 ) -> Result<Vec<String>, HandlerError> {
     // Minimal: mostly height
     let row = navigate_to_element_mut(dom, path)?;
-    row.children.retain(|c| c.element_type != WordElementType::TableRowProperties);
+    row.children
+        .retain(|c| c.element_type != WordElementType::TableRowProperties);
 
     if let Some(height) = properties.get("height") {
-        let tr_pr = WordNode::new(WordElementType::TableRowProperties)
-            .with_children(vec![
-                WordNode::new(WordElementType::Unknown("trHeight".to_string()))
-                    .with_attribute("val", height.as_str())
-                    .with_attribute("hRule", "atLeast"),
-            ]);
+        let tr_pr =
+            WordNode::new(WordElementType::TableRowProperties).with_children(vec![WordNode::new(
+                WordElementType::Unknown("trHeight".to_string()),
+            )
+            .with_attribute("val", height.as_str())
+            .with_attribute("hRule", "atLeast")]);
         row.children.insert(0, tr_pr);
     }
 
@@ -260,13 +281,15 @@ fn set_cell_properties(
     }
 
     // Cell width
-    let cell_props: HashMap<String, String> = properties.iter()
+    let cell_props: HashMap<String, String> = properties
+        .iter()
         .filter(|(k, _)| k.as_str() != "text")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     if !cell_props.is_empty() {
-        cell.children.retain(|c| c.element_type != WordElementType::TableCellProperties);
+        cell.children
+            .retain(|c| c.element_type != WordElementType::TableCellProperties);
 
         let mut tc_pr = WordNode::new(WordElementType::TableCellProperties);
         let mut children = Vec::new();
@@ -292,9 +315,10 @@ fn set_cell_properties(
 pub fn remove_element(dom: &mut WordDom, path: &str) -> Result<Option<String>, HandlerError> {
     let segments = parse_path(path)?;
     if segments.len() < 2 {
-        return Err(HandlerError::InvalidPath(
-            format!("cannot remove root element: {}", path),
-        ));
+        return Err(HandlerError::InvalidPath(format!(
+            "cannot remove root element: {}",
+            path
+        )));
     }
 
     // Navigate to parent
@@ -307,24 +331,30 @@ pub fn remove_element(dom: &mut WordDom, path: &str) -> Result<Option<String>, H
     let target_type = resolve_element_type_from_name(&last_seg.name);
 
     // Find matching children and their indices
-    let matching_indices: Vec<usize> = parent.children.iter()
+    let matching_indices: Vec<usize> = parent
+        .children
+        .iter()
         .enumerate()
-        .filter(|(_, c)| c.element_type == target_type ||
-            matches!(&c.element_type, WordElementType::Unknown(ref n) if n == &last_seg.name))
+        .filter(|(_, c)| {
+            c.element_type == target_type
+                || matches!(&c.element_type, WordElementType::Unknown(ref n) if n == &last_seg.name)
+        })
         .map(|(i, _)| i)
         .collect();
 
     if matching_indices.is_empty() {
-        return Err(HandlerError::PathNotFound(
-            format!("no {} children at {}", last_seg.name, parent_path_str),
-        ));
+        return Err(HandlerError::PathNotFound(format!(
+            "no {} children at {}",
+            last_seg.name, parent_path_str
+        )));
     }
 
     let idx = last_seg.index.unwrap_or(1);
     if idx == 0 || idx > matching_indices.len() {
-        return Err(HandlerError::PathNotFound(
-            format!("index {} out of range at {}", idx, path),
-        ));
+        return Err(HandlerError::PathNotFound(format!(
+            "index {} out of range at {}",
+            idx, path
+        )));
     }
 
     let child_idx = matching_indices[idx - 1];

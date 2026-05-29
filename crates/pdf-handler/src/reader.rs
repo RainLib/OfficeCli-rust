@@ -1,6 +1,6 @@
+use crate::content_stream::{parse_page_content_stream, ParsedContentStream};
 use handler_common::HandlerError;
 use lopdf::Document as LopdfDocument;
-use crate::content_stream::{ParsedContentStream, parse_page_content_stream};
 
 /// PDF document reader using lopdf.
 pub struct PdfReader {
@@ -16,13 +16,25 @@ impl PdfReader {
             .map_err(|e| HandlerError::OpenError(format!("failed to open PDF: {}", e)))?;
         let _ = doc.decompress();
         let page_count = Self::count_pages(&doc);
-        Ok(Self { doc, page_count, file_path: path.to_string() })
+        Ok(Self {
+            doc,
+            page_count,
+            file_path: path.to_string(),
+        })
     }
 
-    pub fn page_count(&self) -> usize { self.page_count }
-    pub fn document(&self) -> &LopdfDocument { &self.doc }
-    pub fn document_mut(&mut self) -> &mut LopdfDocument { &mut self.doc }
-    pub fn file_path(&self) -> &str { &self.file_path }
+    pub fn page_count(&self) -> usize {
+        self.page_count
+    }
+    pub fn document(&self) -> &LopdfDocument {
+        &self.doc
+    }
+    pub fn document_mut(&mut self) -> &mut LopdfDocument {
+        &mut self.doc
+    }
+    pub fn file_path(&self) -> &str {
+        &self.file_path
+    }
 
     /// Recount pages from the document (e.g. after deleting a page).
     pub fn recount_pages(&mut self) {
@@ -31,7 +43,11 @@ impl PdfReader {
 
     /// Create a fallback reader with an empty document (used when re-loading fails).
     pub fn fallback(page_count: usize, file_path: &str) -> Self {
-        Self { doc: LopdfDocument::new(), page_count, file_path: file_path.to_string() }
+        Self {
+            doc: LopdfDocument::new(),
+            page_count,
+            file_path: file_path.to_string(),
+        }
     }
 
     /// Extract text from all pages.
@@ -39,7 +55,9 @@ impl PdfReader {
         let mut full_text = String::new();
         for i in 1..=self.page_count {
             if let Some(page_text) = self.extract_page_text(i) {
-                if !full_text.is_empty() { full_text.push('\n'); }
+                if !full_text.is_empty() {
+                    full_text.push('\n');
+                }
                 full_text.push_str(&page_text);
             }
         }

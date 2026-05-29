@@ -11,7 +11,10 @@ pub struct CellRef {
 impl CellRef {
     /// Parse a cell reference string like "A1" into column + row numbers.
     pub fn parse(ref_str: &str) -> Option<Self> {
-        let col_part: String = ref_str.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        let col_part: String = ref_str
+            .chars()
+            .filter(|c| c.is_ascii_alphabetic())
+            .collect();
         let row_part: String = ref_str.chars().filter(|c| c.is_ascii_digit()).collect();
 
         if col_part.is_empty() || row_part.is_empty() {

@@ -1,9 +1,14 @@
-use handler_common::{DocumentIssue, DocumentNode, HandlerError, IssueSeverity, ValidationError, ViewOptions};
-use crate::dom_types::{Slide, Shape};
-use crate::navigation::{build_presentation, find_slide, find_shape, find_paragraph};
+use crate::dom_types::{Shape, Slide};
+use crate::navigation::{build_presentation, find_paragraph, find_shape, find_slide};
+use handler_common::{
+    DocumentIssue, DocumentNode, HandlerError, IssueSeverity, ValidationError, ViewOptions,
+};
 
 /// ViewAsText: show all slide text content, similar to Word's view_as_text.
-pub fn view_as_text(package: &oxml::OxmlPackage, opts: &ViewOptions) -> Result<String, HandlerError> {
+pub fn view_as_text(
+    package: &oxml::OxmlPackage,
+    opts: &ViewOptions,
+) -> Result<String, HandlerError> {
     let pres = build_presentation(package)?;
     let mut lines = Vec::new();
 
@@ -31,7 +36,11 @@ pub fn view_as_outline(package: &oxml::OxmlPackage) -> Result<String, HandlerErr
 
     lines.push(format!("Presentation: {} slides", pres.slides.len()));
     for slide in &pres.slides {
-        lines.push(format!("  slide[{}]: {} shapes", slide.index, slide.shapes.len()));
+        lines.push(format!(
+            "  slide[{}]: {} shapes",
+            slide.index,
+            slide.shapes.len()
+        ));
         for (si, shape) in slide.shapes.iter().enumerate() {
             let shape_type = shape.placeholder_type.as_deref().unwrap_or("shape");
             let preview = if shape.text.chars().count() > 60 {
@@ -57,12 +66,18 @@ pub fn view_as_outline(package: &oxml::OxmlPackage) -> Result<String, HandlerErr
 }
 
 /// ViewAsAnnotated: show slide text with path annotations.
-pub fn view_as_annotated(package: &oxml::OxmlPackage, opts: &ViewOptions) -> Result<String, HandlerError> {
+pub fn view_as_annotated(
+    package: &oxml::OxmlPackage,
+    opts: &ViewOptions,
+) -> Result<String, HandlerError> {
     let pres = build_presentation(package)?;
     let mut lines = Vec::new();
 
     for slide in &pres.slides {
-        lines.push(format!("[/slide[{}]] --- Slide {} ---", slide.index, slide.index));
+        lines.push(format!(
+            "[/slide[{}]] --- Slide {} ---",
+            slide.index, slide.index
+        ));
         for (si, shape) in slide.shapes.iter().enumerate() {
             let label = match &shape.placeholder_type {
                 Some(pt) => format!("({}) ", pt),
@@ -70,7 +85,10 @@ pub fn view_as_annotated(package: &oxml::OxmlPackage, opts: &ViewOptions) -> Res
             };
             lines.push(format!(
                 "[/slide[{}]/shape[{}]] {}{}",
-                slide.index, si + 1, label, shape.text
+                slide.index,
+                si + 1,
+                label,
+                shape.text
             ));
         }
     }
@@ -104,7 +122,10 @@ pub fn view_as_stats(package: &oxml::OxmlPackage) -> Result<String, HandlerError
 }
 
 /// ViewAsTextJson: JSON output of slide text.
-pub fn view_as_text_json(package: &oxml::OxmlPackage, _opts: &ViewOptions) -> Result<serde_json::Value, HandlerError> {
+pub fn view_as_text_json(
+    package: &oxml::OxmlPackage,
+    _opts: &ViewOptions,
+) -> Result<serde_json::Value, HandlerError> {
     let pres = build_presentation(package)?;
     let mut slide_data = Vec::new();
 
@@ -131,7 +152,9 @@ pub fn view_as_text_json(package: &oxml::OxmlPackage, _opts: &ViewOptions) -> Re
 }
 
 /// ViewAsOutlineJson: JSON output of slide structure.
-pub fn view_as_outline_json(package: &oxml::OxmlPackage) -> Result<serde_json::Value, HandlerError> {
+pub fn view_as_outline_json(
+    package: &oxml::OxmlPackage,
+) -> Result<serde_json::Value, HandlerError> {
     let pres = build_presentation(package)?;
     let mut slide_data = Vec::new();
 
@@ -184,7 +207,11 @@ pub fn view_as_stats_json(package: &oxml::OxmlPackage) -> Result<serde_json::Val
 }
 
 /// Get: retrieve a node at the given path.
-pub fn get_node(package: &oxml::OxmlPackage, path: &str, depth: usize) -> Result<DocumentNode, HandlerError> {
+pub fn get_node(
+    package: &oxml::OxmlPackage,
+    path: &str,
+    depth: usize,
+) -> Result<DocumentNode, HandlerError> {
     let pres = build_presentation(package)?;
     let segments = crate::navigation::parse_path(path);
 
@@ -204,7 +231,10 @@ pub fn get_node(package: &oxml::OxmlPackage, path: &str, depth: usize) -> Result
     // First segment must be "slide[N]"
     let first = &segments[0];
     if first.name != "slide" {
-        return Err(HandlerError::InvalidPath(format!("expected 'slide' segment, got '{}'", first.name)));
+        return Err(HandlerError::InvalidPath(format!(
+            "expected 'slide' segment, got '{}'",
+            first.name
+        )));
     }
     let slide_idx = first.index.unwrap_or(1);
     let slide = find_slide(&pres, slide_idx)
@@ -219,11 +249,15 @@ pub fn get_node(package: &oxml::OxmlPackage, path: &str, depth: usize) -> Result
     // Second segment: "shape[M]"
     let second = &segments[1];
     if second.name != "shape" {
-        return Err(HandlerError::InvalidPath(format!("expected 'shape' segment, got '{}'", second.name)));
+        return Err(HandlerError::InvalidPath(format!(
+            "expected 'shape' segment, got '{}'",
+            second.name
+        )));
     }
     let shape_idx = second.index.unwrap_or(1);
-    let shape = find_shape(slide, shape_idx)
-        .ok_or_else(|| HandlerError::PathNotFound(format!("/slide[{}]/shape[{}]", slide_idx, shape_idx)))?;
+    let shape = find_shape(slide, shape_idx).ok_or_else(|| {
+        HandlerError::PathNotFound(format!("/slide[{}]/shape[{}]", slide_idx, shape_idx))
+    })?;
 
     if segments.len() == 2 {
         // Shape node
@@ -234,18 +268,27 @@ pub fn get_node(package: &oxml::OxmlPackage, path: &str, depth: usize) -> Result
     // Third segment: "paragraph[K]"
     let third = &segments[2];
     if third.name != "paragraph" {
-        return Err(HandlerError::InvalidPath(format!("expected 'paragraph' segment, got '{}'", third.name)));
+        return Err(HandlerError::InvalidPath(format!(
+            "expected 'paragraph' segment, got '{}'",
+            third.name
+        )));
     }
     let para_idx = third.index.unwrap_or(1);
-    let para = find_paragraph(shape, para_idx)
-        .ok_or_else(|| HandlerError::PathNotFound(
-            format!("/slide[{}]/shape[{}]/paragraph[{}]", slide_idx, shape_idx, para_idx)
-        ))?;
+    let para = find_paragraph(shape, para_idx).ok_or_else(|| {
+        HandlerError::PathNotFound(format!(
+            "/slide[{}]/shape[{}]/paragraph[{}]",
+            slide_idx, shape_idx, para_idx
+        ))
+    })?;
 
     let node = DocumentNode::new(
-        &format!("/slide[{}]/shape[{}]/paragraph[{}]", slide_idx, shape_idx, para_idx),
+        &format!(
+            "/slide[{}]/shape[{}]/paragraph[{}]",
+            slide_idx, shape_idx, para_idx
+        ),
         "paragraph",
-    ).with_text(&para.text);
+    )
+    .with_text(&para.text);
     Ok(node)
 }
 
@@ -259,14 +302,17 @@ pub fn set_shape_text(
 
     // We need at least /slide[N]/shape[M]
     if segments.len() < 2 {
-        return Err(HandlerError::InvalidPath("path must be /slide[N]/shape[M] or deeper".to_string()));
+        return Err(HandlerError::InvalidPath(
+            "path must be /slide[N]/shape[M] or deeper".to_string(),
+        ));
     }
 
     let slide_idx = segments[0].index.unwrap_or(1);
     let shape_idx = segments[1].index.unwrap_or(1);
 
     // Get the text to set
-    let new_text = properties.get("text")
+    let new_text = properties
+        .get("text")
         .ok_or_else(|| HandlerError::InvalidArgument("'text' property required".to_string()))?;
 
     // First, build the presentation to find the slide part path
@@ -275,14 +321,16 @@ pub fn set_shape_text(
         .ok_or_else(|| HandlerError::PathNotFound(format!("/slide[{}]", slide_idx)))?;
 
     // Read the slide XML
-    let slide_xml = package.read_part_xml(&slide.part_path)
+    let slide_xml = package
+        .read_part_xml(&slide.part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Modify the shape text using roxmltree + quick-xml writer
     let modified_xml = replace_shape_text_in_xml(&slide_xml, shape_idx, new_text)?;
 
     // Write the modified XML back
-    package.write_part_xml(&slide.part_path, &modified_xml)
+    package
+        .write_part_xml(&slide.part_path, &modified_xml)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     let mut unsupported = Vec::new();
@@ -295,7 +343,11 @@ pub fn set_shape_text(
 }
 
 /// Replace text in the Nth shape of a slide XML document.
-fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Result<String, HandlerError> {
+fn replace_shape_text_in_xml(
+    xml: &str,
+    shape_idx: usize,
+    new_text: &str,
+) -> Result<String, HandlerError> {
     // Parse the new text into paragraphs (split by newline)
     let new_paragraphs: Vec<&str> = new_text.split('\n').collect();
 
@@ -336,7 +388,9 @@ fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Res
                     in_tx_body = true;
                     tx_body_depth = 1;
                     // Write the <p:txBody> start tag
-                    writer.write_event(quick_xml::events::Event::Start(e.clone())).ok();
+                    writer
+                        .write_event(quick_xml::events::Event::Start(e.clone()))
+                        .ok();
                     // Write new paragraphs
                     for para_text in &new_paragraphs {
                         write_new_paragraph(&mut writer, para_text);
@@ -352,7 +406,9 @@ fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Res
                     continue;
                 }
 
-                writer.write_event(quick_xml::events::Event::Start(e.clone())).ok();
+                writer
+                    .write_event(quick_xml::events::Event::Start(e.clone()))
+                    .ok();
             }
             Ok(quick_xml::events::Event::End(e)) => {
                 let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
@@ -361,7 +417,9 @@ fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Res
                     tx_body_depth -= 1;
                     if local_name == "txBody" && tx_body_depth == 0 {
                         // End of txBody — write the closing tag and stop skipping
-                        writer.write_event(quick_xml::events::Event::End(e.clone())).ok();
+                        writer
+                            .write_event(quick_xml::events::Event::End(e.clone()))
+                            .ok();
                         in_tx_body = false;
                         skip_old_text = false;
                         continue;
@@ -370,7 +428,9 @@ fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Res
                     continue;
                 }
 
-                writer.write_event(quick_xml::events::Event::End(e.clone())).ok();
+                writer
+                    .write_event(quick_xml::events::Event::End(e.clone()))
+                    .ok();
 
                 if local_name == "sp" && in_target_shape {
                     sp_depth -= 1;
@@ -381,34 +441,51 @@ fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Res
             }
             Ok(quick_xml::events::Event::Empty(e)) => {
                 if !in_tx_body {
-                    writer.write_event(quick_xml::events::Event::Empty(e.clone())).ok();
+                    writer
+                        .write_event(quick_xml::events::Event::Empty(e.clone()))
+                        .ok();
                 }
             }
             Ok(quick_xml::events::Event::Text(e)) => {
                 if !skip_old_text {
-                    writer.write_event(quick_xml::events::Event::Text(e.clone())).ok();
+                    writer
+                        .write_event(quick_xml::events::Event::Text(e.clone()))
+                        .ok();
                 }
             }
             Ok(quick_xml::events::Event::CData(e)) => {
                 if !skip_old_text {
-                    writer.write_event(quick_xml::events::Event::CData(e.clone())).ok();
+                    writer
+                        .write_event(quick_xml::events::Event::CData(e.clone()))
+                        .ok();
                 }
             }
             Ok(quick_xml::events::Event::Decl(e)) => {
-                writer.write_event(quick_xml::events::Event::Decl(e.clone())).ok();
+                writer
+                    .write_event(quick_xml::events::Event::Decl(e.clone()))
+                    .ok();
             }
             Ok(quick_xml::events::Event::Comment(e)) => {
-                writer.write_event(quick_xml::events::Event::Comment(e.clone())).ok();
+                writer
+                    .write_event(quick_xml::events::Event::Comment(e.clone()))
+                    .ok();
             }
             Ok(quick_xml::events::Event::PI(e)) => {
-                writer.write_event(quick_xml::events::Event::PI(e.clone())).ok();
+                writer
+                    .write_event(quick_xml::events::Event::PI(e.clone()))
+                    .ok();
             }
             Ok(quick_xml::events::Event::DocType(e)) => {
-                writer.write_event(quick_xml::events::Event::DocType(e.clone())).ok();
+                writer
+                    .write_event(quick_xml::events::Event::DocType(e.clone()))
+                    .ok();
             }
             Ok(quick_xml::events::Event::Eof) => break,
             Err(e) => {
-                return Err(HandlerError::OperationFailed(format!("XML rewrite error: {}", e)));
+                return Err(HandlerError::OperationFailed(format!(
+                    "XML rewrite error: {}",
+                    e
+                )));
             }
         }
         buf.clear();
@@ -422,28 +499,48 @@ fn replace_shape_text_in_xml(xml: &str, shape_idx: usize, new_text: &str) -> Res
 fn write_new_paragraph(writer: &mut quick_xml::Writer<Vec<u8>>, text: &str) {
     // <a:p>
     let p_start = quick_xml::events::BytesStart::new("a:p");
-    writer.write_event(quick_xml::events::Event::Start(p_start)).ok();
+    writer
+        .write_event(quick_xml::events::Event::Start(p_start))
+        .ok();
 
     // <a:r>
     let r_start = quick_xml::events::BytesStart::new("a:r");
-    writer.write_event(quick_xml::events::Event::Start(r_start)).ok();
+    writer
+        .write_event(quick_xml::events::Event::Start(r_start))
+        .ok();
 
     // <a:t>
     let t_start = quick_xml::events::BytesStart::new("a:t");
-    writer.write_event(quick_xml::events::Event::Start(t_start)).ok();
+    writer
+        .write_event(quick_xml::events::Event::Start(t_start))
+        .ok();
 
     // Text content
     let text_event = quick_xml::events::BytesText::new(text);
-    writer.write_event(quick_xml::events::Event::Text(text_event)).ok();
+    writer
+        .write_event(quick_xml::events::Event::Text(text_event))
+        .ok();
 
     // </a:t>
-    writer.write_event(quick_xml::events::Event::End(quick_xml::events::BytesEnd::new("a:t"))).ok();
+    writer
+        .write_event(quick_xml::events::Event::End(
+            quick_xml::events::BytesEnd::new("a:t"),
+        ))
+        .ok();
 
     // </a:r>
-    writer.write_event(quick_xml::events::Event::End(quick_xml::events::BytesEnd::new("a:r"))).ok();
+    writer
+        .write_event(quick_xml::events::Event::End(
+            quick_xml::events::BytesEnd::new("a:r"),
+        ))
+        .ok();
 
     // </a:p>
-    writer.write_event(quick_xml::events::Event::End(quick_xml::events::BytesEnd::new("a:p"))).ok();
+    writer
+        .write_event(quick_xml::events::Event::End(
+            quick_xml::events::BytesEnd::new("a:p"),
+        ))
+        .ok();
 }
 
 /// Apply line range from ViewOptions to the output text.
@@ -451,8 +548,14 @@ fn apply_line_range(text: &str, opts: &ViewOptions) -> String {
     let all_lines: Vec<&str> = text.lines().collect();
     let total = all_lines.len();
 
-    let start = opts.start_line.map(|l| if l > 0 { l - 1 } else { 0 }).unwrap_or(0);
-    let end = opts.end_line.map(|l| if l > total { total } else { l }).unwrap_or(total);
+    let start = opts
+        .start_line
+        .map(|l| if l > 0 { l - 1 } else { 0 })
+        .unwrap_or(0);
+    let end = opts
+        .end_line
+        .map(|l| if l > total { total } else { l })
+        .unwrap_or(total);
 
     let max = opts.max_lines.unwrap_or(total);
 
@@ -481,9 +584,15 @@ fn make_slide_node(slide: &Slide, include_children: bool) -> DocumentNode {
     let mut node = DocumentNode::new(&path, "slide");
 
     // Build text preview from shapes
-    let preview_parts: Vec<String> = slide.shapes.iter()
+    let preview_parts: Vec<String> = slide
+        .shapes
+        .iter()
         .filter_map(|s| {
-            if s.text.is_empty() { None } else { Some(s.text.clone()) }
+            if s.text.is_empty() {
+                None
+            } else {
+                Some(s.text.clone())
+            }
         })
         .collect();
     node.preview = Some(if preview_parts.is_empty() {
@@ -506,7 +615,12 @@ fn make_slide_node(slide: &Slide, include_children: bool) -> DocumentNode {
 }
 
 /// Create a DocumentNode for a shape.
-fn make_shape_node(slide_idx: usize, shape_idx: usize, shape: &Shape, include_children: bool) -> DocumentNode {
+fn make_shape_node(
+    slide_idx: usize,
+    shape_idx: usize,
+    shape: &Shape,
+    include_children: bool,
+) -> DocumentNode {
     let path = format!("/slide[{}]/shape[{}]", slide_idx, shape_idx);
     let mut node = DocumentNode::new(&path, shape.placeholder_type.as_deref().unwrap_or("shape"));
     node.text = Some(shape.text.clone());
@@ -520,7 +634,12 @@ fn make_shape_node(slide_idx: usize, shape_idx: usize, shape: &Shape, include_ch
     if include_children {
         let mut para_nodes = Vec::new();
         for (pi, para) in shape.paragraphs.iter().enumerate() {
-            let para_path = format!("/slide[{}]/shape[{}]/paragraph[{}]", slide_idx, shape_idx, pi + 1);
+            let para_path = format!(
+                "/slide[{}]/shape[{}]/paragraph[{}]",
+                slide_idx,
+                shape_idx,
+                pi + 1
+            );
             para_nodes.push(DocumentNode::new(&para_path, "paragraph").with_text(&para.text));
         }
         node = node.with_children(para_nodes);
@@ -532,7 +651,11 @@ fn make_shape_node(slide_idx: usize, shape_idx: usize, shape: &Shape, include_ch
 }
 
 /// Detect issues in the presentation.
-pub fn view_as_issues(package: &oxml::OxmlPackage, issue_type: Option<&str>, limit: Option<usize>) -> Result<Vec<DocumentIssue>, HandlerError> {
+pub fn view_as_issues(
+    package: &oxml::OxmlPackage,
+    issue_type: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<DocumentIssue>, HandlerError> {
     let pres = build_presentation(package)?;
     let mut issues = Vec::new();
 
@@ -542,7 +665,10 @@ pub fn view_as_issues(package: &oxml::OxmlPackage, issue_type: Option<&str>, lim
             issues.push(DocumentIssue {
                 severity: IssueSeverity::Warning,
                 issue_type: "missing-slide".to_string(),
-                description: format!("Slide {} part '{}' is missing from the package", slide.index, slide.part_path),
+                description: format!(
+                    "Slide {} part '{}' is missing from the package",
+                    slide.index, slide.part_path
+                ),
                 path: Some(format!("/slide[{}]", slide.index)),
             });
         }
@@ -563,7 +689,11 @@ pub fn view_as_issues(package: &oxml::OxmlPackage, issue_type: Option<&str>, lim
                 issues.push(DocumentIssue {
                     severity: IssueSeverity::Warning,
                     issue_type: "missing-id".to_string(),
-                    description: format!("Shape {} on slide {} has no ID attribute", si + 1, slide.index),
+                    description: format!(
+                        "Shape {} on slide {} has no ID attribute",
+                        si + 1,
+                        slide.index
+                    ),
                     path: Some(format!("/slide[{}]/shape[{}]", slide.index, si + 1)),
                 });
             }
@@ -598,7 +728,8 @@ pub fn validate(package: &oxml::OxmlPackage) -> Result<Vec<ValidationError>, Han
     }
 
     // Check that presentation.xml has a valid sldIdLst
-    let pres_xml = package.read_part_xml("ppt/presentation.xml")
+    let pres_xml = package
+        .read_part_xml("ppt/presentation.xml")
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
     if !pres_xml.contains("<p:sldIdLst") && !pres_xml.contains("<sldIdLst") {
         errors.push(ValidationError {
