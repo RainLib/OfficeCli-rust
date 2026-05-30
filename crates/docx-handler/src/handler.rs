@@ -511,135 +511,152 @@ fn apply_docx_range_highlights(
 ) -> Result<Vec<String>, HandlerError> {
     let mut unsupported = Vec::new();
 
-    let mut run_props = properties.clone();
-    run_props.remove("range_paths");
-    if !run_props.contains_key("bgColor")
-        && !run_props.contains_key("highlight")
-        && !run_props.contains_key("bg")
+    let mut format_props = properties.clone();
+    format_props.remove("range_paths");
+    if !format_props.contains_key("bgColor")
+        && !format_props.contains_key("highlight")
+        && !format_props.contains_key("bg")
     {
-        run_props.insert("highlight".to_string(), "yellow".to_string());
+        format_props.insert("highlight".to_string(), "yellow".to_string());
     }
 
     for seg in segments {
-        let path_segs = crate::navigation::parse_path(&seg.path)?;
-        if path_segs.len() < 2 {
-            return Err(HandlerError::InvalidPath(format!(
-                "invalid run path: {}",
-                seg.path
+        let para_node = navigate_to_element_mut(dom, &seg.path)?;
+        if para_node.element_type != WordElementType::Paragraph {
+            return Err(HandlerError::InvalidArgument(format!(
+                "Range highlight path must point to a Paragraph, found: {:?}",
+                para_node.element_type
             )));
         }
 
-        let parent_segs = &path_segs[..path_segs.len() - 1];
-        let mut parent_path_str = String::new();
-        for s in parent_segs {
-            parent_path_str.push('/');
-            parent_path_str.push_str(&s.to_path_fragment());
+        // 1. Collect all runs under the paragraph with their index paths and text contents
+        let mut collected_runs = Vec::new();
+        let mut path_tracker = Vec::new();
+        collect_run_locations(para_node, &mut path_tracker, &mut collected_runs);
+
+        // 2. Map global character offsets to the runs
+        let mut global_start = 0;
+        let mut runs_with_spans = Vec::new();
+        for (path, text) in collected_runs {
+            let len = text.chars().count();
+            let global_end = global_start + len;
+            runs_with_spans.push((path, global_start, global_end, len));
+            global_start = global_end;
         }
 
-        let parent = navigate_to_element_mut(dom, &parent_path_str)?;
-        let last_seg = &path_segs[path_segs.len() - 1];
-        let target_type = crate::navigation::resolve_element_type_from_name(&last_seg.name);
+        let total_text_len = global_start;
+        let target_start = seg.start.unwrap_or(0);
+        let target_end = seg.end.unwrap_or(total_text_len);
 
-        let matching_indices: Vec<usize> = parent.children.iter()
-            .enumerate()
-            .filter(|(_, c)| c.element_type == target_type ||
-                matches!(&c.element_type, WordElementType::Unknown(ref n) if n == &last_seg.name))
-            .map(|(i, _)| i)
-            .collect();
+        // 3. Process runs in reverse order to keep index paths stable
+        for (path, r_start, r_end, _r_len) in runs_with_spans.into_iter().rev() {
+            let overlap_start = r_start.max(target_start);
+            let overlap_end = r_end.min(target_end);
 
-        let idx = last_seg.index.unwrap_or(1);
-        if idx == 0 || idx > matching_indices.len() {
-            return Err(HandlerError::PathNotFound(format!(
-                "run index {} out of range at {}",
-                idx, seg.path
-            )));
-        }
+            if overlap_start < overlap_end {
+                let local_start = overlap_start - r_start;
+                let local_end = overlap_end - r_start;
 
-        let child_idx = matching_indices[idx - 1];
-        let run = &parent.children[child_idx];
+                let parent = get_node_mut_by_path(para_node, &path[..path.len() - 1]);
+                let last_idx = path[path.len() - 1];
 
-        let start = seg.start;
-        let end = seg.end;
+                let run = parent.children[last_idx].clone();
+                let text = run.paragraph_text();
 
-        let new_runs = match (start, end) {
-            (None, None) => {
-                let mut new_run = run.clone();
-                new_run
-                    .children
-                    .retain(|c| c.element_type != WordElementType::RunProperties);
-                if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
-                    new_run.children.insert(0, new_rpr);
-                }
-                vec![new_run]
-            }
-            (Some(s), None) => {
-                let (left, right) = crate::helpers::split_run_at_offset(run, s);
-                let mut result = Vec::new();
-                if let Some(l) = left {
-                    result.push(l);
-                }
-                if let Some(mut r) = right {
-                    r.children
-                        .retain(|c| c.element_type != WordElementType::RunProperties);
-                    if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
-                        r.children.insert(0, new_rpr);
-                    }
-                    result.push(r);
-                }
-                result
-            }
-            (None, Some(e)) => {
-                let (left, right) = crate::helpers::split_run_at_offset(run, e);
-                let mut result = Vec::new();
-                if let Some(mut l) = left {
-                    l.children
-                        .retain(|c| c.element_type != WordElementType::RunProperties);
-                    if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
-                        l.children.insert(0, new_rpr);
-                    }
-                    result.push(l);
-                }
-                if let Some(r) = right {
-                    result.push(r);
-                }
-                result
-            }
-            (Some(s), Some(e)) => {
-                let mut result = Vec::new();
-                let (left, rest) = crate::helpers::split_run_at_offset(run, s);
-                if let Some(l) = left {
-                    result.push(l);
-                }
+                // Convert char offsets to byte indices
+                let byte_start = text
+                    .char_indices()
+                    .nth(local_start)
+                    .map(|(i, _)| i)
+                    .unwrap_or(text.len());
+                let byte_end = text
+                    .char_indices()
+                    .nth(local_end)
+                    .map(|(i, _)| i)
+                    .unwrap_or(text.len());
+
+                // Split run at byte offsets
+                let (left, rest) = crate::helpers::split_run_at_offset(&run, byte_start);
+                let mut mid = None;
+                let mut right = None;
                 if let Some(r) = rest {
-                    let local_e = e.saturating_sub(s);
-                    let (mid, right) = crate::helpers::split_run_at_offset(&r, local_e);
-                    if let Some(mut m) = mid {
-                        m.children
-                            .retain(|c| c.element_type != WordElementType::RunProperties);
-                        if let Some(new_rpr) = crate::helpers::build_run_properties(&run_props) {
-                            m.children.insert(0, new_rpr);
-                        }
-                        result.push(m);
-                    }
-                    if let Some(rg) = right {
-                        result.push(rg);
-                    }
+                    let (m, rg) = crate::helpers::split_run_at_offset(&r, byte_end - byte_start);
+                    mid = m;
+                    right = rg;
                 }
-                result
-            }
-        };
 
-        parent.children.splice(child_idx..=child_idx, new_runs);
-        // Removed modified path push
+                // Apply format to mid run
+                let mut inserted_runs = Vec::new();
+                if let Some(l) = left {
+                    inserted_runs.push(l);
+                }
+                if let Some(mut m) = mid {
+                    merge_run_properties(&mut m, &format_props);
+                    inserted_runs.push(m);
+                }
+                if let Some(rg) = right {
+                    inserted_runs.push(rg);
+                }
+
+                parent.children.splice(last_idx..=last_idx, inserted_runs);
+            }
+        }
     }
 
     for key in properties.keys() {
-        if !matches!(key.as_str(), "range_paths" | "bgColor" | "highlight" | "bg") {
+        if !matches!(
+            key.as_str(),
+            "range_paths" | "bgColor" | "highlight" | "bg" | "color" | "fontColor"
+        ) {
             unsupported.push(key.clone());
         }
     }
 
     Ok(unsupported)
+}
+
+fn collect_run_locations(
+    node: &WordNode,
+    current_path: &mut Vec<usize>,
+    runs: &mut Vec<(Vec<usize>, String)>,
+) {
+    if node.element_type == WordElementType::Run {
+        runs.push((current_path.clone(), node.paragraph_text()));
+        return;
+    }
+    for (i, child) in node.children.iter().enumerate() {
+        current_path.push(i);
+        collect_run_locations(child, current_path, runs);
+        current_path.pop();
+    }
+}
+
+fn get_node_mut_by_path<'a>(mut node: &'a mut WordNode, path: &[usize]) -> &'a mut WordNode {
+    for &idx in path {
+        node = &mut node.children[idx];
+    }
+    node
+}
+
+fn merge_run_properties(run: &mut WordNode, format_props: &HashMap<String, String>) {
+    if let Some(new_rpr) = crate::helpers::build_run_properties(format_props) {
+        if let Some(existing_rpr_idx) = run
+            .children
+            .iter()
+            .position(|c| c.element_type == WordElementType::RunProperties)
+        {
+            let mut existing_rpr = run.children.remove(existing_rpr_idx);
+            for new_child in new_rpr.children {
+                existing_rpr
+                    .children
+                    .retain(|c| c.element_type != new_child.element_type);
+                existing_rpr.children.push(new_child);
+            }
+            run.children.insert(existing_rpr_idx, existing_rpr);
+        } else {
+            run.children.insert(0, new_rpr);
+        }
+    }
 }
 
 // ============================================================

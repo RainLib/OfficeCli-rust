@@ -32,7 +32,7 @@ pub struct ViewCommand {
     pub page: Option<usize>,
 }
 
-pub fn handle_view(cmd: ViewCommand, _format: OutputFormat) -> Result<String, HandlerError> {
+pub fn handle_view(cmd: ViewCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, false)?;
     let opts = ViewOptions {
         start_line: cmd.start_line,
@@ -44,24 +44,54 @@ pub fn handle_view(cmd: ViewCommand, _format: OutputFormat) -> Result<String, Ha
         page: cmd.page,
     };
 
-    match cmd.mode.as_str() {
-        "text" => handler.view_as_text(opts),
-        "annotated" => handler.view_as_annotated(opts),
-        "outline" => handler.view_as_outline(),
-        "stats" => handler.view_as_stats(),
-        "issues" => {
-            let issues = handler.view_as_issues(None, None)?;
-            let lines: Vec<String> = issues
-                .iter()
-                .map(|i| format!("[{:?}] {}: {}", i.severity, i.issue_type, i.description))
-                .collect();
-            Ok(lines.join("\n"))
+    match format {
+        OutputFormat::Text => match cmd.mode.as_str() {
+            "text" => handler.view_as_text(opts),
+            "annotated" => handler.view_as_annotated(opts),
+            "outline" => handler.view_as_outline(),
+            "stats" => handler.view_as_stats(),
+            "issues" => {
+                let issues = handler.view_as_issues(None, None)?;
+                let lines: Vec<String> = issues
+                    .iter()
+                    .map(|i| format!("[{:?}] {}: {}", i.severity, i.issue_type, i.description))
+                    .collect();
+                Ok(lines.join("\n"))
+            }
+            "html" => handler.view_as_html(opts),
+            "svg" => handler.view_as_svg(),
+            other => Err(HandlerError::UnsupportedMode(format!(
+                "view mode '{}' not supported by this format",
+                other
+            ))),
+        },
+        OutputFormat::Json => {
+            let json_val = match cmd.mode.as_str() {
+                "text" => handler.view_as_text_json(opts)?,
+                "outline" => handler.view_as_outline_json()?,
+                "stats" => handler.view_as_stats_json()?,
+                "issues" => {
+                    let issues = handler.view_as_issues(None, None)?;
+                    serde_json::to_value(&issues)
+                        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?
+                }
+                "annotated" => {
+                    serde_json::json!({ "annotated": handler.view_as_annotated(opts)? })
+                }
+                "html" => {
+                    serde_json::json!({ "html": handler.view_as_html(opts)? })
+                }
+                "svg" => {
+                    serde_json::json!({ "svg": handler.view_as_svg()? })
+                }
+                other => {
+                    return Err(HandlerError::UnsupportedMode(format!(
+                        "view mode '{}' not supported by this format",
+                        other
+                    )))
+                }
+            };
+            Ok(json_val.to_string())
         }
-        "html" => handler.view_as_html(opts),
-        "svg" => handler.view_as_svg(),
-        other => Err(HandlerError::UnsupportedMode(format!(
-            "view mode '{}' not supported by this format",
-            other
-        ))),
     }
 }

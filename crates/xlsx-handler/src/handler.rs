@@ -148,7 +148,14 @@ impl DocumentHandler for ExcelHandler {
             ));
         }
         let mut pkg = self.package.borrow_mut();
-        mutations::set_cell_properties(&mut pkg, path, properties)
+        if let Some(range_paths_str) = properties.get("range_paths") {
+            let segments = handler_common::parse_range_paths(range_paths_str).map_err(|e| {
+                HandlerError::InvalidArgument(format!("invalid range paths: {}", e))
+            })?;
+            mutations::apply_xlsx_range_highlights(&mut pkg, properties, &segments)
+        } else {
+            mutations::set_cell_properties(&mut pkg, path, properties)
+        }
     }
 
     fn add(

@@ -166,7 +166,7 @@ impl OxmlPackage {
 
     /// Resolve a relationship target to a part path.
     pub fn resolve_rel_target(&self, source_part: &str, target: &str) -> String {
-        if let Some(stripped) = target.strip_prefix('/') {
+        let raw = if let Some(stripped) = target.strip_prefix('/') {
             // Absolute target - strip leading slash
             stripped.to_string()
         } else {
@@ -177,7 +177,22 @@ impl OxmlPackage {
             } else {
                 target.to_string()
             }
+        };
+
+        // Normalize path (collapse '.' and '..')
+        let mut parts = Vec::new();
+        for component in raw.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                c => {
+                    parts.push(c);
+                }
+            }
         }
+        parts.join("/")
     }
 
     /// Save the package back to disk (all modified parts written).

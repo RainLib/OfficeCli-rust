@@ -755,3 +755,456 @@ pub fn validate(package: &oxml::OxmlPackage) -> Result<Vec<ValidationError>, Han
 
     Ok(errors)
 }
+
+enum PptxParaElement {
+    Run {
+        text: String,
+        r_pr_xml: Option<String>,
+    },
+    Break {
+        raw_xml: String,
+    },
+    Other {
+        raw_xml: String,
+    },
+}
+
+struct PptxPara {
+    p_pr_xml: Option<String>,
+    elements: Vec<PptxParaElement>,
+}
+
+pub fn apply_pptx_range_highlights(
+    package: &mut oxml::OxmlPackage,
+    properties: &std::collections::HashMap<String, String>,
+    segments: &[handler_common::PathRangeSegment],
+) -> Result<Vec<String>, HandlerError> {
+    let mut unsupported = Vec::new();
+
+    let mut format_props = properties.clone();
+    format_props.remove("range_paths");
+    if !format_props.contains_key("bgColor")
+        && !format_props.contains_key("highlight")
+        && !format_props.contains_key("bg")
+    {
+        format_props.insert("highlight".to_string(), "yellow".to_string());
+    }
+
+    // Group segments by slide number
+    let mut slide_segs: std::collections::HashMap<usize, Vec<&handler_common::PathRangeSegment>> =
+        std::collections::HashMap::new();
+    for seg in segments {
+        let slide_num = parse_slide_num_from_full_path(&seg.path)?;
+        slide_segs.entry(slide_num).or_default().push(seg);
+    }
+
+    for (slide_num, segs) in slide_segs {
+        let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+        let slide_xml = package
+            .read_part_xml(&slide_path)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+
+        let doc = roxmltree::Document::parse(&slide_xml).map_err(|e| {
+            HandlerError::OperationFailed(format!(
+                "roxmltree parse error on slide {}: {}",
+                slide_num, e
+            ))
+        })?;
+
+        let mut replacements = Vec::new();
+
+        let sp_tree = doc.descendants().find(|n| {
+            n.has_tag_name((crate::dom_types::NS_P, "spTree")) || n.has_tag_name("spTree")
+        });
+
+        if let Some(tree) = sp_tree {
+            let mut sp_idx = 0;
+            for child in tree.children() {
+                if child.has_tag_name((crate::dom_types::NS_P, "sp")) || child.has_tag_name("sp") {
+                    sp_idx += 1;
+
+                    for seg in &segs {
+                        let target_shape_idx = parse_shape_idx(&seg.path)?;
+                        if target_shape_idx == sp_idx {
+                            if let Some(tx_body) = child.children().find(|n| {
+                                n.has_tag_name((crate::dom_types::NS_P, "txBody"))
+                                    || n.has_tag_name("txBody")
+                            }) {
+                                let tx_body_range = tx_body.range();
+                                let tx_body_xml_str = &slide_xml[tx_body_range.clone()];
+
+                                let mut total_chars = 0;
+                                for p in tx_body.descendants().filter(|n| n.has_tag_name("p")) {
+                                    for r in p.children().filter(|n| n.has_tag_name("r")) {
+                                        if let Some(t) = r.children().find(|n| n.has_tag_name("t"))
+                                        {
+                                            total_chars += t.text().unwrap_or("").chars().count();
+                                        }
+                                    }
+                                }
+
+                                let start = seg.start.unwrap_or(0);
+                                let end = seg.end.unwrap_or(total_chars);
+
+                                let new_tx_body_xml = highlight_tx_body_xml(
+                                    tx_body_xml_str,
+                                    &format_props,
+                                    start,
+                                    end,
+                                )?;
+                                replacements.push((tx_body_range, new_tx_body_xml));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !replacements.is_empty() {
+            replacements.sort_by_key(|(range, _)| range.start);
+
+            let mut modified_slide_xml = slide_xml.clone();
+            for (range, new_xml) in replacements.into_iter().rev() {
+                modified_slide_xml.replace_range(range, &new_xml);
+            }
+
+            package
+                .write_part_xml(&slide_path, &modified_slide_xml)
+                .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        }
+    }
+
+    for key in properties.keys() {
+        if !matches!(
+            key.as_str(),
+            "range_paths" | "bgColor" | "highlight" | "bg" | "color" | "fontColor"
+        ) {
+            unsupported.push(key.clone());
+        }
+    }
+
+    Ok(unsupported)
+}
+
+fn parse_slide_num_from_full_path(path: &str) -> Result<usize, HandlerError> {
+    path.split('/')
+        .find(|s| !s.is_empty())
+        .and_then(|s| s.strip_prefix("slide["))
+        .and_then(|s| s.strip_suffix(']'))
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))
+}
+
+fn parse_shape_idx(path: &str) -> Result<usize, HandlerError> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .nth(1)
+        .and_then(|s| s.strip_prefix("shape["))
+        .and_then(|s| s.strip_suffix(']'))
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))
+}
+
+fn highlight_tx_body_xml(
+    tx_body_xml: &str,
+    format_props: &std::collections::HashMap<String, String>,
+    target_start: usize,
+    target_end: usize,
+) -> Result<String, HandlerError> {
+    let wrapped = format!(
+        "<p:dummy xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">{}</p:dummy>",
+        tx_body_xml
+    );
+    let doc = roxmltree::Document::parse(&wrapped).map_err(|e| {
+        HandlerError::OperationFailed(format!("roxmltree parse error in txBody: {}", e))
+    })?;
+    let root = doc.root_element().first_element_child().ok_or_else(|| {
+        HandlerError::OperationFailed("txBody element not found inside dummy root".to_string())
+    })?;
+
+    let mut body_pr_xml = None;
+    let mut lst_style_xml = None;
+    let mut paras = Vec::new();
+
+    for child in root.children() {
+        if child.is_element() {
+            let tag = child.tag_name().name();
+            if tag == "bodyPr" {
+                body_pr_xml = Some(serialize_roxml_node(&child));
+            } else if tag == "lstStyle" {
+                lst_style_xml = Some(serialize_roxml_node(&child));
+            } else if tag == "p" {
+                let mut p_pr_xml = None;
+                let mut elements = Vec::new();
+                for p_child in child.children() {
+                    if p_child.is_element() {
+                        let p_tag = p_child.tag_name().name();
+                        if p_tag == "pPr" {
+                            p_pr_xml = Some(serialize_roxml_node(&p_child));
+                        } else if p_tag == "r" {
+                            let text = p_child
+                                .children()
+                                .find(|n| n.has_tag_name("t"))
+                                .and_then(|n| n.text())
+                                .unwrap_or("")
+                                .to_string();
+                            let r_pr_xml = p_child
+                                .children()
+                                .find(|n| n.has_tag_name("rPr"))
+                                .map(|n| serialize_roxml_node(&n));
+                            elements.push(PptxParaElement::Run { text, r_pr_xml });
+                        } else if p_tag == "br" {
+                            elements.push(PptxParaElement::Break {
+                                raw_xml: serialize_roxml_node(&p_child),
+                            });
+                        } else {
+                            elements.push(PptxParaElement::Other {
+                                raw_xml: serialize_roxml_node(&p_child),
+                            });
+                        }
+                    }
+                }
+                paras.push(PptxPara { p_pr_xml, elements });
+            }
+        }
+    }
+
+    let mut runs_meta = Vec::new();
+    let mut global_start = 0;
+    for (p_idx, para) in paras.iter().enumerate() {
+        for (el_idx, el) in para.elements.iter().enumerate() {
+            if let PptxParaElement::Run { text, .. } = el {
+                let len = text.chars().count();
+                let global_end = global_start + len;
+                runs_meta.push((p_idx, el_idx, global_start, global_end, len));
+                global_start = global_end;
+            }
+        }
+    }
+
+    for (p_idx, el_idx, r_start, r_end, _r_len) in runs_meta.into_iter().rev() {
+        let overlap_start = r_start.max(target_start);
+        let overlap_end = r_end.min(target_end);
+
+        if overlap_start < overlap_end {
+            let local_start = overlap_start - r_start;
+            let local_end = overlap_end - r_start;
+
+            let (run_text, r_pr_xml) = match &paras[p_idx].elements[el_idx] {
+                PptxParaElement::Run { text, r_pr_xml } => (text.clone(), r_pr_xml.clone()),
+                _ => continue,
+            };
+
+            let byte_start = run_text
+                .char_indices()
+                .nth(local_start)
+                .map(|(i, _)| i)
+                .unwrap_or(run_text.len());
+            let byte_end = run_text
+                .char_indices()
+                .nth(local_end)
+                .map(|(i, _)| i)
+                .unwrap_or(run_text.len());
+
+            let mut split_elements = Vec::new();
+
+            if byte_start > 0 {
+                split_elements.push(PptxParaElement::Run {
+                    text: run_text[..byte_start].to_string(),
+                    r_pr_xml: r_pr_xml.clone(),
+                });
+            }
+
+            let mid_text = run_text[byte_start..byte_end].to_string();
+            if !mid_text.is_empty() {
+                let merged_r_pr = merge_pptx_run_properties(r_pr_xml.as_deref(), format_props);
+                split_elements.push(PptxParaElement::Run {
+                    text: mid_text,
+                    r_pr_xml: Some(merged_r_pr),
+                });
+            }
+
+            if byte_end < run_text.len() {
+                split_elements.push(PptxParaElement::Run {
+                    text: run_text[byte_end..].to_string(),
+                    r_pr_xml: r_pr_xml.clone(),
+                });
+            }
+
+            paras[p_idx]
+                .elements
+                .splice(el_idx..=el_idx, split_elements);
+        }
+    }
+
+    let mut result = String::new();
+    result.push_str("<p:txBody>");
+    if let Some(bp) = body_pr_xml {
+        result.push_str(&bp);
+    }
+    if let Some(ls) = lst_style_xml {
+        result.push_str(&ls);
+    }
+    for para in paras {
+        result.push_str("<a:p>");
+        if let Some(pp) = para.p_pr_xml {
+            result.push_str(&pp);
+        }
+        for el in para.elements {
+            match el {
+                PptxParaElement::Run { text, r_pr_xml } => {
+                    result.push_str("<a:r>");
+                    if let Some(rp) = r_pr_xml {
+                        result.push_str(&rp);
+                    }
+                    result.push_str(&format!("<a:t>{}</a:t>", escape_xml_text(&text)));
+                    result.push_str("</a:r>");
+                }
+                PptxParaElement::Break { raw_xml } => {
+                    result.push_str(&raw_xml);
+                }
+                PptxParaElement::Other { raw_xml } => {
+                    result.push_str(&raw_xml);
+                }
+            }
+        }
+        result.push_str("</a:p>");
+    }
+    result.push_str("</p:txBody>");
+    Ok(result)
+}
+
+fn serialize_roxml_node(node: &roxmltree::Node) -> String {
+    let mut result = String::new();
+    let name = node.tag_name().name();
+    let prefix = node
+        .tag_name()
+        .namespace()
+        .map(|ns| {
+            if ns.contains("drawingml") {
+                "a:"
+            } else if ns.contains("presentationml") {
+                "p:"
+            } else {
+                ""
+            }
+        })
+        .unwrap_or("");
+
+    let prefixed_name = format!("{}{}", prefix, name);
+
+    let mut attrs = Vec::new();
+    for attr in node.attributes() {
+        attrs.push(format!("{}=\"{}\"", attr.name(), attr.value()));
+    }
+    let attr_str = if attrs.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", attrs.join(" "))
+    };
+
+    if node.children().any(|c| c.is_element()) || node.text().is_some() {
+        result.push_str(&format!("<{}{}>", prefixed_name, attr_str));
+        for child in node.children() {
+            if child.is_element() {
+                result.push_str(&serialize_roxml_node(&child));
+            } else if child.is_text() {
+                result.push_str(&escape_xml_text(child.text().unwrap_or("")));
+            }
+        }
+        result.push_str(&format!("</{}>", prefixed_name));
+    } else {
+        result.push_str(&format!("<{}{} />", prefixed_name, attr_str));
+    }
+    result
+}
+
+fn escape_xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn merge_pptx_run_properties(
+    r_pr_xml: Option<&str>,
+    format_props: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut attrs = Vec::new();
+    let mut children_xml = String::new();
+
+    if let Some(xml) = r_pr_xml {
+        if let Ok(doc) = roxmltree::Document::parse(xml) {
+            let root = doc.root_element();
+            for attr in root.attributes() {
+                attrs.push(format!("{}=\"{}\"", attr.name(), attr.value()));
+            }
+            for child in root.children() {
+                if child.is_element() {
+                    let tag = child.tag_name().name();
+                    if tag == "solidFill"
+                        && (format_props.contains_key("color")
+                            || format_props.contains_key("fontColor"))
+                    {
+                        continue;
+                    }
+                    if tag == "highlight"
+                        && (format_props.contains_key("bgColor")
+                            || format_props.contains_key("highlight")
+                            || format_props.contains_key("bg"))
+                    {
+                        continue;
+                    }
+                    children_xml.push_str(&serialize_roxml_node(&child));
+                }
+            }
+        }
+    }
+
+    if let Some(color_val) = format_props
+        .get("color")
+        .or_else(|| format_props.get("fontColor"))
+    {
+        let hex = color_val.strip_prefix('#').unwrap_or(color_val);
+        children_xml.push_str(&format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+            hex
+        ));
+    }
+
+    if let Some(bg_val) = format_props
+        .get("bgColor")
+        .or_else(|| format_props.get("highlight"))
+        .or_else(|| format_props.get("bg"))
+    {
+        let hex = bg_val.strip_prefix('#').unwrap_or(bg_val);
+        let hex_lower = hex.to_lowercase();
+        let resolved_hex = match hex_lower.as_str() {
+            "yellow" => "FFFF00",
+            "green" => "00FF00",
+            "blue" => "0000FF",
+            "magenta" => "FF00FF",
+            "cyan" => "00FFFF",
+            "red" => "FF0000",
+            "white" => "FFFFFF",
+            "black" => "000000",
+            other => other,
+        };
+        children_xml.push_str(&format!(
+            "<a:highlight><a:srgbClr val=\"{}\"/></a:highlight>",
+            resolved_hex
+        ));
+    }
+
+    let attr_str = if attrs.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", attrs.join(" "))
+    };
+
+    if children_xml.is_empty() {
+        format!("<a:rPr{} />", attr_str)
+    } else {
+        format!("<a:rPr{}>{}</a:rPr>", attr_str, children_xml)
+    }
+}

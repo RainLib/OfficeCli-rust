@@ -34,6 +34,7 @@ struct CellFormat {
     border_id: Option<usize>,
     align_horiz: Option<String>,
     align_vert: Option<String>,
+    num_fmt_id: Option<usize>,
 }
 
 // 64 Default indexed colors for Excel compatibility
@@ -153,9 +154,20 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
     let mut fills = Vec::new();
     let mut borders = Vec::new();
     let mut cell_formats = Vec::new();
+    let mut custom_num_fmts = HashMap::new();
 
     if let Ok(styles_xml) = package.read_part_xml("xl/styles.xml") {
         if let Ok(doc) = roxmltree::Document::parse(&styles_xml) {
+            // Read Custom Numbering Formats
+            if let Some(num_fmts_node) = doc.descendants().find(|n| n.has_tag_name("numFmts")) {
+                for num_fmt in num_fmts_node.children().filter(|n| n.has_tag_name("numFmt")) {
+                    let id_str = num_fmt.attribute("numFmtId").unwrap_or("");
+                    let code_str = num_fmt.attribute("formatCode").unwrap_or("");
+                    if let Ok(id) = id_str.parse::<usize>() {
+                        custom_num_fmts.insert(id, code_str.to_string());
+                    }
+                }
+            }
             // Read Custom Palette
             if let Some(colors_node) = doc.descendants().find(|n| n.has_tag_name("colors")) {
                 if let Some(idx_node) = colors_node
@@ -265,6 +277,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                     let border_id = xf
                         .attribute("borderId")
                         .and_then(|s| s.parse::<usize>().ok());
+                    let num_fmt_id = xf
+                        .attribute("numFmtId")
+                        .and_then(|s| s.parse::<usize>().ok());
                     let align = xf.children().find(|n| n.has_tag_name("alignment"));
                     let align_horiz = align
                         .as_ref()
@@ -280,6 +295,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                         border_id,
                         align_horiz,
                         align_vert,
+                        num_fmt_id,
                     });
                 }
             }
@@ -296,6 +312,8 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         let mut row_heights = HashMap::new();
         let mut default_col_width = 64.0; // default in px
         let mut default_row_height = 20.0; // default in px
+        let mut hidden_rows = std::collections::HashSet::new();
+        let mut hidden_cols = std::collections::HashSet::new();
 
         if let Ok(ws_xml) = package.read_part_xml(&ws.part_path) {
             if let Ok(ws_doc) = roxmltree::Document::parse(&ws_xml) {
@@ -361,7 +379,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                         .unwrap_or(15.0);
                 }
 
-                // Parse Explicit Col Widths
+                // Parse Explicit Col Widths and Visibility
                 if let Some(cols_node) = ws_doc.descendants().find(|n| n.has_tag_name("cols")) {
                     for col in cols_node.children().filter(|n| n.has_tag_name("col")) {
                         let min = col
@@ -372,17 +390,30 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                             .attribute("max")
                             .and_then(|s| s.parse::<usize>().ok())
                             .unwrap_or(1);
+                        let is_hidden = col.attribute("hidden") == Some("1");
+                        if is_hidden {
+                            for c in min..=max {
+                                hidden_cols.insert(c);
+                            }
+                        }
                         if let Some(w) = col.attribute("width").and_then(|s| s.parse::<f64>().ok())
                         {
-                            let width_px = w * 7.5; // conversion factor
+                            let width_px = if is_hidden || w <= 0.0 {
+                                0.0
+                            } else {
+                                w * 7.5
+                            };
                             for c in min..=max {
                                 col_widths.insert(c, width_px);
+                                if width_px <= 0.0 {
+                                    hidden_cols.insert(c);
+                                }
                             }
                         }
                     }
                 }
 
-                // Parse Explicit Row Heights
+                // Parse Explicit Row Heights and Visibility
                 if let Some(sheet_data) = ws_doc.descendants().find(|n| n.has_tag_name("sheetData"))
                 {
                     for row in sheet_data.children().filter(|n| n.has_tag_name("row")) {
@@ -392,6 +423,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                             if let Some(h) = row.attribute("ht").and_then(|s| s.parse::<f64>().ok())
                             {
                                 row_heights.insert(r_idx, h);
+                            }
+                            if row.attribute("hidden") == Some("1") {
+                                hidden_rows.insert(r_idx);
                             }
                         }
                     }
@@ -403,6 +437,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         let mut frozen_left_offsets = HashMap::new();
         let mut current_left = 40.0; // corner row-header width
         for c in 1..=frozen_cols {
+            if hidden_cols.contains(&c) {
+                continue;
+            }
             frozen_left_offsets.insert(c, current_left);
             let w = col_widths.get(&c).copied().unwrap_or(default_col_width);
             current_left += w;
@@ -411,6 +448,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         let mut frozen_top_offsets = HashMap::new();
         let mut current_top = 26.0; // header height
         for r in 1..=frozen_rows {
+            if hidden_rows.contains(&r) {
+                continue;
+            }
             frozen_top_offsets.insert(r, current_top);
             let h = row_heights.get(&r).copied().unwrap_or(default_row_height);
             current_top += h;
@@ -428,6 +468,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         // Generate Colgroup
         sheets_html.push_str("<colgroup><col style=\"width:40px\"></colgroup>");
         for col in 1..=max_col {
+            if hidden_cols.contains(&col) {
+                continue;
+            }
             let width = col_widths.get(&col).copied().unwrap_or(default_col_width);
             sheets_html.push_str(&format!("<col style=\"width:{:.1}px\">", width));
         }
@@ -440,6 +483,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         sheets_html.push_str("></th>");
 
         for col in 1..=max_col {
+            if hidden_cols.contains(&col) {
+                continue;
+            }
             let col_letter = crate::dom_types::col_num_to_letters(col);
             let mut style_attr = String::new();
             if frozen_rows > 0 && col <= frozen_cols {
@@ -463,6 +509,10 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 
         // Generate Grid Rows
         for row in 1..=max_row {
+            if hidden_rows.contains(&row) {
+                sheets_html.push_str(&format!("<tr style=\"display:none\">\n<th class=\"row-header\">{}</th>\n</tr>\n", row));
+                continue;
+            }
             let is_row_frozen = frozen_rows > 0 && row <= frozen_rows;
             let mut tr_style = String::new();
             if let Some(h) = row_heights.get(&row) {
@@ -476,8 +526,8 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             } else {
                 format!(" style=\"{}\"", tr_style)
             };
-
-            sheets_html.push_str(&format!("<tr{}>\n", tr_style_attr));
+            let frozen_attr = if is_row_frozen { " data-frozen" } else { "" };
+            sheets_html.push_str(&format!("<tr{}{}>\n", frozen_attr, tr_style_attr));
 
             // Row index cell
             let mut th_style_attr = String::new();
@@ -494,6 +544,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             ));
 
             for col in 1..=max_col {
+                if hidden_cols.contains(&col) {
+                    continue;
+                }
                 // Check Merge
                 if let Some(merge) = merge_map.get(&(row, col)) {
                     if !merge.is_anchor {
@@ -634,8 +687,16 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                     if merge.row_span > 1 {
                         spans.push_str(&format!(" rowspan=\"{}\"", merge.row_span));
                     }
-                    if merge.col_span > 1 {
-                        spans.push_str(&format!(" colspan=\"{}\"", merge.col_span));
+                    let mut adj_col_span = merge.col_span;
+                    if adj_col_span > 1 && !hidden_cols.is_empty() {
+                        for hc in (col + 1)..(col + merge.col_span) {
+                            if hidden_cols.contains(&hc) {
+                                adj_col_span -= 1;
+                            }
+                        }
+                    }
+                    if adj_col_span > 1 {
+                        spans.push_str(&format!(" colspan=\"{}\"", adj_col_span));
                     }
                     spans
                 } else {
@@ -643,7 +704,13 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 };
 
                 if let Some(c) = cell {
-                    let text = html_escape(&c.display_value);
+                    let num_fmt_id = c.style_index
+                        .and_then(|s_idx| cell_formats.get(s_idx))
+                        .and_then(|fmt| fmt.num_fmt_id)
+                        .unwrap_or(0);
+                    let raw_val = c.raw_value.as_deref().unwrap_or(&c.display_value);
+                    let formatted_val = format_cell_value(raw_val, num_fmt_id, &custom_num_fmts);
+                    let text = html_escape(&formatted_val);
                     sheets_html.push_str(&format!(
                         "<td{}{}{} data-path=\"/{}/{}\">{}</td>\n",
                         class_attr, style_attr, span_attrs, ws.name, cell_ref, text
@@ -658,6 +725,33 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         sheets_html.push_str("</tbody>\n</table>\n</div>\n</div>\n");
     }
 
+    let mut tabs_html = String::new();
+    for (i, ws) in model.sheets.iter().enumerate() {
+        let mut tab_color_style = String::new();
+        if let Ok(sheet_xml) = package.read_part_xml(&ws.part_path) {
+            if let Ok(sheet_doc) = roxmltree::Document::parse(&sheet_xml) {
+                if let Some(sheet_pr) = sheet_doc.descendants().find(|n| n.has_tag_name("sheetPr")) {
+                    if let Some(tab_color_el) = sheet_pr.children().find(|n| n.has_tag_name("tabColor")) {
+                        if let Some(rgb) = tab_color_el.attribute("rgb") {
+                            let clean = if rgb.len() == 8 { &rgb[2..] } else { rgb };
+                            tab_color_style = format!(" style=\"--tab-color:#{};\"", clean);
+                        }
+                    }
+                }
+            }
+        }
+        let active_class = if i == 0 { " active" } else { "" };
+        tabs_html.push_str(&format!(
+            "  <div class=\"sheet-tab{}\"{} data-sheet=\"{}\" role=\"tab\" tabindex=\"0\" onclick=\"switchSheet({})\" onkeydown=\"if(event.key==='Enter'||event.key===' ')switchSheet({})\">{}</div>\n",
+            active_class,
+            tab_color_style,
+            i,
+            i,
+            i,
+            html_escape(&ws.name)
+        ));
+    }
+
     Ok(format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -666,150 +760,191 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Excel Preview</title>
 <style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html, body {{ height: 100%; }}
 body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    margin: 0;
-    background: #1a1a2e;
-    color: #e0e0e0;
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #f0f0f0;
+    color: #333;
     display: flex;
     flex-direction: column;
-    height: 100vh;
-    overflow: hidden;
+    min-height: 100vh;
 }}
 .file-title {{
-    background: #121225;
-    padding: 12px 24px;
-    font-size: 14pt;
+    padding: 12px 20px;
+    font-size: 14px;
     font-weight: 600;
-    color: #4472c4;
-    border-bottom: 1px solid #252545;
+    background: #217346;
+    color: #fff;
 }}
-.sheet-slider {{
-    flex: 1;
-    position: relative;
-    overflow: hidden;
-}}
-.sheet-content {{
-    position: absolute;
-    inset: 0;
-    display: none;
-    flex-direction: column;
-}}
-.sheet-content.active {{
+.sheet-tabs {{
     display: flex;
+    background: #e0e0e0;
+    border-top: 1px solid #ccc;
+    overflow-x: auto;
+    padding: 0 8px;
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
 }}
+.sheet-tab {{
+    --tab-color: #e8e8e8;
+    padding: 8px 16px;
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid #bbb;
+    border-top: none;
+    background: var(--tab-color);
+    color: #fff;
+    margin-bottom: 0;
+    border-radius: 0 0 3px 3px;
+    white-space: nowrap;
+    user-select: none;
+    position: relative;
+    transition: background 0.15s, color 0.15s;
+}}
+.sheet-tab[style*="--tab-color:#e8e8e8"], .sheet-tab:not([style*="--tab-color"]) {{
+    color: #333;
+}}
+.sheet-tab:hover {{ opacity: 0.85; }}
+.sheet-tab.active {{
+    background: linear-gradient(to bottom, #fff 60%, color-mix(in srgb, var(--tab-color) 30%, #fff)) !important;
+    color: #333 !important;
+    border-color: #aaa;
+    border-bottom: 3px solid var(--tab-color);
+    font-weight: 600;
+}}
+.sheet-slider {{ flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }}
+.sheet-content {{ background: #fff; display: none; flex: 1; min-height: 0; }}
+.sheet-content.active {{ display: flex; flex-direction: column; }}
 .table-wrapper {{
     flex: 1;
     overflow: auto;
-    background: #1e1e38;
+    min-height: 0;
+    background: #fff;
 }}
 table {{
     border-collapse: collapse;
+    font-size: 11px;
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
     table-layout: fixed;
-    background: #1e1e38;
-    color: #ddd;
-    font-size: 9.5pt;
 }}
-th, td {{
-    border: 1px solid #2f2f55;
-    padding: 4px 6px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}}
+.row-header-col {{ width: 30pt; }}
 th {{
-    background: #161630;
-    color: #888;
-    font-weight: 500;
+    background: #f8f8f8;
+    border: 1px solid #e0e0e0;
+    font-weight: normal;
+    color: #666;
+    font-size: 10px;
     text-align: center;
-    user-select: none;
+    padding: 2px 4px;
 }}
-.col-header, .row-header {{
-    font-size: 8.5pt;
+.corner-cell {{ background: #f0f0f0; z-index: 4; }}
+.col-header {{
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #f8f8f8;
+    min-width: 50px;
+    cursor: s-resize;
 }}
-.col-header {{ height: 26px; }}
-.row-header {{ width: 40px; text-align: center; }}
-.corner-cell {{
-    width: 40px;
-    height: 26px;
+.row-header {{
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #f8f8f8;
+    min-width: 40px;
+    cursor: e-resize;
+    border-right: none;
 }}
 td {{
-    background: #1e1e38;
-    text-align: left;
-    vertical-align: middle;
+    box-shadow: inset -1px -1px 0 #e0e0e0;
+    padding: 2px 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+    max-width: 500px;
+    word-break: break-all;
 }}
-td.number {{
-    text-align: right;
+tbody tr:first-child td {{ box-shadow: inset -1px -1px 0 #e0e0e0, inset 0 1px 0 #e0e0e0; }}
+tr td:first-of-type {{ box-shadow: inset -1px -1px 0 #e0e0e0, inset 1px 0 0 #e0e0e0; }}
+tbody tr:first-child td:first-of-type {{ box-shadow: inset -1px -1px 0 #e0e0e0, inset 1px 1px 0 #e0e0e0; }}
+.empty-sheet {{
+    padding: 40px;
+    text-align: center;
+    color: #999;
+    font-size: 14px;
 }}
-.sheet-tabs {{
-    background: #121225;
-    border-top: 1px solid #252545;
-    display: flex;
-    padding: 0 12px;
-    gap: 4px;
-    overflow-x: auto;
-    height: 38px;
-    align-items: flex-end;
+.chart-container {{
+    margin: 16px auto;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
 }}
-.sheet-tab {{
-    padding: 6px 20px;
-    background: #1e1e38;
-    border: 1px solid #252545;
-    border-bottom: none;
-    border-radius: 4px 4px 0 0;
-    color: #888;
-    font-size: 11px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-    user-select: none;
-    outline: none;
+.chart-container svg {{ display: block; }}
+.truncation-warning {{
+    padding: 8px 16px;
+    background: #FFF3CD;
+    color: #856404;
+    border: 1px solid #FFEEBA;
+    font-size: 12px;
+    text-align: center;
+    margin: 4px 0;
 }}
-.sheet-tab:hover {{
-    background: #25254b;
-    color: #ccc;
-}}
-.sheet-tab.active {{
-    background: #4472c4;
-    color: #ffffff;
-    border-color: #4472c4;
-    font-weight: 600;
+.sr-only {{ position:absolute; clip:rect(0 0 0 0); width:1px; height:1px; overflow:hidden; }}
+@media print {{
+    .file-title, .sheet-tabs {{ display: none !important; }}
+    .table-wrapper {{ max-height: none !important; overflow: visible !important; flex: none !important; }}
+    body {{ background: #fff !important; min-height: auto !important; }}
+    .sheet-content {{ display: block !important; flex: none !important; }}
+    td {{ max-width: none !important; white-space: normal !important; overflow: visible !important; }}
 }}
 </style>
 </head>
 <body>
 <div class="file-title">Workbook Preview</div>
 <div class="sheet-slider">
-{}
-</div>
+{sheets_html}</div>
 <div class="sheet-tabs" role="tablist">
-{}
-</div>
+{tabs_html}</div>
 
 <script>
 function switchSheet(idx) {{
-    document.querySelectorAll('.sheet-content').forEach((el, i) => {{
-        el.classList.toggle('active', i === idx);
+    document.querySelectorAll('.sheet-tab').forEach(function(t) {{
+        t.classList.toggle('active', parseInt(t.getAttribute('data-sheet')) === idx);
     }});
-    document.querySelectorAll('.sheet-tab').forEach((el, i) => {{
-        el.classList.toggle('active', i === idx);
+    document.querySelectorAll('.sheet-content').forEach(function(c) {{
+        c.classList.toggle('active', parseInt(c.getAttribute('data-sheet')) === idx);
+    }});
+    window.scrollTo(0, 0);
+    adjustStickyHeights();
+}}
+function adjustStickyHeights() {{
+    document.querySelectorAll('.sheet-content.active .table-wrapper table').forEach(function(table) {{
+        var thead = table.querySelector('thead');
+        if (!thead) return;
+        var theadH = thead.offsetHeight;
+        var cumTop = theadH;
+        var frozen = table.querySelectorAll('tr[data-frozen]');
+        frozen.forEach(function(tr) {{
+            tr.querySelectorAll('th, td').forEach(function(cell) {{
+                if (cell.style.position === 'sticky') cell.style.top = cumTop + 'px';
+            }});
+            cumTop += tr.offsetHeight;
+        }});
     }});
 }}
+// Initial run
+adjustStickyHeights();
 </script>
 </body>
 </html>"#,
-        sheets_html,
-        model
-            .sheets
-            .iter()
-            .enumerate()
-            .map(|(i, ws)| format!(
-                "<button class=\"sheet-tab{}\" onclick=\"switchSheet({})\">{}</button>",
-                if i == 0 { " active" } else { "" },
-                i,
-                ws.name
-            ))
-            .collect::<Vec<_>>()
-            .join("\n")
+        sheets_html = sheets_html,
+        tabs_html = tabs_html
     ))
 }
 
@@ -828,4 +963,205 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn oa_date_to_date(oa_date: f64) -> Option<(i32, i32, i32, i32, i32, i32)> {
+    if oa_date < 0.0 || oa_date > 2958465.0 {
+        return None;
+    }
+    let days = oa_date.floor() as i32;
+    let frac = oa_date - oa_date.floor();
+
+    let (y, m, d) = if days == 60 {
+        (1900, 2, 29)
+    } else {
+        let mut adj_days = days;
+        if days > 60 {
+            adj_days -= 1;
+        }
+        let mut y = 1900;
+        let mut d_left = adj_days - 1;
+        loop {
+            let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+            let days_in_year = if is_leap { 366 } else { 365 };
+            if d_left >= days_in_year {
+                d_left -= days_in_year;
+                y += 1;
+            } else {
+                break;
+            }
+        }
+        let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+        let month_days = if is_leap {
+            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        } else {
+            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        };
+        let mut m = 1;
+        for &md in month_days.iter() {
+            if d_left >= md {
+                d_left -= md;
+                m += 1;
+            } else {
+                break;
+            }
+        }
+        (y, m, d_left + 1)
+    };
+
+    let total_seconds = (frac * 86400.0 + 0.5).floor() as i32;
+    let hour = total_seconds / 3600;
+    let minute = (total_seconds % 3600) / 60;
+    let second = total_seconds % 60;
+
+    Some((y, m, d, hour, minute, second))
+}
+
+fn is_date_format(num_fmt_id: usize, format_code: Option<&str>) -> bool {
+    let built_in_dates = [14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47];
+    if built_in_dates.contains(&num_fmt_id) {
+        return true;
+    }
+    if let Some(code) = format_code {
+        let code_lower = code.to_lowercase();
+        let mut stripped = String::new();
+        let mut in_bracket = false;
+        let mut in_quote = false;
+        for c in code_lower.chars() {
+            if c == '"' {
+                in_quote = !in_quote;
+            } else if c == '[' && !in_quote {
+                in_bracket = true;
+            } else if c == ']' && !in_quote {
+                in_bracket = false;
+            } else if !in_bracket && !in_quote {
+                stripped.push(c);
+            }
+        }
+        stripped.contains('y') || stripped.contains('d') || stripped.contains('m')
+    } else {
+        false
+    }
+}
+
+fn format_date(value: f64, format_code: Option<&str>) -> String {
+    if let Some((y, m, d, hh, mm, ss)) = oa_date_to_date(value) {
+        let mut has_time = false;
+        if let Some(code) = format_code {
+            let code_lower = code.to_lowercase();
+            let mut stripped = String::new();
+            let mut in_bracket = false;
+            let mut in_quote = false;
+            for c in code_lower.chars() {
+                if c == '"' {
+                    in_quote = !in_quote;
+                } else if c == '[' && !in_quote {
+                    in_bracket = true;
+                } else if c == ']' && !in_quote {
+                    in_bracket = false;
+                } else if !in_bracket && !in_quote {
+                    stripped.push(c);
+                }
+            }
+            has_time = stripped.contains('h') || stripped.contains('s');
+        }
+
+        if has_time {
+            if ss == 0 {
+                format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hh, mm)
+            } else {
+                format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hh, mm, ss)
+            }
+        } else {
+            format!("{:04}-{:02}-{:02}", y, m, d)
+        }
+    } else {
+        value.to_string()
+    }
+}
+
+fn is_percent_format(format_code: Option<&str>) -> bool {
+    if let Some(code) = format_code {
+        let mut in_quote = false;
+        for c in code.chars() {
+            if c == '"' {
+                in_quote = !in_quote;
+            } else if c == '%' && !in_quote {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn format_percent(value: f64, format_code: &str) -> String {
+    let mut decimals = 0;
+    if let Some(dot_idx) = format_code.find('.') {
+        if let Some(pct_idx) = format_code.find('%') {
+            if pct_idx > dot_idx {
+                let sub = &format_code[dot_idx + 1..pct_idx];
+                decimals = sub.chars().filter(|&c| c == '0' || c == '#').count();
+            }
+        }
+    }
+    format!("{:.*}%", decimals, value * 100.0)
+}
+
+fn get_format_code(num_fmt_id: usize, custom_num_fmts: &HashMap<usize, String>) -> Option<String> {
+    if let Some(custom) = custom_num_fmts.get(&num_fmt_id) {
+        return Some(custom.clone());
+    }
+    let built_in = match num_fmt_id {
+        0 => "General",
+        1 => "0",
+        2 => "0.00",
+        3 => "#,##0",
+        4 => "#,##0.00",
+        9 => "0%",
+        10 => "0.00%",
+        11 => "0.00E+00",
+        12 => "# ?/?",
+        13 => "# ??/??",
+        14 => "m/d/yy",
+        15 => "d-mmm-yy",
+        16 => "d-mmm",
+        17 => "mmm-yy",
+        18 => "h:mm AM/PM",
+        19 => "h:mm:ss AM/PM",
+        20 => "h:mm",
+        21 => "h:mm:ss",
+        22 => "m/d/yy h:mm",
+        37 => "#,##0 ;(#,##0)",
+        38 => "#,##0 ;[Red](#,##0)",
+        39 => "#,##0.00;(#,##0.00)",
+        40 => "#,##0.00;[Red](#,##0.00)",
+        45 => "mm:ss",
+        46 => "[h]:mm:ss",
+        47 => "mmss.0",
+        48 => "##0.0E+0",
+        49 => "@",
+        _ => return None,
+    };
+    Some(built_in.to_string())
+}
+
+fn format_cell_value(value_str: &str, num_fmt_id: usize, custom_num_fmts: &HashMap<usize, String>) -> String {
+    if let Ok(val) = value_str.parse::<f64>() {
+        let format_code = get_format_code(num_fmt_id, custom_num_fmts);
+        let format_ref = format_code.as_deref();
+        if is_date_format(num_fmt_id, format_ref) {
+            return format_date(val, format_ref);
+        }
+        if is_percent_format(format_ref) {
+            return format_percent(val, format_ref.unwrap());
+        }
+        if let Some(code) = format_ref {
+            if code == "0.00" {
+                return format!("{:.2}", val);
+            } else if code == "0" {
+                return format!("{:.0}", val);
+            }
+        }
+    }
+    value_str.to_string()
 }

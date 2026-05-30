@@ -1724,6 +1724,9 @@ fn render_model_3d(
         const fill = new THREE.DirectionalLight(0x6090e0, 0.6);
         fill.position.set(-3, 2, -1);
         scene.add(fill);
+        const rim = new THREE.DirectionalLight(0xd0b0ff, 0.4);
+        rim.position.set(-1, 1, -3);
+        scene.add(rim);
 
         const b64 = window.{glb_var_name};
         const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
@@ -1924,6 +1927,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
     let slide_count = presentation.slides.len();
     let mut sidebar_thumbs = String::new();
     let mut slides_html = String::new();
+    let mut has_math = false;
 
     for (i, slide) in presentation.slides.iter().enumerate() {
         let slide_num = i + 1;
@@ -1944,6 +1948,9 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 slide.part_path, e
             ))
         })?;
+        if slide_xml.contains("<m:oMath") || slide_xml.contains("<oMath") {
+            has_math = true;
+        }
         let slide_doc = roxmltree::Document::parse(&slide_xml)
             .map_err(|e| HandlerError::OperationFailed(format!("roxmltree parse error: {}", e)))?;
 
@@ -2046,6 +2053,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                         let mut prompt_shape_html = String::new();
                         render_shape(
                             &child,
+                            slide_num,
                             &slide.part_path,
                             &slide_rels,
                             &theme_colors,
@@ -2062,6 +2070,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                     let mut pic_html = String::new();
                     render_picture(
                         &child,
+                        slide_num,
                         &slide.part_path,
                         &slide_rels,
                         &mut pic_html,
@@ -2086,6 +2095,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                         let mut prompt_shape_html = String::new();
                         render_shape(
                             &child,
+                            slide_num,
                             &slide.part_path,
                             &slide_rels,
                             &theme_colors,
@@ -2102,6 +2112,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                     let mut pic_html = String::new();
                     render_picture(
                         &child,
+                        slide_num,
                         &slide.part_path,
                         &slide_rels,
                         &mut pic_html,
@@ -2124,6 +2135,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 if tag == "sp" {
                     render_shape(
                         &child,
+                        slide_num,
                         &slide.part_path,
                         &slide_rels,
                         &theme_colors,
@@ -2137,6 +2149,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 } else if tag == "pic" {
                     render_picture(
                         &child,
+                        slide_num,
                         &slide.part_path,
                         &slide_rels,
                         &mut slides_html,
@@ -2171,7 +2184,16 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                                     .and_then(|s| s.parse::<f64>().ok())
                                     .unwrap_or(0.0)
                                     / 12700.0;
-                                render_table(&child, &theme_colors, &mut slides_html, x, y, cx, cy);
+                                render_table(
+                                    &child,
+                                    slide_num,
+                                    &theme_colors,
+                                    &mut slides_html,
+                                    x,
+                                    y,
+                                    cx,
+                                    cy,
+                                );
                             }
                         }
                     } else if child.descendants().any(|n| n.has_tag_name("oleObj")) {
@@ -2207,6 +2229,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 } else if tag == "grpSp" {
                     render_group_shape(
                         &child,
+                        slide_num,
                         &slide.part_path,
                         &slide_rels,
                         &theme_colors,
@@ -2240,6 +2263,13 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         slides_html.push_str("</div>\n");
     }
 
+    let mut head_injections = String::new();
+    if has_math {
+        head_injections.push_str("<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\" media=\"print\" onload=\"this.media='all'\" onerror=\"this.remove()\">\n");
+        head_injections.push_str("<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\" onerror=\"document.querySelectorAll('.katex-formula').forEach(function(el){el.textContent=el.dataset.formula;el.style.fontFamily='monospace';el.style.color='#666'})\"></script>\n");
+    }
+    head_injections.push_str("<script type=\"importmap\">{\"imports\":{\"three\":\"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js\",\"three/addons/\":\"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/\"}}</script>\n");
+
     let file_name = "Presentation Preview";
 
     Ok(format!(
@@ -2249,7 +2279,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{file_name}</title>
-<style>
+{head_injections}<style>
 :root {{
   --slide-design-w: {w_pt:.0}pt;
   --slide-design-h: {h_pt:.0}pt;
@@ -2271,9 +2301,54 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 <script>
 {PREVIEW_JS}
 </script>
+<script>
+(function() {{
+    var _katexRetries = 0;
+    function fallbackKatex() {{
+        document.querySelectorAll('.katex-formula:not(.katex-rendered)').forEach(function(el) {{
+            el.textContent = el.dataset.formula;
+            el.style.fontFamily = 'monospace';
+            el.style.color = '#666';
+            el.classList.add('katex-rendered');
+        }});
+    }}
+    function renderKatex() {{
+        var pending = document.querySelectorAll('.katex-formula:not(.katex-rendered)');
+        if (pending.length === 0) return;
+        if (typeof katex === 'undefined') {{
+            if (!window._katexLoading) {{
+                window._katexLoading = true;
+                var link = document.createElement('link');
+                link.rel = 'stylesheet';
+                link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css';
+                link.onerror = function() {{ this.remove(); }};
+                document.head.appendChild(link);
+                var script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js';
+                script.onload = renderKatex;
+                script.onerror = fallbackKatex;
+                document.head.appendChild(script);
+                return;
+            }}
+            if (++_katexRetries > 20) {{ fallbackKatex(); return; }}
+            setTimeout(renderKatex, 100); return;
+        }}
+        pending.forEach(function(el) {{
+            try {{
+                katex.render(el.dataset.formula, el, {{ throwOnError: false, displayMode: true }});
+                el.classList.add('katex-rendered');
+            }} catch(e) {{ el.textContent = el.dataset.formula + ' (Error: ' + e.message + '. See https://katex.org/docs/supported.html for supported syntax.)'; }}
+        }});
+    }}
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', renderKatex);
+    else renderKatex();
+    new MutationObserver(function() {{ renderKatex(); }}).observe(document.body, {{ childList: true, subtree: true }});
+}})();
+</script>
 </body>
 </html>"#,
         file_name = file_name,
+        head_injections = head_injections,
         sidebar_thumbs = sidebar_thumbs,
         slides_html = slides_html,
         slide_count = slide_count
@@ -2282,6 +2357,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 
 fn render_shape(
     node: &roxmltree::Node,
+    slide_num: usize,
     slide_path: &str,
     rels: &oxml::rels::Relationships,
     theme_colors: &HashMap<String, String>,
@@ -2652,7 +2728,8 @@ fn render_shape(
     }
 
     let path_attr = format!(
-        " data-path=\"/slide[...]/shape[{}]\" title=\"{}\"",
+        " data-path=\"/slide[{}]/shape[{}]\" title=\"{}\"",
+        slide_num,
         id,
         html_escape(&name)
     );
@@ -2769,6 +2846,7 @@ fn render_shape(
 
 fn render_picture(
     node: &roxmltree::Node,
+    slide_num: usize,
     slide_path: &str,
     rels: &oxml::rels::Relationships,
     output: &mut String,
@@ -2995,7 +3073,7 @@ fn render_picture(
         .find(|n| n.has_tag_name("cNvPr"))
         .and_then(|n| n.attribute("id"))
         .unwrap_or("");
-    let path_attr = format!(" data-path=\"/slide[...]/picture[{}]\"", id);
+    let path_attr = format!(" data-path=\"/slide[{}]/picture[{}]\"", slide_num, id);
     output.push_str(&format!(
         "    <div class=\"picture\"{} style=\"{}\">",
         path_attr,
@@ -3067,6 +3145,7 @@ fn render_picture(
 
 fn render_picture_with_override_pos(
     node: &roxmltree::Node,
+    slide_num: usize,
     slide_path: &str,
     rels: &oxml::rels::Relationships,
     output: &mut String,
@@ -3076,6 +3155,7 @@ fn render_picture_with_override_pos(
 ) {
     render_picture(
         node,
+        slide_num,
         slide_path,
         rels,
         output,
@@ -3471,6 +3551,12 @@ fn render_run(
             }
         }
 
+        if let Some(highlight) = r_pr.children().find(|n| n.has_tag_name("highlight")) {
+            if let Some(color) = resolve_fill_color(&highlight, theme_colors) {
+                run_styles.push(format!("background-color:{}", color));
+            }
+        }
+
         let latin_typeface = r_pr
             .children()
             .find(|n| n.has_tag_name("latin"))
@@ -3595,6 +3681,7 @@ fn render_run(
 
 fn render_table(
     gf: &roxmltree::Node,
+    slide_num: usize,
     theme_colors: &HashMap<String, String>,
     output: &mut String,
     x_pt: f64,
@@ -3641,11 +3728,21 @@ fn render_table(
         cx_pt
     };
 
+    let id = gf
+        .descendants()
+        .find(|n| n.has_tag_name("cNvPr"))
+        .and_then(|n| n.attribute("id"))
+        .unwrap_or("");
+    let table_path = format!("/slide[{}]/table[{}]", slide_num, id);
+
     output.push_str(&format!(
         "    <div class=\"table-container\" style=\"left:{:.2}pt;top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;\">\n",
         x_pt, y_pt, table_width_pt, cy_pt
     ));
-    output.push_str("      <table class=\"slide-table\">\n");
+    output.push_str(&format!(
+        "      <table class=\"slide-table\" data-path=\"{}\">\n",
+        table_path
+    ));
 
     if !grid_cols.is_empty() {
         output.push_str("        <colgroup>");
@@ -3678,8 +3775,11 @@ fn render_table(
 
     let mut row_index = 0;
     let mut rowspan_tracker: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut tr_idx = 0;
 
     for tr in tbl.children().filter(|n| n.has_tag_name("tr")) {
+        tr_idx += 1;
+        let row_path = format!("{}/tr[{}]", table_path, tr_idx);
         let row_h = tr
             .attribute("h")
             .and_then(|s| s.parse::<f64>().ok())
@@ -3689,12 +3789,18 @@ fn render_table(
         } else {
             "".to_string()
         };
-        output.push_str(&format!("        <tr{}>\n", row_style));
+        output.push_str(&format!(
+            "        <tr{} data-path=\"{}\">\n",
+            row_style, row_path
+        ));
 
         let mut col_index = 0;
         let mut skip_cols: usize = 0;
+        let mut tc_idx = 0;
 
         for tc in tr.children().filter(|n| n.has_tag_name("tc")) {
+            tc_idx += 1;
+            let cell_path = format!("{}/tc[{}]", row_path, tc_idx);
             while rowspan_tracker
                 .get(&(row_index, col_index))
                 .copied()
@@ -3905,8 +4011,8 @@ fn render_table(
             }
 
             output.push_str(&format!(
-                "          <td{}{}>{}\n",
-                span_attrs, style_attr, diag_overlay
+                "          <td data-path=\"{}\"{}{}>{}\n",
+                cell_path, span_attrs, style_attr, diag_overlay
             ));
 
             let tx_body = tc.children().find(|n| n.has_tag_name("txBody"));
@@ -4163,6 +4269,7 @@ fn render_connector(
 #[allow(clippy::too_many_arguments)]
 fn render_group_shape(
     node: &roxmltree::Node,
+    slide_num: usize,
     slide_path: &str,
     rels: &oxml::rels::Relationships,
     theme_colors: &HashMap<String, String>,
@@ -4283,6 +4390,7 @@ fn render_group_shape(
                 let mut shape_html = String::new();
                 render_shape(
                     &child,
+                    slide_num,
                     slide_path,
                     rels,
                     theme_colors,
@@ -4300,6 +4408,7 @@ fn render_group_shape(
                 let mut pic_html = String::new();
                 render_picture_with_override_pos(
                     &child,
+                    slide_num,
                     slide_path,
                     rels,
                     &mut pic_html,
@@ -4318,6 +4427,7 @@ fn render_group_shape(
         } else if tag == "grpSp" {
             render_group_shape(
                 &child,
+                slide_num,
                 slide_path,
                 rels,
                 theme_colors,

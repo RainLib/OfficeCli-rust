@@ -87,7 +87,18 @@ impl DocumentHandler for PptxHandler {
                 "package opened in read-only mode".to_string(),
             ));
         }
-        crate::view::set_shape_text(&mut self.package.borrow_mut(), path, properties)
+        if let Some(range_paths_str) = properties.get("range_paths") {
+            let segments = handler_common::parse_range_paths(range_paths_str).map_err(|e| {
+                HandlerError::InvalidArgument(format!("invalid range paths: {}", e))
+            })?;
+            crate::view::apply_pptx_range_highlights(
+                &mut self.package.borrow_mut(),
+                properties,
+                &segments,
+            )
+        } else {
+            crate::view::set_shape_text(&mut self.package.borrow_mut(), path, properties)
+        }
     }
 
     fn add(
