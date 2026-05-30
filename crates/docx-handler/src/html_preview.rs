@@ -4,6 +4,30 @@ use std::collections::{HashMap, HashSet};
 
 const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
+fn get_node_attr<'a, 'input>(node: &roxmltree::Node<'a, 'input>, local_name: &str) -> Option<&'a str> {
+    node.attribute((W_NS, local_name))
+        .or_else(|| node.attribute(("http://schemas.openxmlformats.org/officeDocument/2006/relationships", local_name)))
+        .or_else(|| node.attribute(local_name))
+        .or_else(|| {
+            node.attributes().iter().find(|a| {
+                let name = a.name();
+                if name == local_name {
+                    return true;
+                }
+                if name.len() == local_name.len() + 2 {
+                    if name.starts_with("w:") && &name[2..] == local_name {
+                        return true;
+                    }
+                    if name.starts_with("r:") && &name[2..] == local_name {
+                        return true;
+                    }
+                }
+                false
+            }).map(|a| a.value())
+        })
+}
+
+
 struct DocDefaults {
     font: String,
     size_pt: f64,
@@ -233,10 +257,10 @@ fn parse_styles(package: &OxmlPackage) -> (HashMap<String, DocxStyle>, DocDefaul
                     if let Some(p_pr) = style.children().find(|n| n.has_tag_name("pPr")) {
                         if let Some(num_pr) = p_pr.children().find(|n| n.has_tag_name("numPr")) {
                             num_id = num_pr.children().find(|n| n.has_tag_name("numId"))
-                                .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")))
+                                .and_then(|n| get_node_attr(&n, "val"))
                                 .map(|s| s.to_string());
                             ilvl = num_pr.children().find(|n| n.has_tag_name("ilvl"))
-                                .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")))
+                                .and_then(|n| get_node_attr(&n, "val"))
                                 .and_then(|s| s.parse::<usize>().ok());
                         }
                         if let Some(spacing) = p_pr.children().find(|n| n.has_tag_name("spacing")) {
@@ -322,10 +346,10 @@ fn parse_numbering(
     if let Ok(num_xml) = package.read_part_xml("word/numbering.xml") {
         if let Ok(num_doc) = roxmltree::Document::parse(&num_xml) {
             for abs in num_doc.descendants().filter(|n| n.has_tag_name("abstractNum")) {
-                if let Some(abs_id) = abs.attribute((W_NS, "abstractNumId")).or_else(|| abs.attribute("w:abstractNumId")) {
+                if let Some(abs_id) = get_node_attr(&abs, "abstractNumId") {
                     let mut levels = HashMap::new();
                     for lvl in abs.children().filter(|n| n.has_tag_name("lvl")) {
-                        if let Some(ilvl) = lvl.attribute((W_NS, "ilvl")).or_else(|| lvl.attribute("w:ilvl")) {
+                        if let Some(ilvl) = get_node_attr(&lvl, "ilvl") {
                             let mut num_fmt = "decimal".to_string();
                             let mut lvl_text = String::new();
                             let mut left_pt = 0.0;
@@ -339,36 +363,36 @@ fn parse_numbering(
                             let mut italic = false;
 
                             if let Some(fmt_el) = lvl.children().find(|n| n.has_tag_name("numFmt")) {
-                                if let Some(val) = fmt_el.attribute((W_NS, "val")).or_else(|| fmt_el.attribute("w:val")) {
+                                if let Some(val) = get_node_attr(&fmt_el, "val") {
                                     num_fmt = val.to_string();
                                 }
                             }
                             if let Some(txt_el) = lvl.children().find(|n| n.has_tag_name("lvlText")) {
-                                if let Some(val) = txt_el.attribute((W_NS, "val")).or_else(|| txt_el.attribute("w:val")) {
+                                if let Some(val) = get_node_attr(&txt_el, "val") {
                                     lvl_text = val.to_string();
                                 }
                             }
                             if let Some(start_el) = lvl.children().find(|n| n.has_tag_name("start")) {
-                                if let Some(val) = start_el.attribute((W_NS, "val")).or_else(|| start_el.attribute("w:val")) {
+                                if let Some(val) = get_node_attr(&start_el, "val") {
                                     if let Ok(v) = val.parse::<usize>() {
                                         start = v;
                                     }
                                 }
                             }
                             if let Some(jc_el) = lvl.children().find(|n| n.has_tag_name("lvlJc")) {
-                                if let Some(val) = jc_el.attribute((W_NS, "val")).or_else(|| jc_el.attribute("w:val")) {
+                                if let Some(val) = get_node_attr(&jc_el, "val") {
                                     jc = val.to_string();
                                 }
                             }
 
                             if let Some(p_pr) = lvl.children().find(|n| n.has_tag_name("pPr")) {
                                 if let Some(ind) = p_pr.children().find(|n| n.has_tag_name("ind")) {
-                                    if let Some(l) = ind.attribute((W_NS, "left")).or_else(|| ind.attribute("w:left")) {
+                                    if let Some(l) = get_node_attr(&ind, "left") {
                                         if let Ok(twips) = l.parse::<f64>() {
                                             left_pt = twips / 20.0;
                                         }
                                     }
-                                    if let Some(h) = ind.attribute((W_NS, "hanging")).or_else(|| ind.attribute("w:hanging")) {
+                                    if let Some(h) = get_node_attr(&ind, "hanging") {
                                         if let Ok(twips) = h.parse::<f64>() {
                                             hanging_pt = twips / 20.0;
                                         }
@@ -378,17 +402,17 @@ fn parse_numbering(
 
                             if let Some(r_pr) = lvl.children().find(|n| n.has_tag_name("rPr")) {
                                 if let Some(rf) = r_pr.children().find(|n| n.has_tag_name("rFonts")) {
-                                    font_name = rf.attribute((W_NS, "ascii")).or_else(|| rf.attribute("w:ascii")).map(|s| s.to_string());
+                                    font_name = get_node_attr(&rf, "ascii").map(|s| s.to_string());
                                 }
                                 if let Some(sz) = r_pr.children().find(|n| n.has_tag_name("sz")) {
-                                    if let Some(val) = sz.attribute((W_NS, "val")).or_else(|| sz.attribute("w:val")) {
+                                    if let Some(val) = get_node_attr(&sz, "val") {
                                         if let Ok(half_pt) = val.parse::<f64>() {
                                             font_size_pt = Some(half_pt / 2.0);
                                         }
                                     }
                                 }
                                 if let Some(color_el) = r_pr.children().find(|n| n.has_tag_name("color")) {
-                                    if let Some(val) = color_el.attribute((W_NS, "val")).or_else(|| color_el.attribute("w:val")) {
+                                    if let Some(val) = get_node_attr(&color_el, "val") {
                                         if val != "auto" && !val.is_empty() {
                                             color = Some(if val.starts_with('#') { val.to_string() } else { format!("#{}", val) });
                                         }
@@ -418,14 +442,14 @@ fn parse_numbering(
             }
 
             for num in num_doc.descendants().filter(|n| n.has_tag_name("num")) {
-                if let Some(num_id) = num.attribute((W_NS, "numId")).or_else(|| num.attribute("w:numId")) {
+                if let Some(num_id) = get_node_attr(&num, "numId") {
                     if let Some(abs_ref) = num.children().find(|n| n.has_tag_name("abstractNumId")) {
-                        if let Some(abs_val) = abs_ref.attribute((W_NS, "val")).or_else(|| abs_ref.attribute("w:val")) {
+                        if let Some(abs_val) = get_node_attr(&abs_ref, "val") {
                             let mut start_overrides = HashMap::new();
                             for ovr in num.children().filter(|n| n.has_tag_name("lvlOverride")) {
-                                if let Some(ilvl) = ovr.attribute((W_NS, "ilvl")).or_else(|| ovr.attribute("w:ilvl")) {
+                                if let Some(ilvl) = get_node_attr(&ovr, "ilvl") {
                                     if let Some(so) = ovr.children().find(|n| n.has_tag_name("startOverride")) {
-                                        if let Some(val) = so.attribute((W_NS, "val")).or_else(|| so.attribute("w:val")) {
+                                        if let Some(val) = get_node_attr(&so, "val") {
                                             if let Ok(v) = val.parse::<usize>() {
                                                 start_overrides.insert(ilvl.to_string(), v);
                                             }
@@ -1265,7 +1289,7 @@ a:hover {{
 
 fn resolve_run_background(r_pr: &roxmltree::Node) -> Option<String> {
     if let Some(hl) = r_pr.children().find(|n| n.has_tag_name("highlight")) {
-        if let Some(val) = hl.attribute((W_NS, "val")).or_else(|| hl.attribute("w:val")) {
+        if let Some(val) = hl.attribute("val").or_else(|| hl.attribute((W_NS, "val"))).or_else(|| hl.attribute("w:val")) {
             let hl_color = match val.to_lowercase().as_str() {
                 "yellow" => "#FFFF00",
                 "green" => "#00FF00",
@@ -1291,7 +1315,7 @@ fn resolve_run_background(r_pr: &roxmltree::Node) -> Option<String> {
         }
     }
     if let Some(shd) = r_pr.children().find(|n| n.has_tag_name("shd")) {
-        if let Some(fill) = shd.attribute((W_NS, "fill")).or_else(|| shd.attribute("w:fill")) {
+        if let Some(fill) = shd.attribute("fill").or_else(|| shd.attribute((W_NS, "fill"))).or_else(|| shd.attribute("w:fill")) {
             if fill != "auto" && !fill.is_empty() && is_hex_color(fill) {
                 return Some(if fill.starts_with('#') { fill.to_string() } else { format!("#{}", fill) });
             }
@@ -1370,7 +1394,7 @@ fn render_run(
     output: &mut String,
     styles: &HashMap<String, DocxStyle>,
     doc_defaults: &DocDefaults,
-    para_style_id: &str,
+    _para_style_id: &str,
     package: &OxmlPackage,
     rels: &oxml::rels::Relationships,
 ) {
@@ -1472,10 +1496,7 @@ fn render_run(
         format!(" style=\"{}\"", css_parts.join("; "))
     };
 
-    let has_span = !style_attr.is_empty();
-    if has_span {
-        output.push_str(&format!("<span{}>", style_attr));
-    }
+    output.push_str(&format!("<span data-path=\"{}\"{}>", path, style_attr));
 
     for child in node.children() {
         if !child.is_element() {
@@ -1520,9 +1541,7 @@ fn render_run(
         }
     }
 
-    if has_span {
-        output.push_str("</span>");
-    }
+    output.push_str("</span>");
 }
 
 fn resolve_run_properties(
@@ -1543,7 +1562,7 @@ fn resolve_run_properties(
     let p_pr = para_node.children().find(|n| n.has_tag_name("pPr"));
     let mut p_style_id = p_pr.as_ref()
         .and_then(|p| p.children().find(|n| n.has_tag_name("pStyle")))
-        .and_then(|s| s.attribute((W_NS, "val")).or_else(|| s.attribute("w:styleId")))
+        .and_then(|s| get_node_attr(&s, "val").or_else(|| get_node_attr(&s, "styleId")))
         .unwrap_or("")
         .to_string();
 
@@ -1577,7 +1596,7 @@ fn resolve_run_properties(
     let r_pr = run_node.children().find(|n| n.has_tag_name("rPr"));
     let r_style_id = r_pr.as_ref()
         .and_then(|r| r.children().find(|n| n.has_tag_name("rStyle")))
-        .and_then(|s| s.attribute((W_NS, "val")).or_else(|| s.attribute("w:val")))
+        .and_then(|s| get_node_attr(&s, "val"))
         .unwrap_or("");
     if !r_style_id.is_empty() {
         let mut r_style_chain = Vec::new();
@@ -1604,21 +1623,21 @@ fn resolve_run_properties(
 
     if let Some(rp) = r_pr {
         if let Some(sz) = rp.children().find(|n| n.has_tag_name("sz")) {
-            if let Some(val) = sz.attribute((W_NS, "val")).or_else(|| sz.attribute("w:val")) {
+            if let Some(val) = get_node_attr(&sz, "val") {
                 if let Ok(half_pt) = val.parse::<f64>() {
                     size_pt = Some(half_pt / 2.0);
                 }
             }
         }
         if let Some(color_el) = rp.children().find(|n| n.has_tag_name("color")) {
-            if let Some(val) = color_el.attribute((W_NS, "val")).or_else(|| color_el.attribute("w:val")) {
+            if let Some(val) = get_node_attr(&color_el, "val") {
                 if val != "auto" && !val.is_empty() {
                     color = Some(if val.starts_with('#') { val.to_string() } else { format!("#{}", val) });
                 }
             }
         }
         if let Some(rf_el) = rp.children().find(|n| n.has_tag_name("rFonts")) {
-            if let Some(ascii) = rf_el.attribute((W_NS, "ascii")).or_else(|| rf_el.attribute("w:ascii")) {
+            if let Some(ascii) = get_node_attr(&rf_el, "ascii") {
                 font = Some(ascii.to_string());
             }
         }
@@ -1652,7 +1671,7 @@ fn resolve_paragraph_metrics(
     let p_pr = para_node.children().find(|n| n.has_tag_name("pPr"));
     let mut p_style_id = p_pr.as_ref()
         .and_then(|p| p.children().find(|n| n.has_tag_name("pStyle")))
-        .and_then(|s| s.attribute((W_NS, "val")).or_else(|| s.attribute("w:val")))
+        .and_then(|s| get_node_attr(&s, "val"))
         .unwrap_or("")
         .to_string();
 
@@ -1691,7 +1710,7 @@ fn resolve_paragraph_metrics(
 
     if let Some(pp) = p_pr {
         if let Some(jc) = pp.children().find(|n| n.has_tag_name("jc")) {
-            if let Some(val) = jc.attribute((W_NS, "val")).or_else(|| jc.attribute("w:val")) {
+            if let Some(val) = get_node_attr(&jc, "val") {
                 align = match val {
                     "center" => "center".to_string(),
                     "right" | "end" => "right".to_string(),
@@ -1701,19 +1720,19 @@ fn resolve_paragraph_metrics(
             }
         }
         if let Some(spacing) = pp.children().find(|n| n.has_tag_name("spacing")) {
-            if let Some(before) = spacing.attribute((W_NS, "before")).or_else(|| spacing.attribute("w:before")) {
+            if let Some(before) = get_node_attr(&spacing, "before") {
                 if let Ok(twips) = before.parse::<f64>() {
                     space_before_pt = twips / 20.0;
                 }
             }
-            if let Some(after) = spacing.attribute((W_NS, "after")).or_else(|| spacing.attribute("w:after")) {
+            if let Some(after) = get_node_attr(&spacing, "after") {
                 if let Ok(twips) = after.parse::<f64>() {
                     space_after_pt = twips / 20.0;
                 }
             }
-            if let Some(line) = spacing.attribute((W_NS, "line")).or_else(|| spacing.attribute("w:line")) {
+            if let Some(line) = get_node_attr(&spacing, "line") {
                 if let Ok(twips) = line.parse::<f64>() {
-                    let rule = spacing.attribute((W_NS, "lineRule")).or_else(|| spacing.attribute("w:lineRule")).unwrap_or("auto");
+                    let rule = get_node_attr(&spacing, "lineRule").unwrap_or("auto");
                     if rule == "auto" {
                         line_spacing_mult = Some(twips / 240.0);
                         line_spacing_exact = None;
@@ -1728,17 +1747,17 @@ fn resolve_paragraph_metrics(
             let mut left = 0.0;
             let mut hanging = 0.0;
             let mut first_line = 0.0;
-            if let Some(l) = ind.attribute((W_NS, "left")).or_else(|| ind.attribute("w:left")) {
+            if let Some(l) = get_node_attr(&ind, "left") {
                 if let Ok(twips) = l.parse::<f64>() {
                     left = twips / 20.0;
                 }
             }
-            if let Some(h) = ind.attribute((W_NS, "hanging")).or_else(|| ind.attribute("w:hanging")) {
+            if let Some(h) = get_node_attr(&ind, "hanging") {
                 if let Ok(twips) = h.parse::<f64>() {
                     hanging = twips / 20.0;
                 }
             }
-            if let Some(fl) = ind.attribute((W_NS, "firstLine")).or_else(|| ind.attribute("w:firstLine")) {
+            if let Some(fl) = get_node_attr(&ind, "firstLine") {
                 if let Ok(twips) = fl.parse::<f64>() {
                     first_line = twips / 20.0;
                 }
@@ -1755,7 +1774,7 @@ fn resolve_paragraph_metrics(
             }
         }
         if let Some(shd) = pp.children().find(|n| n.has_tag_name("shd")) {
-            if let Some(fill) = shd.attribute((W_NS, "fill")).or_else(|| shd.attribute("w:fill")) {
+            if let Some(fill) = get_node_attr(&shd, "fill") {
                 if fill != "auto" && !fill.is_empty() {
                     shading_fill = Some(if fill.starts_with('#') { fill.to_string() } else { format!("#{}", fill) });
                 }
@@ -1990,7 +2009,7 @@ fn get_paragraph_list_style(
     if let Some(pp) = p_pr.as_ref() {
         if let Some(num_pr) = pp.children().find(|n| n.has_tag_name("numPr")) {
             let num_id = num_pr.children().find(|n| n.has_tag_name("numId"))
-                .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")))
+                .and_then(|n| get_node_attr(&n, "val"))
                 .unwrap_or("");
             if num_id == "0" {
                 return None;
@@ -2002,11 +2021,11 @@ fn get_paragraph_list_style(
     if let Some(pp) = p_pr.as_ref() {
         if let Some(num_pr) = pp.children().find(|n| n.has_tag_name("numPr")) {
             let num_id = num_pr.children().find(|n| n.has_tag_name("numId"))
-                .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")));
+                .and_then(|n| get_node_attr(&n, "val"));
             if let Some(nid) = num_id {
                 if nid != "0" && !nid.is_empty() {
                     let ilvl = num_pr.children().find(|n| n.has_tag_name("ilvl"))
-                        .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")))
+                        .and_then(|n| get_node_attr(&n, "val"))
                         .unwrap_or("0")
                         .parse::<usize>()
                         .unwrap_or(0);
@@ -2020,7 +2039,7 @@ fn get_paragraph_list_style(
     // Style-inherited numPr: skip when the paragraph is itself a heading
     let style_id = p_pr.as_ref()
         .and_then(|p| p.children().find(|n| n.has_tag_name("pStyle")))
-        .and_then(|s| s.attribute((W_NS, "val")).or_else(|| s.attribute("w:val")))
+        .and_then(|s| get_node_attr(&s, "val"))
         .unwrap_or("");
     
     let style_name = get_style_name(style_id, styles);
@@ -2053,10 +2072,10 @@ fn resolve_num_pr(
     if let Some(pp) = p_pr.as_ref() {
         if let Some(num_pr) = pp.children().find(|n| n.has_tag_name("numPr")) {
             let num_id = num_pr.children().find(|n| n.has_tag_name("numId"))
-                .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")))
+                .and_then(|n| get_node_attr(&n, "val"))
                 .unwrap_or("");
             let ilvl = num_pr.children().find(|n| n.has_tag_name("ilvl"))
-                .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")))
+                .and_then(|n| get_node_attr(&n, "val"))
                 .unwrap_or("0")
                 .parse::<usize>()
                 .unwrap_or(0);
@@ -2071,7 +2090,7 @@ fn resolve_num_pr(
 
     let style_id = p_pr.as_ref()
         .and_then(|p| p.children().find(|n| n.has_tag_name("pStyle")))
-        .and_then(|s| s.attribute((W_NS, "val")).or_else(|| s.attribute("w:val")))
+        .and_then(|s| get_node_attr(&s, "val"))
         .unwrap_or("");
 
     if !style_id.is_empty() {
@@ -2184,6 +2203,7 @@ fn close_all_lists(
 
 fn render_paragraph_content(
     node: &roxmltree::Node,
+    para_path: &str,
     output: &mut String,
     styles: &HashMap<String, DocxStyle>,
     doc_defaults: &DocDefaults,
@@ -2193,7 +2213,7 @@ fn render_paragraph_content(
     let p_pr = node.children().find(|n| n.has_tag_name("pPr"));
     let p_style_id = p_pr.as_ref()
         .and_then(|p| p.children().find(|n| n.has_tag_name("pStyle")))
-        .and_then(|s| s.attribute((W_NS, "val")).or_else(|| s.attribute("w:val")))
+        .and_then(|s| s.attribute("val").or_else(|| s.attribute((W_NS, "val"))).or_else(|| s.attribute("w:val")))
         .unwrap_or("");
 
     let mut child_counts = HashMap::new();
@@ -2204,7 +2224,7 @@ fn render_paragraph_content(
         let tag = child.tag_name().name();
         let idx = child_counts.entry(tag.to_string()).or_insert(0);
         *idx += 1;
-        let child_path = format!("{}/{}[{}]", child.tag_name().name(), idx, idx);
+        let child_path = format!("{}/{}[{}]", para_path, tag, idx);
 
         if tag == "r" {
             render_run(
@@ -2252,7 +2272,7 @@ fn render_paragraph_content(
                 let r_tag = run_child.tag_name().name();
                 let r_idx = hyperlink_child_counts.entry(r_tag.to_string()).or_insert(0);
                 *r_idx += 1;
-                let run_child_path = format!("{}/hyperlink_r[{}]", child_path, r_idx);
+                let run_child_path = format!("{}/r[{}]", child_path, r_idx);
                 if r_tag == "r" {
                     render_run(
                         &run_child,
@@ -2480,7 +2500,7 @@ fn render_paragraph(
         *current_list_level = ilvl;
         *current_num_id = Some(num_id.clone());
         
-        output.push_str(&format!("<li class=\"marker-{}-{}\"", num_id, ilvl_ooxml));
+        output.push_str(&format!("<li class=\"marker-{}-{}\" data-path=\"{}\"", num_id, ilvl_ooxml, path));
         
         let mut li_styles = Vec::new();
         if metrics.align != "left" {
@@ -2566,7 +2586,7 @@ fn render_paragraph(
             output.push_str(&format!("<span style=\"{}\">{}</span>", marker_style, html_escape(&marker_str)));
         }
 
-        render_paragraph_content(node, output, styles, doc_defaults, rels, package);
+        render_paragraph_content(node, path, output, styles, doc_defaults, rels, package);
         *pending_li_close = true;
     } else {
         close_all_lists(output, list_stack, current_list_type, pending_li_close);
@@ -2617,7 +2637,7 @@ fn render_paragraph(
             let num_suppressed = if let Some(pp) = p_pr.as_ref() {
                 if let Some(num_pr) = pp.children().find(|n| n.has_tag_name("numPr")) {
                     let num_id = num_pr.children().find(|n| n.has_tag_name("numId"))
-                        .and_then(|n| n.attribute((W_NS, "val")).or_else(|| n.attribute("w:val")))
+                        .and_then(|n| get_node_attr(&n, "val"))
                         .unwrap_or("");
                     num_id == "0"
                 } else {
@@ -2681,7 +2701,7 @@ fn render_paragraph(
         output.push_str(&heading_num_html);
         
         let len_before = output.len();
-        render_paragraph_content(node, output, styles, doc_defaults, rels, package);
+        render_paragraph_content(node, path, output, styles, doc_defaults, rels, package);
         if output.len() == len_before {
             output.push_str("&nbsp;");
         }
@@ -2767,9 +2787,9 @@ fn render_table(
                         format!(" style=\"{}\"", p_styles.join("; "))
                     };
 
-                    output.push_str(&format!("<div{}>", style_attr));
+                    output.push_str(&format!("<div data-path=\"{}\"{}>", child_path, style_attr));
                     let len_before = output.len();
-                    render_paragraph_content(&child, output, styles, doc_defaults, rels, package);
+                    render_paragraph_content(&child, &child_path, output, styles, doc_defaults, rels, package);
                     if output.len() == len_before {
                         output.push_str("&nbsp;");
                     }
