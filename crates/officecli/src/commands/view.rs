@@ -85,6 +85,7 @@ pub fn handle_view(cmd: ViewCommand, format: OutputFormat) -> Result<String, Han
             .as_ref()
             .map(|c| c.split(',').map(|s| s.to_string()).collect()),
         page: cmd.page.clone(),
+        lazy_load: false,
     };
 
     let browser = cmd.browser;
@@ -224,6 +225,7 @@ fn handle_screenshot(
             .as_ref()
             .map(|c| c.split(',').map(|s| s.to_string()).collect()),
         page: cmd.page.clone(),
+        lazy_load: false,
     };
 
     // Step 1: Render HTML

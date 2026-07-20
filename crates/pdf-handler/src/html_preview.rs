@@ -428,17 +428,84 @@ pub fn view_as_html(reader: &PdfReader, opts: ViewOptions) -> Result<String, Han
     let mut pages_html = String::new();
     for i in 1..=total_pages {
         let (width, height, _, _) = get_page_dimensions(reader, i);
-        pages_html.push_str(&format!(
-            "<div class=\"page placeholder\" data-page=\"{}\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.15); transition:transform 0.2s, box-shadow 0.2s; display:flex; align-items:center; justify-content:center;\">
+        if opts.lazy_load {
+            pages_html.push_str(&format!(
+                "<div class=\"page placeholder\" data-page=\"{}\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.15); transition:transform 0.2s, box-shadow 0.2s; display:flex; align-items:center; justify-content:center;\">
   <div class=\"page-number-label\">Page {}</div>
   <div class=\"skeleton-loader\" style=\"position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:linear-gradient(90deg, #f8fafc 25%, #f1f5f9 50%, #f8fafc 75%); background-size:200% 100%; animation:shimmer 1.5s infinite;\">
     <div class=\"spinner\" style=\"width:24px; height:24px; border:2px solid #e2e8f0; border-top-color:#3b82f6; border-radius:50%; animation:spin 1s linear infinite;\"></div>
     <span style=\"font-size:12px; color:#94a3b8; font-weight:500;\">Loading page {}...</span>
   </div>
 </div>\n",
-            i, width, height, i, i
-        ));
+                i, width, height, i, i
+            ));
+        } else {
+            let inner_html = view_page_as_html(reader, i)?;
+            pages_html.push_str(&format!(
+                "<div class=\"page\" data-path=\"/page[{}]\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden;\">\n{}\n</div>\n",
+                i, width, height, inner_html
+            ));
+        }
     }
+
+    let lazy_loader_script = if opts.lazy_load {
+        r#"
+// Lazy Loading IntersectionObserver
+(function() {
+    const base = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
+
+    const observerOptions = {
+        root: null,
+        rootMargin: "300px 0px", // pre-load pages 300px before they enter viewport
+        threshold: 0.01
+    };
+
+    const loadPage = (placeholder) => {
+        if (placeholder.dataset.loading) return;
+        placeholder.dataset.loading = "true";
+        const pageNum = placeholder.dataset.page;
+
+        fetch(base + 'page/' + pageNum + '/html')
+            .then(res => {
+                if (!res.ok) throw new Error("HTTP error " + res.status);
+                return res.text();
+            })
+            .then(html => {
+                placeholder.outerHTML = html;
+                adjustTextScaling();
+            })
+            .catch(err => {
+                console.error("Failed to load page " + pageNum, err);
+                placeholder.dataset.loading = "false";
+                const errorLoader = placeholder.querySelector(".skeleton-loader");
+                if (errorLoader) {
+                    errorLoader.innerHTML = '<span style="color:#ef4444; font-size:12px; font-weight:500;">Failed to load. Click to retry.</span>';
+                    errorLoader.style.cursor = "pointer";
+                    errorLoader.onclick = () => {
+                        errorLoader.innerHTML = '<div class="spinner" style="width:24px; height:24px; border:2px solid #e2e8f0; border-top-color:#3b82f6; border-radius:50%; animation:spin 1s linear infinite;"></div><span style="font-size:12px; color:#94a3b8; font-weight:500;">Retrying page ' + pageNum + '...</span>';
+                        loadPage(placeholder);
+                    };
+                }
+            });
+    };
+
+    const observer = new IntersectionObserver((entries, observer) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                loadPage(entry.target);
+                observer.unobserve(entry.target);
+            }
+        });
+    }, observerOptions);
+
+    document.querySelectorAll(".page.placeholder").forEach(el => {
+        observer.observe(el);
+    });
+})();
+"#
+    } else {
+        ""
+    };
 
     Ok(format!(
         r#"<!DOCTYPE html>
@@ -539,63 +606,11 @@ window.addEventListener("load", adjustTextScaling);
 if (document.fonts && document.fonts.ready) {{
     document.fonts.ready.then(adjustTextScaling);
 }}
-
-// Lazy Loading IntersectionObserver
-(function() {{
-    const base = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
-    
-    const observerOptions = {{
-        root: null,
-        rootMargin: "300px 0px", // pre-load pages 300px before they enter viewport
-        threshold: 0.01
-    }};
-
-    const loadPage = (placeholder) => {{
-        if (placeholder.dataset.loading) return;
-        placeholder.dataset.loading = "true";
-        const pageNum = placeholder.dataset.page;
-        
-        fetch(base + 'page/' + pageNum + '/html')
-            .then(res => {{
-                if (!res.ok) throw new Error("HTTP error " + res.status);
-                return res.text();
-            }})
-            .then(html => {{
-                placeholder.outerHTML = html;
-                adjustTextScaling();
-            }})
-            .catch(err => {{
-                console.error("Failed to load page " + pageNum, err);
-                placeholder.dataset.loading = "false";
-                const errorLoader = placeholder.querySelector(".skeleton-loader");
-                if (errorLoader) {{
-                    errorLoader.innerHTML = '<span style="color:#ef4444; font-size:12px; font-weight:500;">Failed to load. Click to retry.</span>';
-                    errorLoader.style.cursor = "pointer";
-                    errorLoader.onclick = () => {{
-                        errorLoader.innerHTML = '<div class="spinner" style="width:24px; height:24px; border:2px solid #e2e8f0; border-top-color:#3b82f6; border-radius:50%; animation:spin 1s linear infinite;"></div><span style="font-size:12px; color:#94a3b8; font-weight:500;">Retrying page ' + pageNum + '...</span>';
-                        loadPage(placeholder);
-                    }};
-                }}
-            }});
-    }};
-
-    const observer = new IntersectionObserver((entries, observer) => {{
-        entries.forEach(entry => {{
-            if (entry.isIntersecting) {{
-                loadPage(entry.target);
-                observer.unobserve(entry.target);
-            }}
-        }});
-    }}, observerOptions);
-
-    document.querySelectorAll(".page.placeholder").forEach(el => {{
-        observer.observe(el);
-    }});
-}})();
+{}
 </script>
 </body>
 </html>"#,
-        file_name, pages_html
+        file_name, pages_html, lazy_loader_script
     ))
 }
 
@@ -604,4 +619,38 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::view_as_html;
+    use crate::reader::PdfReader;
+    use handler_common::ViewOptions;
+
+    #[test]
+    fn standalone_html_inlines_all_pages_without_server_requests() {
+        let reader = PdfReader::fallback(2, "standalone.pdf");
+        let html = view_as_html(&reader, ViewOptions::default()).unwrap();
+
+        assert!(html.contains("data-path=\"/page[1]\""));
+        assert!(html.contains("data-path=\"/page[2]\""));
+        assert!(!html.contains("fetch("));
+        assert!(!html.contains("page placeholder"));
+    }
+
+    #[test]
+    fn watch_html_keeps_lazy_page_loading() {
+        let reader = PdfReader::fallback(2, "watch.pdf");
+        let html = view_as_html(
+            &reader,
+            ViewOptions {
+                lazy_load: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(html.contains("fetch("));
+        assert!(html.contains("page placeholder"));
+    }
 }

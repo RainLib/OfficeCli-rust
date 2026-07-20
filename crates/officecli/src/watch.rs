@@ -755,7 +755,10 @@ async fn handle_index(
     let result = send_op_for_doc(
         &doc,
         HandlerOp::ViewHtml {
-            opts: ViewOptions::default(),
+            opts: ViewOptions {
+                lazy_load: true,
+                ..Default::default()
+            },
         },
     )
     .await;
@@ -1033,6 +1036,7 @@ async fn handle_view(
             .get("cols")
             .map(|c| c.split(',').map(|s| s.to_string()).collect()),
         page: params.get("page").cloned(),
+        lazy_load: mode == "html",
     };
 
     let op = match mode.as_str() {
