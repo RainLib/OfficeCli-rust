@@ -151,6 +151,7 @@ fn main() {
         commands::Command::Import(cmd) => commands::handle_import(cmd, format),
         commands::Command::Plugins(cmd) => commands::handle_plugins(cmd, format),
         commands::Command::Install(cmd) => commands::handle_install(cmd, format),
+        commands::Command::Skills(cmd) => commands::handle_skills(cmd, format),
         commands::Command::Open(cmd) => handle_open(cmd),
         commands::Command::Close(cmd) => handle_close(cmd),
         commands::Command::Watch(cmd) => handle_watch(cmd),

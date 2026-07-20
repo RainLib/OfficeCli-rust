@@ -22,6 +22,7 @@ mod refresh;
 mod remove;
 mod save;
 mod set;
+mod skills;
 mod swap;
 mod validate;
 mod view;
@@ -69,6 +70,7 @@ pub use refresh::RefreshCommand;
 pub use remove::RemoveCommand;
 pub use save::SaveCommand;
 pub use set::SetCommand;
+pub use skills::SkillsCommand;
 pub use swap::SwapCommand;
 pub use validate::ValidateCommand;
 pub use view::ViewCommand;
@@ -256,6 +258,8 @@ pub enum Command {
     Plugins(PluginsCommand),
     /// Install officecli binary, skills, and MCP configuration
     Install(InstallCommand),
+    /// List and install agent skill definitions
+    Skills(SkillsCommand),
     /// Open a document in resident mode (keeps handler in memory for fast subsequent commands)
     Open(OpenCommand),
     /// Close a document in resident mode (stops the background server)
@@ -306,6 +310,7 @@ pub use refresh::handle_refresh;
 pub use remove::handle_remove;
 pub use save::handle_save;
 pub use set::handle_set;
+pub use skills::handle_skills;
 pub use swap::handle_swap;
 pub use validate::handle_validate;
 pub use view::handle_view;
