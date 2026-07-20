@@ -17,6 +17,11 @@ pub struct ViewOptions {
     pub cols: Option<Vec<String>>,
     /// Page filter string (e.g. "1", "2-5", "1,3,5"). Parsed by each handler.
     pub page: Option<String>,
+    /// Whether HTML previews may load page content from the watch server.
+    ///
+    /// Standalone output must leave this disabled so the generated HTML has no
+    /// runtime dependency on a server.
+    pub lazy_load: bool,
 }
 
 /// Options for raw commands.
