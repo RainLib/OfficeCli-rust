@@ -44,10 +44,12 @@ pub fn add_element(
 }
 
 fn add_slide(package: &mut OxmlPackage, _parent: &str) -> Result<String, HandlerError> {
-    // Count existing slides to determine next slide number
+    // Logical slide index and physical part number are separate: part names can
+    // have gaps after a deletion.
     let pres = crate::navigation::build_presentation(package)?;
-    let slide_num = pres.slides.len() + 1;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_index = pres.slides.len() + 1;
+    let slide_part_number = next_slide_part_number(package);
+    let slide_path = format!("ppt/slides/slide{}.xml", slide_part_number);
 
     let slide_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -67,9 +69,10 @@ fn add_slide(package: &mut OxmlPackage, _parent: &str) -> Result<String, Handler
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Update presentation.xml to add the new slide reference
-    update_presentation_slides(package, slide_num)?;
+    update_presentation_slides(package, slide_part_number)?;
+    register_slide_content_type(package, &slide_path)?;
 
-    Ok(format!("/slide[{}]", slide_num))
+    Ok(format!("/slide[{}]", slide_index))
 }
 
 fn add_shape(
@@ -80,7 +83,7 @@ fn add_shape(
 ) -> Result<String, HandlerError> {
     // Parse parent path to find slide
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
 
     let text = properties.get("text").cloned().unwrap_or_default();
     let name = properties
@@ -130,17 +133,21 @@ fn add_text_to_shape(
 
 pub fn update_presentation_slides(
     package: &mut OxmlPackage,
-    slide_num: usize,
+    slide_part_number: usize,
 ) -> Result<(), HandlerError> {
     let pres_xml = package
         .read_part_xml("ppt/presentation.xml")
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-    // Add slide ID entry: <p:sldId id="256+N" r:id="rIdN"/>
-    // We need to find the next available rId and sldId
-    let sld_id = 256 + slide_num;
-    let r_id = format!("rId{}", slide_num + 2); // rId1 is usually the slide master
+    let sld_id = next_slide_id(&pres_xml)?;
 
+    // Relationship IDs share a namespace with masters, themes and other
+    // presentation parts, so derive the next free ID from the rels part.
+    let rels_path = "ppt/_rels/presentation.xml.rels";
+    let rels_xml = package
+        .read_part_xml(rels_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let r_id = format!("rId{}", find_max_rel_id(&rels_xml) + 1);
     let new_entry = format!("<p:sldId id=\"{}\" r:id=\"{}\"/>", sld_id, r_id);
 
     // Insert into <p:sldIdLst>
@@ -156,15 +163,9 @@ pub fn update_presentation_slides(
         .write_part_xml("ppt/presentation.xml", &modified)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
-    // Update presentation relationships
-    let rels_path = "ppt/_rels/presentation.xml.rels";
-    let rels_xml = package
-        .read_part_xml(rels_path)
-        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
-
     let new_rel = format!(
         "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{}.xml\"/>",
-        r_id, slide_num
+        r_id, slide_part_number
     );
 
     let modified_rels = if let Some(pos) = rels_xml.find("</Relationships>") {
@@ -180,6 +181,59 @@ pub fn update_presentation_slides(
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok(())
+}
+
+pub(crate) fn next_slide_part_number(package: &OxmlPackage) -> usize {
+    package
+        .list_parts()
+        .into_iter()
+        .filter_map(|path| {
+            path.strip_prefix("ppt/slides/slide")
+                .and_then(|value| value.strip_suffix(".xml"))
+                .and_then(|value| value.parse::<usize>().ok())
+        })
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_slide_id(presentation_xml: &str) -> Result<u64, HandlerError> {
+    let doc = roxmltree::Document::parse(presentation_xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid presentation.xml: {}", e)))?;
+    Ok(doc
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "sldId")
+        .filter_map(|node| node.attribute("id"))
+        .filter_map(|value| value.parse::<u64>().ok())
+        .max()
+        .unwrap_or(255)
+        + 1)
+}
+
+pub(crate) fn register_slide_content_type(
+    package: &mut OxmlPackage,
+    slide_path: &str,
+) -> Result<(), HandlerError> {
+    let content_types_path = "[Content_Types].xml";
+    let content_types_xml = package
+        .read_part_xml(content_types_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let part_name = format!("/{}", slide_path.trim_start_matches('/'));
+    if content_types_xml.contains(&format!("PartName=\"{}\"", part_name)) {
+        return Ok(());
+    }
+    let override_xml = format!(
+        "<Override PartName=\"{}\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>",
+        part_name
+    );
+    let close = content_types_xml.find("</Types>").ok_or_else(|| {
+        HandlerError::OperationFailed("invalid [Content_Types].xml: missing </Types>".to_string())
+    })?;
+    let mut updated = content_types_xml;
+    updated.insert_str(close, &override_xml);
+    package
+        .write_part_xml(content_types_path, &updated)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))
 }
 
 fn create_text_shape_xml(id: usize, name: &str, text: &str) -> String {
@@ -400,7 +454,7 @@ fn add_rectangle(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let slide_xml = package
         .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
@@ -454,7 +508,7 @@ fn add_ellipse(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let slide_xml = package
         .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
@@ -508,7 +562,7 @@ fn add_line_shape(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let slide_xml = package
         .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
@@ -580,7 +634,7 @@ fn add_group(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let slide_xml = package
         .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
@@ -667,7 +721,7 @@ fn add_picture(
     };
 
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let slide_xml = package
         .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
@@ -704,7 +758,7 @@ fn add_picture(
     }
 
     // Generate a relationship ID for the image
-    let rels_path = format!("ppt/slides/_rels/slide{}.xml.rels", slide_num);
+    let rels_path = crate::navigation::relationships_part_path(&slide_path);
     let rels_xml = package
         .read_part_xml(&rels_path)
         .unwrap_or_else(|_| "<Relationships/>".to_string());
@@ -809,7 +863,7 @@ fn add_video(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
 
     let video_ext = properties
         .get("format")
@@ -834,7 +888,7 @@ fn add_video(
     }
 
     // Wire slide→video relationship (Type: video, not image).
-    let slide_rels_path = format!("ppt/slides/_rels/slide{}.xml.rels", slide_num);
+    let slide_rels_path = crate::navigation::relationships_part_path(&slide_path);
     let rels_xml = package
         .read_part_xml(&slide_rels_path)
         .unwrap_or_else(|_| "<Relationships/>".to_string());
@@ -963,7 +1017,7 @@ fn add_table(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let slide_xml = package
         .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
@@ -1078,7 +1132,7 @@ fn add_chart_real(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
 
     // Chart index — probe parts for the next free number.
     let chart_idx = next_ppt_chart_index(package);
@@ -1127,7 +1181,7 @@ fn add_chart_real(
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     // Wire slide→chart rels.
-    let slide_rels_path = format!("ppt/slides/_rels/slide{}.xml.rels", slide_num);
+    let slide_rels_path = crate::navigation::relationships_part_path(&slide_path);
     let chart_rel_id = next_ppt_rel_id(package, &slide_rels_path);
     let chart_target = format!("../charts/chart{}.xml", chart_idx);
     let rel_xml = format!(
@@ -1352,7 +1406,7 @@ fn add_model3d_real(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
 
     let model_ext = properties
         .get("format")
@@ -1386,7 +1440,7 @@ fn add_model3d_real(
     }
 
     // Wire slide→model rel.
-    let slide_rels_path = format!("ppt/slides/_rels/slide{}.xml.rels", slide_num);
+    let slide_rels_path = crate::navigation::relationships_part_path(&slide_path);
     let model_rel_id = next_ppt_rel_id(package, &slide_rels_path);
     let model_target = format!("../media/model{}.{}", model_idx, model_ext_lower);
     let model_rel_xml = format!(
@@ -1721,13 +1775,13 @@ fn add_hyperlink(
     }
 
     let slide_num = parse_slide_num(parent)?;
-    let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let slide_xml = package
         .read_part_xml(&slide_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // Add relationship for the URL
-    let rels_path = format!("ppt/slides/_rels/slide{}.xml.rels", slide_num);
+    let rels_path = crate::navigation::relationships_part_path(&slide_path);
     let rels_xml = package
         .read_part_xml(&rels_path)
         .unwrap_or_else(|_| "<Relationships/>".to_string());
@@ -2064,14 +2118,7 @@ fn add_transition(
 /// Falls back to the first slide when the parent isn't a slide path.
 fn resolve_slide_path(package: &OxmlPackage, parent: &str) -> Result<String, HandlerError> {
     if let Some(n) = extract_slide_number(parent) {
-        let path = format!("ppt/slides/slide{}.xml", n);
-        if package
-            .list_parts()
-            .iter()
-            .any(|p| p.as_str() == path.as_str())
-        {
-            return Ok(path);
-        }
+        return crate::navigation::resolve_slide_part_path(package, n);
     }
     if parent.starts_with("ppt/slides/") {
         return Ok(parent.to_string());

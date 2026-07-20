@@ -86,6 +86,39 @@ pub fn build_presentation(
     Ok(Presentation { slides })
 }
 
+/// Resolve a 1-based logical slide index to its actual OOXML part path.
+///
+/// Physical part names are not required to be contiguous. After deleting or
+/// reordering slides, logical `/slide[2]` may point to `slide3.xml`, so callers
+/// must resolve through presentation relationships instead of constructing a
+/// filename from the logical index.
+pub fn resolve_slide_part_path(
+    package: &oxml::OxmlPackage,
+    slide_index: usize,
+) -> Result<String, handler_common::HandlerError> {
+    if slide_index == 0 {
+        return Err(handler_common::HandlerError::InvalidPath(
+            "slide indices are 1-based".to_string(),
+        ));
+    }
+    build_presentation(package)?
+        .slides
+        .into_iter()
+        .find(|slide| slide.index == slide_index)
+        .map(|slide| slide.part_path)
+        .ok_or_else(|| handler_common::HandlerError::PathNotFound(format!("slide {}", slide_index)))
+}
+
+/// Return the package relationship-part path for an OOXML part.
+pub fn relationships_part_path(part_path: &str) -> String {
+    match part_path.rsplit_once('/') {
+        Some((directory, file_name)) => {
+            format!("{}/_rels/{}.rels", directory, file_name)
+        }
+        None => format!("_rels/{}.rels", part_path),
+    }
+}
+
 /// Parse <p:sldIdLst> from presentation.xml.
 /// Uses roxmltree for namespace-aware attribute parsing (r:id requires namespace resolution).
 fn parse_slide_id_list(

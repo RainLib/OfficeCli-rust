@@ -648,6 +648,69 @@ fn test_pptx_add_slide() {
         .stdout(predicate::str::contains("Slides"));
 }
 
+#[test]
+fn test_pptx_remove_middle_slide_then_edit_and_add() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_remove_middle.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    for _ in 0..2 {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/presentation",
+                "--type-name",
+                "slide",
+            ])
+            .assert()
+            .success();
+    }
+
+    officecli()
+        .args(["remove", &p, "/slide[2]"])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[2]",
+            "--type-name",
+            "rectangle",
+            "--properties",
+            "text=logical-slide-two",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/presentation",
+            "--type-name",
+            "slide",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args(["validate", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No validation errors"));
+    officecli()
+        .args(["view", &p, "-m", "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Slides: 3"))
+        .stdout(predicate::str::contains("Shapes: 1"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Convert — docx → docx (re-save via oxide engine)
 // ═══════════════════════════════════════════════════════════════════════
