@@ -41,10 +41,7 @@ fn handle_list() -> Result<String, HandlerError> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let skill_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let skill_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let skill_md = path.join("SKILL.md");
                 let description = if skill_md.exists() {
                     std::fs::read_to_string(&skill_md)
@@ -108,9 +105,8 @@ fn handle_install(skill: &str, agent: Option<&str>) -> Result<String, HandlerErr
 fn install_single_skill(skill_name: &str, agent: Option<&str>) -> Result<(), HandlerError> {
     let skills_dir = find_skills_dir();
     let source_path = skills_dir.join(skill_name).join("SKILL.md");
-    let content = std::fs::read_to_string(&source_path).map_err(|e| {
-        HandlerError::OperationFailed(format!("Failed to read skill: {}", e))
-    })?;
+    let content = std::fs::read_to_string(&source_path)
+        .map_err(|e| HandlerError::OperationFailed(format!("Failed to read skill: {}", e)))?;
 
     let target_agents: Vec<String> = match agent {
         Some("all") | None => vec![
