@@ -63,7 +63,7 @@ fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> String {
         let header_len = col_num_to_letters(*col).len();
         let max_cell_len = (start_row..=effective_end_row)
             .filter_map(|row| ws.cells.get(&(row, *col)))
-            .map(|cell| cell.display_value.len())
+            .map(|cell| cell.display_value.chars().count())
             .max()
             .unwrap_or(0);
         col_widths.insert(*col, std::cmp::max(header_len, max_cell_len).min(30) + 2);
@@ -95,19 +95,26 @@ fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> String {
             let display = cell.map(|c| c.display_value.as_str()).unwrap_or("");
             // For formula cells, display_value already contains the evaluated result
             // so we show it directly — the formula is visible in annotated view
-            let value_str = display.to_string();
-            // Truncate if too long
-            let truncated = if value_str.len() > *w - 2 {
-                format!("{}…", &value_str[..w - 3])
-            } else {
-                value_str
-            };
+            let truncated = truncate_cell_value(display, w.saturating_sub(2));
             grid.push_str(&format!("{:>width$}", truncated, width = *w));
         }
         grid.push('\n');
     }
 
     grid
+}
+
+fn truncate_cell_value(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut truncated: String = value.chars().take(max_chars - 1).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn col_num_to_letters(num: usize) -> String {
@@ -420,4 +427,24 @@ pub fn validate(package: &OxmlPackage) -> Result<Vec<ValidationError>, HandlerEr
     }
 
     Ok(errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_cell_value;
+
+    #[test]
+    fn truncate_cell_value_handles_multibyte_text() {
+        let truncated = truncate_cell_value("云村医—系统如何刷卡？", 10);
+
+        assert_eq!(truncated, "云村医—系统如何刷…");
+        assert_eq!(truncated.chars().count(), 10);
+    }
+
+    #[test]
+    fn truncate_cell_value_preserves_short_text_and_small_widths() {
+        assert_eq!(truncate_cell_value("中文", 2), "中文");
+        assert_eq!(truncate_cell_value("中文", 1), "…");
+        assert_eq!(truncate_cell_value("中文", 0), "");
+    }
 }
