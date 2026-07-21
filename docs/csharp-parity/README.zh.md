@@ -149,3 +149,14 @@ relationship part 和 `[Content_Types].xml`，不能用另一格式的实现推�
 
 验证覆盖纯包级 custom-show 场景，以及
 `create → add → remove middle → edit logical slide → add → validate` 的 CLI 流程。
+
+`PPTX-002` 已实现：
+
+- `/slide[N]/group[M]` 使用专用 group setter，不再误走普通 shape 路径；
+- 单独设置 width 或 height 时只改变传入轴，并保留 `chOff`/`chExt` 子坐标基线；
+- `keepAspect=true` 且只传一个尺寸时按比例补齐另一轴；
+- 子节点显式 run、段尾和默认字号按两个轴的最小缩放比例重算，最低保持 1pt；
+- 首次修改缺少 child baseline 的外部文件时，先从原始 group transform 建立快照。
+
+验证覆盖单轴放大、单轴缩小、keep-aspect、字号重算、缺失 baseline、非法尺寸，
+以及 `create → add group → set width → set height keepAspect=true` 的 CLI 流程。

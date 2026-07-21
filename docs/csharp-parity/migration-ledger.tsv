@@ -17,7 +17,7 @@ XLSX-002	xlsx	modern formulas and dynamic arrays	partial	P1	Handlers/Excel/Formu
 XLSX-003	xlsx	in-cell image richValue	missing	P1	205fd5fd and follow-up fixes	crates/xlsx-handler/src	Excel open/round-trip package tests	migrate as isolated feature
 XLSX-004	xlsx	detected table	missing	P1	schemas/help/xlsx/detectedtable.json	-	read/query tests	add schema and detection behavior
 PPTX-001	pptx	slide removal and identity cleanup	implemented	P0	4278f151; PowerPointHandler.Mutations.cs	crates/pptx-handler/src/mutations.rs; navigation.rs; add.rs	package tests plus remove/edit/add CLI smoke	remove refs/custom shows; resolve logical index; allocate unique part/id/rel
-PPTX-002	pptx	group resize axis/aspect semantics	missing	P0	45e432b3	crates/pptx-handler/src/add.rs; view.rs	independent x/y and keepAspect tests	port after PPTX-001
+PPTX-002	pptx	group resize axis/aspect semantics	implemented	P0	45e432b3	crates/pptx-handler/src/view.rs; schemas/help/pptx/group.json	axis/keepAspect/font/baseline unit tests plus CLI smoke	default to explicit axes; keepAspect opts into proportional resize
 PPTX-003	pptx	diagram and line break	partial	P1	schemas/help/pptx/diagram.json; linebreak.json	crates/pptx-handler/src	schema plus round-trip tests	implement separately
 PPTX-004	pptx	presentation advanced features	partial	P1	Handlers/Pptx/*.cs	crates/pptx-handler/src	feature-specific Office round trips	split animations, comments, settings and theme into atomic batches
 PKG-001	ooxml	remove part primitive	implemented	P0	OpenXmlPackage.DeletePart	crates/oxml/src/package.rs	PPTX-001 package test	retain caller responsibility for rels/content types
