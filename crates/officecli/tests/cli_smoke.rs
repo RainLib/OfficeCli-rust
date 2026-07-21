@@ -797,6 +797,59 @@ fn test_pptx_remove_middle_slide_then_edit_and_add() {
         .stdout(predicate::str::contains("Shapes: 1"));
 }
 
+#[test]
+fn test_pptx_group_resize_axes_and_keep_aspect() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_group_resize.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "group",
+            "--properties",
+            "name=Diagram",
+            "x=100",
+            "y=200",
+            "width=1000",
+            "height=500",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args(["set", &p, "/slide[1]/group[1]", "width=2000"])
+        .assert()
+        .success();
+
+    {
+        let package = oxml::OxmlPackage::open(&p, false).unwrap();
+        let slide = package.read_part_xml("ppt/slides/slide1.xml").unwrap();
+        assert!(slide.contains(r#"<a:ext cx="2000" cy="500"/>"#));
+        assert!(slide.contains(r#"<a:chExt cx="1000" cy="500"/>"#));
+    }
+
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/slide[1]/group[1]",
+            "height=1000",
+            "keepAspect=true",
+        ])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let slide = package.read_part_xml("ppt/slides/slide1.xml").unwrap();
+    assert!(slide.contains(r#"<a:ext cx="4000" cy="1000"/>"#));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Convert — docx → docx (re-save via oxide engine)
 // ═══════════════════════════════════════════════════════════════════════

@@ -43,29 +43,37 @@
     "x": {
       "type": "length",
       "description": "horizontal offset (group origin). Readback in cm via EmuConverter.",
-      "add": false, "set": false, "get": true,
+      "add": false, "set": true, "get": true,
       "readback": "length in cm (e.g. \"2cm\")",
       "enforcement": "report"
     },
     "y": {
       "type": "length",
       "description": "vertical offset.",
-      "add": false, "set": false, "get": true,
+      "add": false, "set": true, "get": true,
       "readback": "length in cm",
       "enforcement": "report"
     },
     "width": {
       "type": "length",
-      "description": "group bounding box width.",
-      "add": false, "set": false, "get": true,
+      "description": "group bounding box width. Set changes only this axis (children scale horizontally through the chExt baseline); pass keepAspect=true to scale height proportionally too.",
+      "add": false, "set": true, "get": true,
       "readback": "length in cm",
       "enforcement": "report"
     },
     "height": {
       "type": "length",
-      "description": "group bounding box height.",
-      "add": false, "set": false, "get": true,
+      "description": "group bounding box height. Set changes only this axis; pass keepAspect=true to scale width proportionally too.",
+      "add": false, "set": true, "get": true,
       "readback": "length in cm",
+      "enforcement": "report"
+    },
+    "keepAspect": {
+      "type": "bool",
+      "description": "When true and only one of width/height is given, scale the other axis by the same ratio and re-bake child font sizes. Default false: only explicitly supplied axes change.",
+      "add": false, "set": true, "get": false,
+      "examples": ["--prop width=12cm --prop keepAspect=true"],
+      "readback": "n/a (behavioral flag, not stored)",
       "enforcement": "report"
     }
   }
