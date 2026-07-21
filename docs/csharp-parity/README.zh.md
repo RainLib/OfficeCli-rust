@@ -149,3 +149,13 @@ relationship part 和 `[Content_Types].xml`，不能用另一格式的实现推�
 
 验证覆盖纯包级 custom-show 场景，以及
 `create → add → remove middle → edit logical slide → add → validate` 的 CLI 流程。
+
+`CLI-002` 已实现：
+
+- 构建时递归嵌入 `schemas/help/**/*.json`，新增或修改 schema 会触发重新构建；
+- 规范路径统一为小写 `schemas/help/...` 和 `/` 分隔符，并按路径排序；
+- CRC32 输入与 C# 一致：每项依次追加规范路径 UTF-8 字节和文件原始字节；
+- 仅当唯一参数是 `--output-schema-crc` 时提前输出 8 位小写十六进制指纹。
+
+验证覆盖标准 CRC32 check vector、路径/排序稳定性、文件名参与计算，以及两次真实 CLI
+调用结果完全一致。
