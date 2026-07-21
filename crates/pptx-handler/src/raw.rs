@@ -98,8 +98,8 @@ pub fn add_part(
                     .find(']')
                     .and_then(|pos| stripped[..pos].parse::<usize>().ok())
                     .ok_or_else(|| HandlerError::InvalidPath(parent.to_string()))?;
-                let _slide_path = format!("ppt/slides/slide{}.xml", slide_num);
-                let rels_path = format!("ppt/slides/_rels/slide{}.xml.rels", slide_num);
+                let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
+                let rels_path = crate::navigation::relationships_part_path(&slide_path);
 
                 let rel_type =
                     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";

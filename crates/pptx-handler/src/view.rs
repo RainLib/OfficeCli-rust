@@ -1320,7 +1320,7 @@ pub fn apply_pptx_range_highlights(
     }
 
     for (slide_num, segs) in slide_segs {
-        let slide_path = format!("ppt/slides/slide{}.xml", slide_num);
+        let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
         let slide_xml = package
             .read_part_xml(&slide_path)
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;

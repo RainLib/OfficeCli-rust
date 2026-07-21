@@ -134,6 +134,24 @@ impl OxmlPackage {
         self.parts.contains_key(part_path)
     }
 
+    /// Remove a part from the package.
+    ///
+    /// Callers are responsible for removing relationships and content-type
+    /// overrides that reference the part.
+    pub fn remove_part(&mut self, part_path: &str) -> Result<bool, PackageError> {
+        if !self.editable {
+            return Err(PackageError::WritePartError(
+                "package opened in read-only mode".to_string(),
+            ));
+        }
+
+        let removed = self.parts.remove(part_path).is_some();
+        if removed && !self.dirty_parts.iter().any(|path| path == part_path) {
+            self.dirty_parts.push(part_path.to_string());
+        }
+        Ok(removed)
+    }
+
     /// Get the content types.
     pub fn content_types(&self) -> &ContentTypes {
         &self.content_types
