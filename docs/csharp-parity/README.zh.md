@@ -13,7 +13,7 @@ C# 仓库；只有 `source/OfficeCLI` 的上游提交发生变化时，才检查
 | C# 基线提交 | `0b3557bbec29f073f5df6b92b4b8dcefa7e3c160` |
 | C# 版本 | `1.0.139` |
 | Rust 基线提交 | `06f0d89cd8d033b04e3fa6ca9ce3497bbbde55d6` |
-| Rust 版本 | `0.1.17` |
+| Rust 版本 | `0.1.18` |
 | 同步前 C# 本地快照 | 分支 `local/pre-upstream-sync-20260720`，提交 `9f69b9b1` |
 
 `source/OfficeCLI/main` 已快进到 `origin/main`，工作区干净。同步前发现的 327 个
