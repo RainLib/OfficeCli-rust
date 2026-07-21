@@ -171,7 +171,7 @@ fn add_cell(
 fn add_sheet(
     package: &mut OxmlPackage,
     _parent: &str,
-    _position: InsertPosition,
+    position: InsertPosition,
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let name = properties.get("name").ok_or_else(|| {
@@ -188,8 +188,19 @@ fn add_sheet(
         )));
     }
 
-    let new_sheet_index = model.sheets.len() + 1;
-    let part_path = format!("xl/worksheets/sheet{}.xml", new_sheet_index);
+    let workbook_xml = package
+        .read_part_xml("xl/workbook.xml")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let workbook_rels_path = "xl/_rels/workbook.xml.rels";
+    let workbook_rels = package.read_part_xml(workbook_rels_path).map_err(|e| {
+        HandlerError::OperationFailed(format!("failed to read workbook rels: {}", e))
+    })?;
+    let entries = crate::mutations::workbook_sheet_entries(&workbook_xml)?;
+    let insert_index = resolve_sheet_insert_index(&entries, &position)?;
+    let part_number = next_worksheet_part_number(package);
+    let sheet_id = next_workbook_sheet_id(&workbook_xml)?;
+    let relationship_id = next_workbook_relationship_id(&workbook_rels)?;
+    let part_path = format!("xl/worksheets/sheet{}.xml", part_number);
 
     // Create minimal worksheet XML
     let sheet_xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
@@ -203,48 +214,29 @@ fn add_sheet(
         .write_part_xml(&part_path, &sheet_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
-    // Update workbook.xml to include the new sheet
-    let wb_xml = package
-        .read_part_xml("xl/workbook.xml")
-        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
-
-    // Find </sheets> and insert before it
     let new_sheet_entry = format!(
-        "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"/>",
-        name, new_sheet_index, new_sheet_index
+        "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"{}\"/>",
+        escape_xml_attribute(name),
+        sheet_id,
+        relationship_id
     );
-
-    let modified_wb = if let Some(sheets_end) = wb_xml.find("</sheets>") {
-        let mut result = wb_xml[..sheets_end].to_string();
-        result.push_str(&new_sheet_entry);
-        result.push_str(&wb_xml[sheets_end..]);
-        result
-    } else {
-        return Err(HandlerError::OperationFailed(
-            "no </sheets> in workbook.xml".to_string(),
-        ));
-    };
-
-    package
-        .write_part_xml("xl/workbook.xml", &modified_wb)
-        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
-
-    // Update workbook relationships
-    let rels_xml = package
-        .read_part_xml("xl/_rels/workbook.xml.rels")
-        .map_err(|e| {
-            HandlerError::OperationFailed(format!("failed to read workbook rels: {}", e))
-        })?;
+    let shifted_workbook = crate::mutations::rewrite_defined_name_scopes(&workbook_xml, |scope| {
+        if scope as usize >= insert_index {
+            Some(scope + 1)
+        } else {
+            Some(scope)
+        }
+    })?;
+    let modified_workbook = insert_sheet_entry(&shifted_workbook, insert_index, &new_sheet_entry)?;
 
     let new_rel = format!(
-        "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
-        new_sheet_index, new_sheet_index
+        "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
+        relationship_id, part_number
     );
-
-    let modified_rels = if let Some(rels_end) = rels_xml.find("</Relationships>") {
-        let mut result = rels_xml[..rels_end].to_string();
+    let modified_rels = if let Some(rels_end) = workbook_rels.find("</Relationships>") {
+        let mut result = workbook_rels[..rels_end].to_string();
         result.push_str(&new_rel);
-        result.push_str(&rels_xml[rels_end..]);
+        result.push_str(&workbook_rels[rels_end..]);
         result
     } else {
         return Err(HandlerError::OperationFailed(
@@ -252,11 +244,147 @@ fn add_sheet(
         ));
     };
 
+    let content_types_path = "[Content_Types].xml";
+    let content_types = package
+        .read_part_xml(content_types_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let modified_content_types = register_worksheet_content_type(&content_types, &part_path)?;
+
     package
-        .write_part_xml("xl/_rels/workbook.xml.rels", &modified_rels)
+        .write_part_xml("xl/workbook.xml", &modified_workbook)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    package
+        .write_part_xml(workbook_rels_path, &modified_rels)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    package
+        .write_part_xml(content_types_path, &modified_content_types)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     Ok(format!("/{}", name))
+}
+
+fn resolve_sheet_insert_index(
+    entries: &[crate::mutations::WorkbookSheetEntry],
+    position: &InsertPosition,
+) -> Result<usize, HandlerError> {
+    let anchor_name = |path: &str| path.trim().trim_start_matches('/').to_string();
+    match position {
+        InsertPosition::AtIndex(index) => Ok((*index).min(entries.len())),
+        InsertPosition::BeforeElement(anchor) => {
+            let anchor = anchor_name(anchor);
+            entries
+                .iter()
+                .position(|entry| entry.name == anchor)
+                .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", anchor)))
+        }
+        InsertPosition::AfterElement(anchor) => {
+            let anchor = anchor_name(anchor);
+            entries
+                .iter()
+                .position(|entry| entry.name == anchor)
+                .map(|index| index + 1)
+                .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", anchor)))
+        }
+        InsertPosition::Append => Ok(entries.len()),
+    }
+}
+
+fn insert_sheet_entry(
+    workbook_xml: &str,
+    insert_index: usize,
+    entry_xml: &str,
+) -> Result<String, HandlerError> {
+    let entries = crate::mutations::workbook_sheet_entries(workbook_xml)?;
+    let insert_at = if insert_index < entries.len() {
+        entries[insert_index].range.start
+    } else {
+        let doc = roxmltree::Document::parse(workbook_xml)
+            .map_err(|e| HandlerError::OperationFailed(format!("invalid workbook.xml: {}", e)))?;
+        let sheets = doc
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "sheets")
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("workbook has no sheets list".to_string())
+            })?;
+        let range = sheets.range();
+        let container = &workbook_xml[range.clone()];
+        range.start
+            + container
+                .rfind("</")
+                .ok_or_else(|| HandlerError::OperationFailed("malformed sheets list".to_string()))?
+    };
+    let mut result = workbook_xml.to_string();
+    result.insert_str(insert_at, entry_xml);
+    Ok(result)
+}
+
+fn next_worksheet_part_number(package: &OxmlPackage) -> usize {
+    package
+        .list_parts()
+        .into_iter()
+        .filter_map(|path| {
+            path.strip_prefix("xl/worksheets/sheet")
+                .and_then(|value| value.strip_suffix(".xml"))
+                .and_then(|value| value.parse::<usize>().ok())
+        })
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_workbook_sheet_id(workbook_xml: &str) -> Result<u64, HandlerError> {
+    let doc = roxmltree::Document::parse(workbook_xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid workbook.xml: {}", e)))?;
+    Ok(doc
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "sheet")
+        .filter_map(|node| node.attribute("sheetId"))
+        .filter_map(|value| value.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1)
+}
+
+fn next_workbook_relationship_id(rels_xml: &str) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(rels_xml).map_err(|e| {
+        HandlerError::OperationFailed(format!("invalid workbook relationships: {}", e))
+    })?;
+    let next = doc
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "Relationship")
+        .filter_map(|node| node.attribute("Id"))
+        .filter_map(|value| value.strip_prefix("rId"))
+        .filter_map(|value| value.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    Ok(format!("rId{}", next))
+}
+
+fn register_worksheet_content_type(xml: &str, part_path: &str) -> Result<String, HandlerError> {
+    let part_name = format!("/{}", part_path.trim_start_matches('/'));
+    if xml.contains(&format!("PartName=\"{}\"", part_name)) {
+        return Ok(xml.to_string());
+    }
+    let entry = format!(
+        "<Override PartName=\"{}\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
+        part_name
+    );
+    let close = xml.find("</Types>").ok_or_else(|| {
+        HandlerError::OperationFailed("invalid [Content_Types].xml: missing </Types>".to_string())
+    })?;
+    let mut result = xml.to_string();
+    result.insert_str(close, &entry);
+    Ok(result)
+}
+
+fn escape_xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 // ─── New Element Types ─────────────────────────────────────────────────

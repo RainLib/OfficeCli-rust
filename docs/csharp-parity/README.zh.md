@@ -149,3 +149,17 @@ relationship part 和 `[Content_Types].xml`，不能用另一格式的实现推�
 
 验证覆盖纯包级 custom-show 场景，以及
 `create → add → remove middle → edit logical slide → add → validate` 的 CLI 流程。
+
+`XLSX-001` 已实现：
+
+- 在指定位置插入工作表时调整后续 `definedName@localSheetId`，并分别分配未占用的
+  worksheet part、`sheetId` 和 workbook relationship ID；
+- 移动工作表时按工作表身份重映射本地名称作用域，不把名称错误地绑定到原索引上的
+  另一张工作表；
+- 删除工作表时移除该表作用域的 defined name，递减后续作用域，并清理 worksheet
+  part、worksheet rels、workbook relationship 和 content type override；
+- `view --mode issues` 会报告越界的 `localSheetId`，避免损坏状态静默通过。
+
+验证覆盖非连续物理 part/ID 的包级插入、移动和删除场景，以及
+`create → add at index → move → remove → validate` 的 CLI 流程。下一批从 ledger 中
+尚未实现的高优先级条目继续，且仍按 DOCX、XLSX、PPTX 分支隔离。

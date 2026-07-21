@@ -617,6 +617,92 @@ fn test_xlsx_view_outline() {
         .stdout(predicate::str::contains("/Sheet1"));
 }
 
+#[test]
+fn test_xlsx_sheet_order_mutations_preserve_defined_name_scopes() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_sheet_order.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/",
+            "--type-name",
+            "sheet",
+            "--properties",
+            "name=Second",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/",
+            "--type-name",
+            "sheet",
+            "--position",
+            "1",
+            "--properties",
+            "name=Inserted",
+        ])
+        .assert()
+        .success();
+
+    // Inject three sheet-scoped names so the following CLI mutations exercise
+    // localSheetId remapping rather than only visible sheet order.
+    {
+        let mut package = oxml::OxmlPackage::open(&p, true).unwrap();
+        let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+        let defined_names = r#"<definedNames>
+<definedName name="scopeSheet1" localSheetId="0">Sheet1!$A$1</definedName>
+<definedName name="scopeInserted" localSheetId="1">Inserted!$A$1</definedName>
+<definedName name="scopeSecond" localSheetId="2">Second!$A$1</definedName>
+</definedNames>"#;
+        let updated = workbook.replace("</workbook>", &format!("{}</workbook>", defined_names));
+        package.write_part_xml("xl/workbook.xml", &updated).unwrap();
+        package.save().unwrap();
+    }
+
+    officecli()
+        .args(["move", &p, "/Sheet1", "--position", "after:/Second"])
+        .assert()
+        .success();
+
+    {
+        let package = oxml::OxmlPackage::open(&p, false).unwrap();
+        let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+        let inserted = workbook.find(r#"name="Inserted""#).unwrap();
+        let second = workbook.find(r#"name="Second""#).unwrap();
+        let sheet1 = workbook.find(r#"name="Sheet1""#).unwrap();
+        assert!(inserted < second && second < sheet1);
+        assert!(workbook.contains(r#"name="scopeSheet1" localSheetId="2""#));
+        assert!(workbook.contains(r#"name="scopeInserted" localSheetId="0""#));
+        assert!(workbook.contains(r#"name="scopeSecond" localSheetId="1""#));
+    }
+
+    officecli()
+        .args(["remove", &p, "/Second"])
+        .assert()
+        .success();
+    officecli()
+        .args(["validate", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No validation errors"));
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+    assert!(!workbook.contains(r#"name="Second""#));
+    assert!(!workbook.contains(r#"name="scopeSecond""#));
+    assert!(workbook.contains(r#"name="scopeSheet1" localSheetId="1""#));
+    assert!(workbook.contains(r#"name="scopeInserted" localSheetId="0""#));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // PPTX-specific: add slide + textbox
 // ═══════════════════════════════════════════════════════════════════════
