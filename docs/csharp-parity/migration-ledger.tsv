@@ -1,7 +1,7 @@
 id	format	area	status	priority	csharp_reference	rust_reference	verification	next_action
 BASE-001	all	upstream baseline	aligned	P0	0b3557bb (v1.0.139)	source/OfficeCLI	main clean; backup branch retained	compare only baseline..origin/main
 CLI-001	all	core document verbs	partial	P0	src/officecli/CommandBuilder.cs	crates/officecli/src/commands/mod.rs	command-level parity tests	audit options and JSON output per verb
-CLI-002	all	schema fingerprint	missing	P1	src/officecli/Program.cs; Help/SchemaCrc.cs	-	officecli --output-schema-crc returns stable CRC32	implement deterministic schemas/help CRC
+CLI-002	all	schema fingerprint	implemented	P1	src/officecli/Program.cs; Help/SchemaCrc.cs	crates/officecli/build.rs; src/schema_crc.rs; src/main.rs	algorithm tests plus repeated CLI output	embed sorted schemas/help JSON and expose exact one-flag early dispatch
 CLI-003	all	load_skill	missing	P1	src/officecli/Program.cs; Core/SkillInstaller.cs	crates/officecli/src/commands/skills.rs	catalog, SKILL.md and --path tests	add read-only command without install side effects
 CLI-004	all	MCP lifecycle	partial	P1	src/officecli/Program.cs	crates/officecli/src/mcp.rs	mcp server/list/install/uninstall tests	add target registration management
 CLI-005	all	watch nested commands	partial	P2	src/officecli/CommandBuilder.Watch.cs	crates/officecli/src/commands/mod.rs	watch <file> mark/unmark/marks/goto tests	keep hidden top-level aliases for compatibility

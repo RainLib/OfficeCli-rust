@@ -32,6 +32,32 @@ fn test_version() {
 }
 
 #[test]
+fn test_output_schema_crc_is_stable_lowercase_hex() {
+    let first = officecli()
+        .arg("--output-schema-crc")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second = officecli()
+        .arg("--output-schema-crc")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(first, second);
+    let output = String::from_utf8(first).unwrap();
+    let fingerprint = output.trim_end();
+    assert_eq!(fingerprint.len(), 8);
+    assert!(fingerprint
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+}
+
+#[test]
 fn test_help() {
     officecli()
         .arg("--help")

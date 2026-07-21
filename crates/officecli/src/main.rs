@@ -36,6 +36,7 @@ mod resident {
         ))
     }
 }
+mod schema_crc;
 mod screenshot;
 mod watch;
 
@@ -79,6 +80,18 @@ struct Cli {
 }
 
 fn main() {
+    // Keep this as an exact one-argument early dispatch, matching the C# CLI.
+    // It deliberately bypasses clap so downstream tooling can fingerprint the
+    // embedded help surface without requiring a document subcommand.
+    let mut raw_args = std::env::args_os();
+    let _executable = raw_args.next();
+    if raw_args.next().as_deref() == Some(std::ffi::OsStr::new("--output-schema-crc"))
+        && raw_args.next().is_none()
+    {
+        println!("{}", schema_crc::compute());
+        return;
+    }
+
     // Parse CLI args — if invalid, print full help + error instead of terse usage
     let cli = match Cli::try_parse() {
         Ok(c) => c,
