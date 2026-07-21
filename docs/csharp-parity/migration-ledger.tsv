@@ -12,7 +12,7 @@ SCHEMA-PPTX-001	pptx	help schemas	partial	P1	schemas/help/pptx	schemas/help/pptx
 DOCX-001	docx	revision schema naming	partial	P1	schemas/help/docx/revision.json	schemas/help/docx/trackedchange.json	property and verb comparison	decide alias versus separate element
 DOCX-002	docx	numbering and permission structures	missing	P1	Handlers/Word; abstractNum/num/level/permStart schemas	crates/docx-handler/src	structural add/get/set/remove tests	migrate as separate DOCX batches
 DOCX-003	docx	diagram/shape/textbox structured operations	partial	P1	Handlers/Word; matching schemas	crates/docx-handler/src/add.rs; text_offset.rs	round-trip XML tests	separate read, add and mutation support
-XLSX-001	xlsx	definedName localSheetId on sheet edits	missing	P0	423f17fe; 58b8f970; e89bd6fb	crates/xlsx-handler/src/mutations.rs	insert/move/remove sheet scope tests	port upstream scope-shift behavior
+XLSX-001	xlsx	definedName localSheetId on sheet edits	implemented	P0	423f17fe; 58b8f970; e89bd6fb	crates/xlsx-handler/src/add.rs; handler.rs; mutations.rs; view.rs	unit package tests plus add/move/remove CLI smoke	preserve scopes by sheet identity and validate out-of-range scopes
 XLSX-002	xlsx	modern formulas and dynamic arrays	partial	P1	Handlers/Excel/Formula*	crates/xlsx-handler/src/formula	array shape/error and function corpus tests	compare evaluator by function families
 XLSX-003	xlsx	in-cell image richValue	missing	P1	205fd5fd and follow-up fixes	crates/xlsx-handler/src	Excel open/round-trip package tests	migrate as isolated feature
 XLSX-004	xlsx	detected table	missing	P1	schemas/help/xlsx/detectedtable.json	-	read/query tests	add schema and detection behavior

@@ -360,6 +360,39 @@ pub fn view_as_issues(
         }
     }
 
+    // localSheetId is a 0-based index into the workbook's sheet list. Excel
+    // rejects out-of-range scopes, usually left behind by an incomplete sheet
+    // remove/reorder operation.
+    if let Ok(workbook_xml) = package.read_part_xml("xl/workbook.xml") {
+        if let Ok(doc) = roxmltree::Document::parse(&workbook_xml) {
+            for defined_name in doc
+                .descendants()
+                .filter(|node| node.is_element() && node.tag_name().name() == "definedName")
+            {
+                let Some(scope) = defined_name
+                    .attribute("localSheetId")
+                    .and_then(|value| value.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                if scope >= model.sheets.len() {
+                    let name = defined_name.attribute("name").unwrap_or("(unnamed)");
+                    issues.push(DocumentIssue {
+                        severity: IssueSeverity::Error,
+                        issue_type: "broken-defined-name-scope".to_string(),
+                        description: format!(
+                            "Defined name '{}' has out-of-range localSheetId={} but the workbook has {} sheet(s)",
+                            name,
+                            scope,
+                            model.sheets.len()
+                        ),
+                        path: Some(format!("/namedrange[{}]", name)),
+                    });
+                }
+            }
+        }
+    }
+
     // Filter by issue type
     if let Some(filter_type) = issue_type {
         issues.retain(|i| i.issue_type == filter_type);
@@ -431,7 +464,8 @@ pub fn validate(package: &OxmlPackage) -> Result<Vec<ValidationError>, HandlerEr
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_cell_value;
+    use super::{truncate_cell_value, view_as_issues};
+    use oxml::OxmlPackage;
 
     #[test]
     fn truncate_cell_value_handles_multibyte_text() {
@@ -446,5 +480,29 @@ mod tests {
         assert_eq!(truncate_cell_value("中文", 2), "中文");
         assert_eq!(truncate_cell_value("中文", 1), "…");
         assert_eq!(truncate_cell_value("中文", 0), "");
+    }
+
+    #[test]
+    fn issues_report_out_of_range_defined_name_scope() {
+        let mut package = OxmlPackage::create("unused.xlsx");
+        package.add_part(
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Only" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="broken" localSheetId="3">Only!$A$1</definedName></definedNames></workbook>"#,
+        );
+        package.add_part(
+            "xl/_rels/workbook.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        );
+        package.add_part(
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#,
+        );
+
+        let issues = view_as_issues(&package, None, None).unwrap();
+
+        assert!(issues.iter().any(|issue| {
+            issue.issue_type == "broken-defined-name-scope"
+                && issue.description.contains("localSheetId=3")
+        }));
     }
 }
