@@ -62,12 +62,11 @@ Rust 已有主要文档命令：
 `open`、`close`、`watch`、`unwatch`、`view`、`get`、`query`、`set`、`add`、
 `remove`、`move`、`swap`、`refresh`、`raw`、`raw-set`、`add-part`、
 `validate`、`save`、`batch`、`dump`、`import`、`create`、`merge`、
-`plugins`、`help`、`install`、`skills` 和 `mcp`。
+`plugins`、`help`、`install`、`load_skill`、`skills` 和 `mcp`。
 
 仍需对齐的命令行为：
 
 - `--output-schema-crc` 缺失；
-- `load_skill [name] [--path relpath]` 缺失；
 - `config <key> [value]` 缺失；
 - C# 的 `mcp list`、`mcp <target>`、`mcp uninstall <target>` 生命周期管理缺失；
 - `skill`/`skills` 别名、skills 自动探测目标和引用文件安装语义不完整；

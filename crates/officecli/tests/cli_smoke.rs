@@ -58,6 +58,65 @@ fn test_output_schema_crc_is_stable_lowercase_hex() {
 }
 
 #[test]
+fn test_load_skill_catalog_and_content_are_read_only() {
+    let home = temp_dir();
+
+    officecli()
+        .arg("load_skill")
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# officecli skills"))
+        .stdout(predicate::str::contains("## pptx"))
+        .stdout(predicate::str::contains("## word-form"));
+
+    officecli()
+        .args(["load_skill", "pptx"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# OfficeCLI PPTX Skill"))
+        .stdout(predicate::str::contains("## Setup").not());
+
+    assert_eq!(
+        std::fs::read_dir(home.path()).unwrap().count(),
+        0,
+        "load_skill must not install files under HOME"
+    );
+}
+
+#[test]
+fn test_load_skill_reads_reference_and_rejects_unsafe_paths() {
+    officecli()
+        .args([
+            "load_skill",
+            "morph-ppt",
+            "--path",
+            "reference/decision-rules.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# PPT Planner"));
+
+    officecli()
+        .args(["load_skill", "morph-ppt", "--path", "../SKILL.md"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid skill file path"));
+
+    officecli()
+        .args([
+            "load_skill",
+            "morph-ppt",
+            "--path",
+            "reference/styles/dark--premium-navy/template.pptx",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("binary asset"));
+}
+
+#[test]
 fn test_help() {
     officecli()
         .arg("--help")

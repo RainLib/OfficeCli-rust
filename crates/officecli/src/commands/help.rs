@@ -342,6 +342,15 @@ fn early_dispatch_help(name: &str) -> Option<&'static [&'static str]> {
             "Skills: pptx, word, excel, morph-ppt, pitch-deck, academic-paper, data-dashboard, financial-model",
             "Agents: claude, copilot, codex, cursor, windsurf, all",
         ]),
+        "load_skill" => Some(&[
+            "Usage:",
+            "  officecli load_skill                         List all skills with the triggers that say when to use each",
+            "  officecli load_skill <name>                 Print the skill's SKILL.md + a manifest of its bundled reference files",
+            "  officecli load_skill <name> --path <relpath> Print one bundled reference file (e.g. --path reference/decision-rules.md)",
+            "",
+            "Skills: pptx, word, excel, word-form, morph-ppt, morph-ppt-3d, pitch-deck, academic-paper, data-dashboard, financial-model",
+            "To install a skill (with binary assets) on disk, run: officecli skills install <name>",
+        ]),
         "install" => Some(&[
             "Usage:",
             "  officecli install           One-step setup: install binary + skills + MCP to all detected agents",
