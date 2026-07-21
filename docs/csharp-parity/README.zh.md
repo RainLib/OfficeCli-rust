@@ -13,7 +13,7 @@ C# 仓库；只有 `source/OfficeCLI` 的上游提交发生变化时，才检查
 | C# 基线提交 | `0b3557bbec29f073f5df6b92b4b8dcefa7e3c160` |
 | C# 版本 | `1.0.139` |
 | Rust 基线提交 | `06f0d89cd8d033b04e3fa6ca9ce3497bbbde55d6` |
-| Rust 版本 | `0.1.17` |
+| Rust 版本 | `0.1.18` |
 | 同步前 C# 本地快照 | 分支 `local/pre-upstream-sync-20260720`，提交 `9f69b9b1` |
 
 `source/OfficeCLI/main` 已快进到 `origin/main`，工作区干净。同步前发现的 327 个
@@ -62,12 +62,11 @@ Rust 已有主要文档命令：
 `open`、`close`、`watch`、`unwatch`、`view`、`get`、`query`、`set`、`add`、
 `remove`、`move`、`swap`、`refresh`、`raw`、`raw-set`、`add-part`、
 `validate`、`save`、`batch`、`dump`、`import`、`create`、`merge`、
-`plugins`、`help`、`install`、`skills` 和 `mcp`。
+`plugins`、`help`、`install`、`load_skill`、`skills` 和 `mcp`。
 
 仍需对齐的命令行为：
 
 - `--output-schema-crc` 缺失；
-- `load_skill [name] [--path relpath]` 缺失；
 - `config <key> [value]` 缺失；
 - C# 的 `mcp list`、`mcp <target>`、`mcp uninstall <target>` 生命周期管理缺失；
 - `skill`/`skills` 别名、skills 自动探测目标和引用文件安装语义不完整；
@@ -80,12 +79,11 @@ Rust 额外提供 `extract-text`、`convert`、`info` 和原生 PDF handler。�
 
 ### Help schema
 
-C# 有 150 个 schema JSON，Rust 有 139 个。Rust 缺少：
+C# 有 150 个 schema JSON，Rust 有 140 个。Rust 缺少：
 
 - DOCX：`abstractNum`、`diagram`、`level`、`num`、`permStart`、`revision`、
   `shape`、`tab`、`textbox`；
-- PPTX：`diagram`、`linebreak`；
-- XLSX：`detectedtable`。
+- PPTX：`diagram`、`linebreak`。
 
 Rust 独有 `docx/trackedchange.json`；需要先确认它能否完整替代 C# 的
 `revision.json`，不能只按文件名直接覆盖。
@@ -149,3 +147,33 @@ relationship part 和 `[Content_Types].xml`，不能用另一格式的实现推�
 
 验证覆盖纯包级 custom-show 场景，以及
 `create → add → remove middle → edit logical slide → add → validate` 的 CLI 流程。
+
+`XLSX-001` 已实现：
+
+- 在指定位置插入工作表时调整后续 `definedName@localSheetId`，并分别分配未占用的
+  worksheet part、`sheetId` 和 workbook relationship ID；
+- 移动工作表时按工作表身份重映射本地名称作用域，不把名称错误地绑定到原索引上的
+  另一张工作表；
+- 删除工作表时移除该表作用域的 defined name，递减后续作用域，并清理 worksheet
+  part、worksheet rels、workbook relationship 和 content type override；
+- `view --mode issues` 会报告越界的 `localSheetId`，避免损坏状态静默通过。
+
+验证覆盖非连续物理 part/ID 的包级插入、移动和删除场景，以及
+`create → add at index → move → remove → validate` 的 CLI 流程。下一批从 ledger 中
+尚未实现的高优先级条目继续，且仍按 DOCX、XLSX、PPTX 分支隔离。
+
+`SCHEMA-XLSX-001` / `XLSX-004` 已实现：
+
+- `query table` 同时返回真实 ListObject 和严格启发式识别的 `detectedtable`；
+- `query listobject` 只返回真实 ListObject，避免把推断范围伪装成稳定 `/table[N]`；
+- 检测仅接受左上锚点、至少两列连续表头和至少一行数据的稀疏单元格块，且排除与
+  真实 ListObject 重叠的范围；
+- 推断节点使用诚实的 `/Sheet/A1:C10` 路径，并报告 `source=header-sniff`、
+  `stable=false`、`ref`、`columns` 和 `dataRange`；
+- `row[Column op value]` 在没有匹配真实 ListObject 时回退到 detected table，列名以
+  结构化列表解析，因此 `Amount, USD` 这类带逗号表头不会错位；
+- 新增 `detectedtable` help schema，并在 `table` schema 中明确 table/listobject 的
+  查询差异。
+
+验证覆盖数值年份表头、单列误报拒绝、真实表去重、带逗号表头的 row predicate、
+sheet-scoped selector，以及真实 CLI 的 create/add/query/help 流程。

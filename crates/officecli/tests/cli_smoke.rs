@@ -32,6 +32,91 @@ fn test_version() {
 }
 
 #[test]
+fn test_output_schema_crc_is_stable_lowercase_hex() {
+    let first = officecli()
+        .arg("--output-schema-crc")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second = officecli()
+        .arg("--output-schema-crc")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(first, second);
+    let output = String::from_utf8(first).unwrap();
+    let fingerprint = output.trim_end();
+    assert_eq!(fingerprint.len(), 8);
+    assert!(fingerprint
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+}
+
+#[test]
+fn test_load_skill_catalog_and_content_are_read_only() {
+    let home = temp_dir();
+
+    officecli()
+        .arg("load_skill")
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# officecli skills"))
+        .stdout(predicate::str::contains("## pptx"))
+        .stdout(predicate::str::contains("## word-form"));
+
+    officecli()
+        .args(["load_skill", "pptx"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# OfficeCLI PPTX Skill"))
+        .stdout(predicate::str::contains("## Setup").not());
+
+    assert_eq!(
+        std::fs::read_dir(home.path()).unwrap().count(),
+        0,
+        "load_skill must not install files under HOME"
+    );
+}
+
+#[test]
+fn test_load_skill_reads_reference_and_rejects_unsafe_paths() {
+    officecli()
+        .args([
+            "load_skill",
+            "morph-ppt",
+            "--path",
+            "reference/decision-rules.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# PPT Planner"));
+
+    officecli()
+        .args(["load_skill", "morph-ppt", "--path", "../SKILL.md"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid skill file path"));
+
+    officecli()
+        .args([
+            "load_skill",
+            "morph-ppt",
+            "--path",
+            "reference/styles/dark--premium-navy/template.pptx",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("binary asset"));
+}
+
+#[test]
 fn test_help() {
     officecli()
         .arg("--help")
@@ -617,6 +702,148 @@ fn test_xlsx_view_outline() {
         .stdout(predicate::str::contains("/Sheet1"));
 }
 
+#[test]
+fn test_xlsx_detected_table_query_and_row_predicate() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_detected_table.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    let add_cell = |cell_ref: &str, value: &str| {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/Sheet1",
+                "--type-name",
+                "cell",
+                "--properties",
+                &format!("ref={cell_ref}"),
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    };
+    add_cell("A1", "Name");
+    add_cell("B1", "Amount, USD");
+    add_cell("A2", "Ada");
+    add_cell("B2", "12");
+
+    officecli()
+        .args(["--json", "query", &p, "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""type": "detectedtable""#))
+        .stdout(predicate::str::contains(r#""path": "/Sheet1/A1:B2""#))
+        .stdout(predicate::str::contains(r#""stable": false"#));
+
+    officecli()
+        .args(["--json", "query", &p, "row[Amount, USD > 10]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""path": "/Sheet1/row[2]""#))
+        .stdout(predicate::str::contains(r#""tableSource": "detected""#));
+
+    officecli()
+        .args(["--json", "query", &p, "listobject"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+
+    officecli()
+        .args(["help", "xlsx", "detectedtable"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("header-sniff"));
+}
+
+#[test]
+fn test_xlsx_sheet_order_mutations_preserve_defined_name_scopes() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_sheet_order.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/",
+            "--type-name",
+            "sheet",
+            "--properties",
+            "name=Second",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/",
+            "--type-name",
+            "sheet",
+            "--position",
+            "1",
+            "--properties",
+            "name=Inserted",
+        ])
+        .assert()
+        .success();
+
+    // Inject three sheet-scoped names so the following CLI mutations exercise
+    // localSheetId remapping rather than only visible sheet order.
+    {
+        let mut package = oxml::OxmlPackage::open(&p, true).unwrap();
+        let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+        let defined_names = r#"<definedNames>
+<definedName name="scopeSheet1" localSheetId="0">Sheet1!$A$1</definedName>
+<definedName name="scopeInserted" localSheetId="1">Inserted!$A$1</definedName>
+<definedName name="scopeSecond" localSheetId="2">Second!$A$1</definedName>
+</definedNames>"#;
+        let updated = workbook.replace("</workbook>", &format!("{}</workbook>", defined_names));
+        package.write_part_xml("xl/workbook.xml", &updated).unwrap();
+        package.save().unwrap();
+    }
+
+    officecli()
+        .args(["move", &p, "/Sheet1", "--position", "after:/Second"])
+        .assert()
+        .success();
+
+    {
+        let package = oxml::OxmlPackage::open(&p, false).unwrap();
+        let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+        let inserted = workbook.find(r#"name="Inserted""#).unwrap();
+        let second = workbook.find(r#"name="Second""#).unwrap();
+        let sheet1 = workbook.find(r#"name="Sheet1""#).unwrap();
+        assert!(inserted < second && second < sheet1);
+        assert!(workbook.contains(r#"name="scopeSheet1" localSheetId="2""#));
+        assert!(workbook.contains(r#"name="scopeInserted" localSheetId="0""#));
+        assert!(workbook.contains(r#"name="scopeSecond" localSheetId="1""#));
+    }
+
+    officecli()
+        .args(["remove", &p, "/Second"])
+        .assert()
+        .success();
+    officecli()
+        .args(["validate", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No validation errors"));
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+    assert!(!workbook.contains(r#"name="Second""#));
+    assert!(!workbook.contains(r#"name="scopeSecond""#));
+    assert!(workbook.contains(r#"name="scopeSheet1" localSheetId="1""#));
+    assert!(workbook.contains(r#"name="scopeInserted" localSheetId="0""#));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // PPTX-specific: add slide + textbox
 // ═══════════════════════════════════════════════════════════════════════
@@ -709,6 +936,59 @@ fn test_pptx_remove_middle_slide_then_edit_and_add() {
         .success()
         .stdout(predicate::str::contains("Slides: 3"))
         .stdout(predicate::str::contains("Shapes: 1"));
+}
+
+#[test]
+fn test_pptx_group_resize_axes_and_keep_aspect() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_group_resize.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "group",
+            "--properties",
+            "name=Diagram",
+            "x=100",
+            "y=200",
+            "width=1000",
+            "height=500",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args(["set", &p, "/slide[1]/group[1]", "width=2000"])
+        .assert()
+        .success();
+
+    {
+        let package = oxml::OxmlPackage::open(&p, false).unwrap();
+        let slide = package.read_part_xml("ppt/slides/slide1.xml").unwrap();
+        assert!(slide.contains(r#"<a:ext cx="2000" cy="500"/>"#));
+        assert!(slide.contains(r#"<a:chExt cx="1000" cy="500"/>"#));
+    }
+
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/slide[1]/group[1]",
+            "height=1000",
+            "keepAspect=true",
+        ])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let slide = package.read_part_xml("ppt/slides/slide1.xml").unwrap();
+    assert!(slide.contains(r#"<a:ext cx="4000" cy="1000"/>"#));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
