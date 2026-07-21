@@ -62,12 +62,11 @@ Rust 已有主要文档命令：
 `open`、`close`、`watch`、`unwatch`、`view`、`get`、`query`、`set`、`add`、
 `remove`、`move`、`swap`、`refresh`、`raw`、`raw-set`、`add-part`、
 `validate`、`save`、`batch`、`dump`、`import`、`create`、`merge`、
-`plugins`、`help`、`install`、`skills` 和 `mcp`。
+`plugins`、`help`、`install`、`load_skill`、`skills` 和 `mcp`。
 
 仍需对齐的命令行为：
 
 - `--output-schema-crc` 缺失；
-- `load_skill [name] [--path relpath]` 缺失；
 - `config <key> [value]` 缺失；
 - C# 的 `mcp list`、`mcp <target>`、`mcp uninstall <target>` 生命周期管理缺失；
 - `skill`/`skills` 别名、skills 自动探测目标和引用文件安装语义不完整；
@@ -159,3 +158,17 @@ relationship part 和 `[Content_Types].xml`，不能用另一格式的实现推�
 
 验证覆盖标准 CRC32 check vector、路径/排序稳定性、文件名参与计算，以及两次真实 CLI
 调用结果完全一致。
+
+`CLI-003` 已实现：
+
+- 构建时把 `skills/` 文本和二进制引用资源嵌入单文件程序，运行时不依赖源码目录；
+- `load_skill` 无参数返回 C# 同款的技能别名与完整 front matter 路由描述目录；
+- `load_skill <name>` 只读返回去除安装说明的 `SKILL.md`，并附带浅层引用文件和
+  深层资源组清单；
+- `load_skill <name> --path <relpath>` 返回单个文本引用，兼容反斜杠路径，同时拒绝
+  `.` / `..` 穿越和不能经文本通道传输的 Office、图片、GLB、PDF、ZIP 等资产；
+- 读取命令不会在 `HOME` 下安装或创建任何 skill 文件；安装行为仍只属于
+  `officecli skills install`。
+
+验证覆盖目录、别名大小写、Setup 段移除、引用清单折叠、文本引用读取、路径穿越、
+二进制拒绝、未知 skill 报错，以及空临时 `HOME` 在命令前后保持无文件。

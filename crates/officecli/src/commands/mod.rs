@@ -11,6 +11,7 @@ mod help;
 mod import;
 mod info;
 mod install;
+mod load_skill;
 mod merge;
 mod move_element;
 mod plugin_process;
@@ -60,6 +61,7 @@ pub use help::HelpCommand;
 pub use import::ImportCommand;
 pub use info::InfoCommand;
 pub use install::InstallCommand;
+pub use load_skill::LoadSkillCommand;
 pub use merge::MergeCommand;
 pub use move_element::MoveCommand;
 pub use plugins::PluginsCommand;
@@ -258,6 +260,9 @@ pub enum Command {
     Plugins(PluginsCommand),
     /// Install officecli binary, skills, and MCP configuration
     Install(InstallCommand),
+    /// Read a bundled workflow skill without installing it
+    #[command(name = "load_skill")]
+    LoadSkill(LoadSkillCommand),
     /// List and install agent skill definitions
     Skills(SkillsCommand),
     /// Open a document in resident mode (keeps handler in memory for fast subsequent commands)
@@ -300,6 +305,7 @@ pub use help::handle_help;
 pub use import::handle_import;
 pub use info::handle_info;
 pub use install::handle_install;
+pub use load_skill::handle_load_skill;
 pub use merge::handle_merge;
 pub use move_element::handle_move;
 pub use plugins::handle_plugins;
