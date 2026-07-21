@@ -79,12 +79,11 @@ Rust 额外提供 `extract-text`、`convert`、`info` 和原生 PDF handler。�
 
 ### Help schema
 
-C# 有 150 个 schema JSON，Rust 有 139 个。Rust 缺少：
+C# 有 150 个 schema JSON，Rust 有 140 个。Rust 缺少：
 
 - DOCX：`abstractNum`、`diagram`、`level`、`num`、`permStart`、`revision`、
   `shape`、`tab`、`textbox`；
-- PPTX：`diagram`、`linebreak`；
-- XLSX：`detectedtable`。
+- PPTX：`diagram`、`linebreak`。
 
 Rust 独有 `docx/trackedchange.json`；需要先确认它能否完整替代 C# 的
 `revision.json`，不能只按文件名直接覆盖。
@@ -162,3 +161,19 @@ relationship part 和 `[Content_Types].xml`，不能用另一格式的实现推�
 验证覆盖非连续物理 part/ID 的包级插入、移动和删除场景，以及
 `create → add at index → move → remove → validate` 的 CLI 流程。下一批从 ledger 中
 尚未实现的高优先级条目继续，且仍按 DOCX、XLSX、PPTX 分支隔离。
+
+`SCHEMA-XLSX-001` / `XLSX-004` 已实现：
+
+- `query table` 同时返回真实 ListObject 和严格启发式识别的 `detectedtable`；
+- `query listobject` 只返回真实 ListObject，避免把推断范围伪装成稳定 `/table[N]`；
+- 检测仅接受左上锚点、至少两列连续表头和至少一行数据的稀疏单元格块，且排除与
+  真实 ListObject 重叠的范围；
+- 推断节点使用诚实的 `/Sheet/A1:C10` 路径，并报告 `source=header-sniff`、
+  `stable=false`、`ref`、`columns` 和 `dataRange`；
+- `row[Column op value]` 在没有匹配真实 ListObject 时回退到 detected table，列名以
+  结构化列表解析，因此 `Amount, USD` 这类带逗号表头不会错位；
+- 新增 `detectedtable` help schema，并在 `table` schema 中明确 table/listobject 的
+  查询差异。
+
+验证覆盖数值年份表头、单列误报拒绝、真实表去重、带逗号表头的 row predicate、
+sheet-scoped selector，以及真实 CLI 的 create/add/query/help 流程。

@@ -7,7 +7,7 @@ CLI-004	all	MCP lifecycle	partial	P1	src/officecli/Program.cs	crates/officecli/s
 CLI-005	all	watch nested commands	partial	P2	src/officecli/CommandBuilder.Watch.cs	crates/officecli/src/commands/mod.rs	watch <file> mark/unmark/marks/goto tests	keep hidden top-level aliases for compatibility
 CLI-006	all	config/update behavior	missing	P2	src/officecli/Core/UpdateChecker.cs	-	config read/write tests	decide which non-document behavior belongs in Rust
 SCHEMA-DOCX-001	docx	help schemas	partial	P1	schemas/help/docx	schemas/help/docx	exact schema set comparison	migrate 9 missing schemas with handler support
-SCHEMA-XLSX-001	xlsx	help schemas	partial	P1	schemas/help/xlsx	schemas/help/xlsx	exact schema set comparison	add detectedtable
+SCHEMA-XLSX-001	xlsx	help schemas	implemented	P1	schemas/help/xlsx/detectedtable.json	schemas/help/xlsx/detectedtable.json	exact schema plus help CLI test	add read-only synthetic node schema with table/listobject guidance
 SCHEMA-PPTX-001	pptx	help schemas	partial	P1	schemas/help/pptx	schemas/help/pptx	exact schema set comparison	add diagram and linebreak
 DOCX-001	docx	revision schema naming	partial	P1	schemas/help/docx/revision.json	schemas/help/docx/trackedchange.json	property and verb comparison	decide alias versus separate element
 DOCX-002	docx	numbering and permission structures	missing	P1	Handlers/Word; abstractNum/num/level/permStart schemas	crates/docx-handler/src	structural add/get/set/remove tests	migrate as separate DOCX batches
@@ -15,7 +15,7 @@ DOCX-003	docx	diagram/shape/textbox structured operations	partial	P1	Handlers/Wo
 XLSX-001	xlsx	definedName localSheetId on sheet edits	implemented	P0	423f17fe; 58b8f970; e89bd6fb	crates/xlsx-handler/src/add.rs; handler.rs; mutations.rs; view.rs	unit package tests plus add/move/remove CLI smoke	preserve scopes by sheet identity and validate out-of-range scopes
 XLSX-002	xlsx	modern formulas and dynamic arrays	partial	P1	Handlers/Excel/Formula*	crates/xlsx-handler/src/formula	array shape/error and function corpus tests	compare evaluator by function families
 XLSX-003	xlsx	in-cell image richValue	missing	P1	205fd5fd and follow-up fixes	crates/xlsx-handler/src	Excel open/round-trip package tests	migrate as isolated feature
-XLSX-004	xlsx	detected table	missing	P1	schemas/help/xlsx/detectedtable.json	-	read/query tests	add schema and detection behavior
+XLSX-004	xlsx	detected table	implemented	P1	Handlers/Excel/ExcelHandler.Query.cs	crates/xlsx-handler/src/query.rs	detection, dedup, comma-header, selector and CLI tests	detect strict sparse blocks; table includes inferred; listobject excludes inferred; row predicates fall back
 PPTX-001	pptx	slide removal and identity cleanup	implemented	P0	4278f151; PowerPointHandler.Mutations.cs	crates/pptx-handler/src/mutations.rs; navigation.rs; add.rs	package tests plus remove/edit/add CLI smoke	remove refs/custom shows; resolve logical index; allocate unique part/id/rel
 PPTX-002	pptx	group resize axis/aspect semantics	implemented	P0	45e432b3	crates/pptx-handler/src/view.rs; schemas/help/pptx/group.json	axis/keepAspect/font/baseline unit tests plus CLI smoke	default to explicit axes; keepAspect opts into proportional resize
 PPTX-003	pptx	diagram and line break	partial	P1	schemas/help/pptx/diagram.json; linebreak.json	crates/pptx-handler/src	schema plus round-trip tests	implement separately

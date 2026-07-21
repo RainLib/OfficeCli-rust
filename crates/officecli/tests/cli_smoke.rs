@@ -703,6 +703,62 @@ fn test_xlsx_view_outline() {
 }
 
 #[test]
+fn test_xlsx_detected_table_query_and_row_predicate() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_detected_table.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    let add_cell = |cell_ref: &str, value: &str| {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/Sheet1",
+                "--type-name",
+                "cell",
+                "--properties",
+                &format!("ref={cell_ref}"),
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    };
+    add_cell("A1", "Name");
+    add_cell("B1", "Amount, USD");
+    add_cell("A2", "Ada");
+    add_cell("B2", "12");
+
+    officecli()
+        .args(["--json", "query", &p, "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""type": "detectedtable""#))
+        .stdout(predicate::str::contains(r#""path": "/Sheet1/A1:B2""#))
+        .stdout(predicate::str::contains(r#""stable": false"#));
+
+    officecli()
+        .args(["--json", "query", &p, "row[Amount, USD > 10]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""path": "/Sheet1/row[2]""#))
+        .stdout(predicate::str::contains(r#""tableSource": "detected""#));
+
+    officecli()
+        .args(["--json", "query", &p, "listobject"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+
+    officecli()
+        .args(["help", "xlsx", "detectedtable"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("header-sniff"));
+}
+
+#[test]
 fn test_xlsx_sheet_order_mutations_preserve_defined_name_scopes() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_xlsx_sheet_order.xlsx");
