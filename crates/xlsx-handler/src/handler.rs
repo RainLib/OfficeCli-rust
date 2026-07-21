@@ -215,7 +215,7 @@ impl DocumentHandler for ExcelHandler {
         &self,
         source: &str,
         target_parent: Option<&str>,
-        _position: InsertPosition,
+        position: InsertPosition,
     ) -> Result<String, HandlerError> {
         if !self.editable {
             return Err(HandlerError::OperationFailed(
@@ -223,7 +223,12 @@ impl DocumentHandler for ExcelHandler {
             ));
         }
         let mut pkg = self.package.borrow_mut();
-        mutations::move_cell(&mut pkg, source, target_parent)
+        let parsed = navigation::parse_path(source)?;
+        if parsed.sheet_name.is_some() && parsed.cell_ref.is_none() {
+            mutations::move_sheet(&mut pkg, source, target_parent, position)
+        } else {
+            mutations::move_cell(&mut pkg, source, target_parent)
+        }
     }
 
     fn copy_from(

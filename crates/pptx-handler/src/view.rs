@@ -330,6 +330,7 @@ pub fn set_shape_text(
 
     let slide_idx = segments[0].index.unwrap_or(1);
     let shape_idx = segments[1].index.unwrap_or(1);
+    let target_type = segments[1].name.to_ascii_lowercase();
 
     // First, build the presentation to find the slide part path
     let pres = build_presentation(package)?;
@@ -340,6 +341,15 @@ pub fn set_shape_text(
     let slide_xml = package
         .read_part_xml(&slide.part_path)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+
+    if target_type == "group" && segments.len() == 2 {
+        let (modified_xml, unsupported) =
+            apply_group_properties(&slide_xml, shape_idx, properties)?;
+        package
+            .write_part_xml(&slide.part_path, &modified_xml)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        return Ok(unsupported);
+    }
 
     let mut modified_xml = slide_xml.clone();
     let mut unsupported = Vec::new();
@@ -555,6 +565,381 @@ fn apply_shape_geometry(
     // Replace or insert <p:xfrm> inside the Nth shape's <p:spPr>
     // For now we use a regex-style replacement: find the shape's spPr and swap xfrm.
     replace_xfrm_in_nth_shape(xml, shape_idx, &xfrm_xml)
+}
+
+/// Apply position and size properties to the Nth top-level group shape.
+///
+/// Group children use `chOff`/`chExt` as their logical coordinate space. We
+/// preserve that baseline while changing the outer `off`/`ext`, so changing a
+/// single axis scales children only on that axis. `keepAspect=true` opts into
+/// proportional scaling of the other axis.
+fn apply_group_properties(
+    xml: &str,
+    group_idx: usize,
+    props: &std::collections::HashMap<String, String>,
+) -> Result<(String, Vec<String>), HandlerError> {
+    if group_idx == 0 {
+        return Err(HandlerError::InvalidPath(
+            "group indices are 1-based".to_string(),
+        ));
+    }
+
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid slide XML: {}", e)))?;
+    let shape_tree = doc
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "spTree")
+        .ok_or_else(|| HandlerError::OperationFailed("slide has no shape tree".to_string()))?;
+    let group = shape_tree
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "grpSp")
+        .nth(group_idx - 1)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("group {}", group_idx)))?;
+    let group_properties = group
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "grpSpPr")
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!("group {} has no grpSpPr", group_idx))
+        })?;
+    let transform = group_properties
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "xfrm")
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!("group {} has no transform", group_idx))
+        })?;
+    let offset = transform
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "off")
+        .ok_or_else(|| HandlerError::OperationFailed("group transform has no off".to_string()))?;
+    let extents = transform
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "ext")
+        .ok_or_else(|| HandlerError::OperationFailed("group transform has no ext".to_string()))?;
+
+    let pre_x = parse_emu_attribute(&offset, "x")?;
+    let pre_y = parse_emu_attribute(&offset, "y")?;
+    let pre_width = parse_emu_attribute(&extents, "cx")?;
+    let pre_height = parse_emu_attribute(&extents, "cy")?;
+    if pre_width <= 0 || pre_height <= 0 {
+        return Err(HandlerError::InvalidArgument(
+            "invalid group size: width and height must be positive".to_string(),
+        ));
+    }
+
+    let x_value = property_value(props, &["x", "left"]);
+    let y_value = property_value(props, &["y", "top"]);
+    let width_value = property_value(props, &["width"]);
+    let height_value = property_value(props, &["height"]);
+    let has_width = width_value.is_some();
+    let has_height = height_value.is_some();
+    let keep_aspect = property_value(props, &["keepAspect"]).is_some_and(is_truthy_property);
+
+    let new_x = x_value
+        .map(|value| parse_group_length_emu(value, "x"))
+        .transpose()?
+        .unwrap_or(pre_x);
+    let new_y = y_value
+        .map(|value| parse_group_length_emu(value, "y"))
+        .transpose()?
+        .unwrap_or(pre_y);
+    let mut new_width = width_value
+        .map(|value| parse_group_length_emu(value, "width"))
+        .transpose()?
+        .unwrap_or(pre_width);
+    let mut new_height = height_value
+        .map(|value| parse_group_length_emu(value, "height"))
+        .transpose()?
+        .unwrap_or(pre_height);
+
+    if keep_aspect && has_width && !has_height {
+        new_height = (pre_height as f64 * (new_width as f64 / pre_width as f64)).round() as i64;
+    } else if keep_aspect && has_height && !has_width {
+        new_width = (pre_width as f64 * (new_height as f64 / pre_height as f64)).round() as i64;
+    }
+    if new_width <= 0 || new_height <= 0 {
+        return Err(HandlerError::InvalidArgument(
+            "invalid group size: width and height must be positive".to_string(),
+        ));
+    }
+
+    let mut replacements = Vec::new();
+    if x_value.is_some() {
+        replacements.push((
+            attribute_value_range(xml, offset.range(), "x")?,
+            new_x.to_string(),
+        ));
+    }
+    if y_value.is_some() {
+        replacements.push((
+            attribute_value_range(xml, offset.range(), "y")?,
+            new_y.to_string(),
+        ));
+    }
+    if has_width || (keep_aspect && has_height) {
+        replacements.push((
+            attribute_value_range(xml, extents.range(), "cx")?,
+            new_width.to_string(),
+        ));
+    }
+    if has_height || (keep_aspect && has_width) {
+        replacements.push((
+            attribute_value_range(xml, extents.range(), "cy")?,
+            new_height.to_string(),
+        ));
+    }
+
+    // Snapshot missing child-coordinate baselines before changing the outer
+    // transform, matching the C# handler's first-resize behavior.
+    let child_offset = transform
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "chOff");
+    let child_extents = transform
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "chExt");
+    let need_child_offset = (x_value.is_some() || y_value.is_some()) && child_offset.is_none();
+    let need_child_extents = (has_width || has_height) && child_extents.is_none();
+    if need_child_offset || need_child_extents {
+        let mut insertion = String::new();
+        if need_child_offset {
+            insertion.push_str(&format!("<a:chOff x=\"{}\" y=\"{}\"/>", pre_x, pre_y));
+        }
+        if need_child_extents {
+            insertion.push_str(&format!(
+                "<a:chExt cx=\"{}\" cy=\"{}\"/>",
+                pre_width, pre_height
+            ));
+        }
+        let insert_at = if need_child_offset {
+            child_extents
+                .map(|node| node.range().start)
+                .unwrap_or_else(|| transform_closing_tag_start(xml, transform.range()))
+        } else {
+            transform_closing_tag_start(xml, transform.range())
+        };
+        replacements.push((insert_at..insert_at, insertion));
+    }
+
+    if let Some(name) = property_value(props, &["name"]) {
+        let non_visual = group
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "nvGrpSpPr")
+            .and_then(|node| {
+                node.descendants()
+                    .find(|child| child.is_element() && child.tag_name().name() == "cNvPr")
+            })
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("group has no non-visual properties".to_string())
+            })?;
+        replacements.push((
+            attribute_value_range(xml, non_visual.range(), "name")?,
+            escape_xml_attribute(name),
+        ));
+    }
+
+    if has_width || has_height {
+        let font_ratio =
+            (new_width as f64 / pre_width as f64).min(new_height as f64 / pre_height as f64);
+        if (font_ratio - 1.0).abs() > 1e-6 {
+            for font_properties in group.descendants().filter(|node| {
+                node.is_element()
+                    && matches!(node.tag_name().name(), "rPr" | "endParaRPr" | "defRPr")
+                    && node.attribute("sz").is_some()
+            }) {
+                let old_size = font_properties
+                    .attribute("sz")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or_else(|| {
+                        HandlerError::OperationFailed(
+                            "group contains an invalid font size".to_string(),
+                        )
+                    })?;
+                let new_size = (old_size as f64 * font_ratio).round().max(100.0) as i64;
+                replacements.push((
+                    attribute_value_range(xml, font_properties.range(), "sz")?,
+                    new_size.to_string(),
+                ));
+            }
+        }
+    }
+
+    let recognized = [
+        "x",
+        "left",
+        "y",
+        "top",
+        "width",
+        "height",
+        "keepAspect",
+        "name",
+    ];
+    let unsupported = props
+        .keys()
+        .filter(|key| {
+            !recognized
+                .iter()
+                .any(|recognized| key.eq_ignore_ascii_case(recognized))
+        })
+        .cloned()
+        .collect();
+
+    replacements.sort_by(|left, right| right.0.start.cmp(&left.0.start));
+    let mut result = xml.to_string();
+    for (range, replacement) in replacements {
+        result.replace_range(range, &replacement);
+    }
+    Ok((result, unsupported))
+}
+
+fn property_value<'a>(
+    props: &'a std::collections::HashMap<String, String>,
+    names: &[&str],
+) -> Option<&'a str> {
+    props.iter().find_map(|(key, value)| {
+        names
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+            .then_some(value.as_str())
+    })
+}
+
+fn is_truthy_property(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
+fn parse_group_length_emu(value: &str, property: &str) -> Result<i64, HandlerError> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let units = [
+        ("px", 9_525.0),
+        ("in", 914_400.0),
+        ("cm", 360_000.0),
+        ("mm", 36_000.0),
+        ("pt", 12_700.0),
+    ];
+    let parsed = if let Some((number, multiplier)) =
+        units.iter().find_map(|(suffix, multiplier)| {
+            lower
+                .strip_suffix(suffix)
+                .map(|number| (number, multiplier))
+        }) {
+        number
+            .trim()
+            .parse::<f64>()
+            .map(|value| (value * multiplier).round() as i64)
+            .map_err(|_| {
+                HandlerError::InvalidArgument(format!(
+                    "invalid {} '{}': expected a length such as 12cm or an EMU integer",
+                    property, value
+                ))
+            })?
+    } else {
+        trimmed.parse::<i64>().map_err(|_| {
+            HandlerError::InvalidArgument(format!(
+                "invalid {} '{}': expected a length such as 12cm or an EMU integer",
+                property, value
+            ))
+        })?
+    };
+    if matches!(property, "width" | "height") && parsed <= 0 {
+        return Err(HandlerError::InvalidArgument(format!(
+            "invalid {} '{}': size must be positive",
+            property, value
+        )));
+    }
+    Ok(parsed)
+}
+
+fn parse_emu_attribute(node: &roxmltree::Node<'_, '_>, name: &str) -> Result<i64, HandlerError> {
+    node.attribute(name)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!(
+                "group transform element '{}' has no {} attribute",
+                node.tag_name().name(),
+                name
+            ))
+        })?
+        .parse::<i64>()
+        .map_err(|_| {
+            HandlerError::OperationFailed(format!(
+                "group transform element '{}' has invalid {} attribute",
+                node.tag_name().name(),
+                name
+            ))
+        })
+}
+
+fn attribute_value_range(
+    xml: &str,
+    node_range: std::ops::Range<usize>,
+    attribute_name: &str,
+) -> Result<std::ops::Range<usize>, HandlerError> {
+    let opening = &xml[node_range.clone()];
+    let opening_end = opening.find('>').ok_or_else(|| {
+        HandlerError::OperationFailed("malformed group XML opening tag".to_string())
+    })?;
+    let opening = &opening[..opening_end];
+    let mut search_from = 0;
+    while let Some(relative) = opening[search_from..].find(attribute_name) {
+        let name_start = search_from + relative;
+        let before_ok = name_start > 0 && opening.as_bytes()[name_start - 1].is_ascii_whitespace();
+        let mut cursor = name_start + attribute_name.len();
+        while opening
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            cursor += 1;
+        }
+        if before_ok && opening.as_bytes().get(cursor) == Some(&b'=') {
+            cursor += 1;
+            while opening
+                .as_bytes()
+                .get(cursor)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                cursor += 1;
+            }
+            let quote = *opening.as_bytes().get(cursor).ok_or_else(|| {
+                HandlerError::OperationFailed("malformed group XML attribute".to_string())
+            })?;
+            if quote != b'\'' && quote != b'"' {
+                return Err(HandlerError::OperationFailed(
+                    "malformed group XML attribute quoting".to_string(),
+                ));
+            }
+            let value_start = cursor + 1;
+            let value_end = opening.as_bytes()[value_start..]
+                .iter()
+                .position(|byte| *byte == quote)
+                .map(|position| value_start + position)
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("unterminated group XML attribute".to_string())
+                })?;
+            return Ok((node_range.start + value_start)..(node_range.start + value_end));
+        }
+        search_from = name_start + attribute_name.len();
+    }
+    Err(HandlerError::OperationFailed(format!(
+        "group XML has no {} attribute",
+        attribute_name
+    )))
+}
+
+fn transform_closing_tag_start(xml: &str, range: std::ops::Range<usize>) -> usize {
+    let transform_xml = &xml[range.clone()];
+    range.start + transform_xml.rfind("</").unwrap_or(transform_xml.len())
+}
+
+fn escape_xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// Convert various units (px, in, cm, mm, pt) to EMU (English Metric Units).
@@ -1858,3 +2243,134 @@ fn replace_in_xml_text_nodes(
 
 // Re-export for symmetry with docx/xlsx handler surfaces.
 pub use handler_common::find_replace_property_keys;
+
+#[cfg(test)]
+mod group_resize_tests {
+    use super::apply_group_properties;
+    use std::collections::HashMap;
+
+    const SLIDE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="Root"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+    <p:grpSp>
+      <p:nvGrpSpPr><p:cNvPr id="2" name="Diagram"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="1000" cy="500"/><a:chOff x="100" y="200"/><a:chExt cx="1000" cy="500"/></a:xfrm></p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Node"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="1000" cy="500"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:defRPr sz="1200"/></a:lvl1pPr></a:lstStyle><a:p><a:r><a:rPr sz="2000"/><a:t>Node</a:t></a:r><a:endParaRPr sz="1800"/></a:p></p:txBody>
+      </p:sp>
+    </p:grpSp>
+  </p:spTree></p:cSld>
+</p:sld>"#;
+
+    fn group_transform_attr(xml: &str, element: &str, attribute: &str) -> i64 {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let shape_tree = doc
+            .descendants()
+            .find(|node| node.tag_name().name() == "spTree")
+            .unwrap();
+        let group = shape_tree
+            .children()
+            .find(|node| node.tag_name().name() == "grpSp")
+            .unwrap();
+        let transform = group
+            .children()
+            .find(|node| node.tag_name().name() == "grpSpPr")
+            .unwrap()
+            .children()
+            .find(|node| node.tag_name().name() == "xfrm")
+            .unwrap();
+        transform
+            .children()
+            .find(|node| node.tag_name().name() == element)
+            .unwrap()
+            .attribute(attribute)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn font_sizes(xml: &str) -> Vec<i64> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut sizes: Vec<i64> = doc
+            .descendants()
+            .filter(|node| matches!(node.tag_name().name(), "rPr" | "endParaRPr" | "defRPr"))
+            .filter_map(|node| node.attribute("sz"))
+            .map(|value| value.parse().unwrap())
+            .collect();
+        sizes.sort_unstable();
+        sizes
+    }
+
+    #[test]
+    fn group_width_only_changes_one_axis_by_default() {
+        let properties = HashMap::from([("width".to_string(), "2000".to_string())]);
+
+        let (updated, unsupported) = apply_group_properties(SLIDE_XML, 1, &properties).unwrap();
+
+        assert!(unsupported.is_empty());
+        assert_eq!(group_transform_attr(&updated, "ext", "cx"), 2000);
+        assert_eq!(group_transform_attr(&updated, "ext", "cy"), 500);
+        assert_eq!(group_transform_attr(&updated, "chExt", "cx"), 1000);
+        assert_eq!(group_transform_attr(&updated, "chExt", "cy"), 500);
+        assert_eq!(font_sizes(&updated), [1200, 1800, 2000]);
+    }
+
+    #[test]
+    fn group_keep_aspect_scales_other_axis_and_fonts() {
+        let properties = HashMap::from([
+            ("width".to_string(), "2000".to_string()),
+            ("keepAspect".to_string(), "true".to_string()),
+        ]);
+
+        let (updated, unsupported) = apply_group_properties(SLIDE_XML, 1, &properties).unwrap();
+
+        assert!(unsupported.is_empty());
+        assert_eq!(group_transform_attr(&updated, "ext", "cx"), 2000);
+        assert_eq!(group_transform_attr(&updated, "ext", "cy"), 1000);
+        assert_eq!(font_sizes(&updated), [2400, 3600, 4000]);
+    }
+
+    #[test]
+    fn group_single_axis_shrink_rebakes_fonts_by_minimum_ratio() {
+        let properties = HashMap::from([("height".to_string(), "250".to_string())]);
+
+        let (updated, _) = apply_group_properties(SLIDE_XML, 1, &properties).unwrap();
+
+        assert_eq!(group_transform_attr(&updated, "ext", "cx"), 1000);
+        assert_eq!(group_transform_attr(&updated, "ext", "cy"), 250);
+        assert_eq!(font_sizes(&updated), [600, 900, 1000]);
+    }
+
+    #[test]
+    fn group_first_mutation_snapshots_missing_child_baselines() {
+        let without_baselines = SLIDE_XML
+            .replace("<a:chOff x=\"100\" y=\"200\"/>", "")
+            .replace("<a:chExt cx=\"1000\" cy=\"500\"/>", "");
+        let properties = HashMap::from([
+            ("x".to_string(), "300".to_string()),
+            ("width".to_string(), "2000".to_string()),
+        ]);
+
+        let (updated, _) = apply_group_properties(&without_baselines, 1, &properties).unwrap();
+
+        assert_eq!(group_transform_attr(&updated, "off", "x"), 300);
+        assert_eq!(group_transform_attr(&updated, "chOff", "x"), 100);
+        assert_eq!(group_transform_attr(&updated, "chOff", "y"), 200);
+        assert_eq!(group_transform_attr(&updated, "chExt", "cx"), 1000);
+        assert_eq!(group_transform_attr(&updated, "chExt", "cy"), 500);
+    }
+
+    #[test]
+    fn group_rejects_non_positive_size() {
+        let properties = HashMap::from([("width".to_string(), "0".to_string())]);
+
+        let error = apply_group_properties(SLIDE_XML, 1, &properties).unwrap_err();
+
+        assert!(error.to_string().contains("size must be positive"));
+    }
+}
