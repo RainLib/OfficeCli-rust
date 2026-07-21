@@ -4,9 +4,11 @@ use crate::helpers;
 use crate::navigation;
 use handler_common::{
     self, extract_find_replace_props, replace_in_string, FindReplaceOptions, HandlerError,
+    InsertPosition,
 };
 use oxml::OxmlPackage;
 use std::collections::HashMap;
+use std::ops::Range;
 
 /// Remove an element from the workbook.
 /// Supported paths:
@@ -81,39 +83,151 @@ fn remove_cell(
 fn remove_sheet(package: &mut OxmlPackage, sheet_name: &str) -> Result<(), HandlerError> {
     let model = helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
 
+    if model.sheets.len() <= 1 {
+        return Err(HandlerError::InvalidArgument(
+            "cannot remove the workbook's only worksheet".to_string(),
+        ));
+    }
+
     let ws = model
         .sheets
         .iter()
         .find(|s| s.name == sheet_name)
         .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
-    // Remove the sheet part from the package
-    if package.has_part(&ws.part_path) {
-        package
-            .write_part(&ws.part_path, Vec::<u8>::new())
-            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
-    }
-
-    // Remove the <sheet> entry from workbook.xml
     let wb_xml = package
         .read_part_xml("xl/workbook.xml")
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let entries = workbook_sheet_entries(&wb_xml)?;
+    let removed_index = entries
+        .iter()
+        .position(|entry| entry.name == sheet_name)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
+    let removed = &entries[removed_index];
+    let workbook_without_sheet = remove_ranges(&wb_xml, vec![removed.range.clone()]);
+    let updated_workbook = rewrite_defined_name_scopes(&workbook_without_sheet, |scope| {
+        let scope = scope as usize;
+        if scope == removed_index {
+            None
+        } else if scope > removed_index {
+            Some((scope - 1) as u32)
+        } else {
+            Some(scope as u32)
+        }
+    })?;
 
-    // Find the sheet entry by name
-    let sheet_entry_pattern = format!("name=\"{}\"", sheet_name);
-    if let Some(name_pos) = wb_xml.find(&sheet_entry_pattern) {
-        // Find the <sheet .../> element containing this name
-        let element_start = wb_xml[..name_pos].rfind("<sheet").unwrap_or(0);
-        let element_end = find_element_end(&wb_xml, element_start, "sheet");
-        let mut result = wb_xml[..element_start].to_string();
-        result.push_str(&wb_xml[element_end..]);
+    let workbook_rels_path = "xl/_rels/workbook.xml.rels";
+    let workbook_rels = package
+        .read_part_xml(workbook_rels_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let updated_rels = remove_relationship_by_id(&workbook_rels, &removed.relationship_id)?;
 
-        package
-            .write_part_xml("xl/workbook.xml", &result)
-            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
-    }
+    let content_types_path = "[Content_Types].xml";
+    let content_types = package
+        .read_part_xml(content_types_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let updated_content_types = remove_content_type_override(&content_types, &ws.part_path)?;
+
+    package
+        .write_part_xml("xl/workbook.xml", &updated_workbook)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    package
+        .write_part_xml(workbook_rels_path, &updated_rels)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    package
+        .write_part_xml(content_types_path, &updated_content_types)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    package
+        .remove_part(&ws.part_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    package
+        .remove_part(&relationships_part_path(&ws.part_path))
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     Ok(())
+}
+
+/// Move a worksheet while preserving sheet-scoped defined-name bindings.
+pub fn move_sheet(
+    package: &mut OxmlPackage,
+    source: &str,
+    target_parent: Option<&str>,
+    position: InsertPosition,
+) -> Result<String, HandlerError> {
+    let source_path = navigation::parse_path(source)?;
+    let source_name = source_path
+        .sheet_name
+        .ok_or_else(|| HandlerError::InvalidPath("move source requires a sheet".to_string()))?;
+    if source_path.cell_ref.is_some() {
+        return Err(HandlerError::InvalidPath(
+            "worksheet move source must not include a cell".to_string(),
+        ));
+    }
+
+    let workbook_xml = package
+        .read_part_xml("xl/workbook.xml")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let entries = workbook_sheet_entries(&workbook_xml)?;
+    let old_order: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+    let source_index = old_order
+        .iter()
+        .position(|name| name == &source_name)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", source_name)))?;
+
+    let mut new_entries = entries.clone();
+    let moved = new_entries.remove(source_index);
+    let anchor_name = |path: &str| path.trim().trim_start_matches('/').to_string();
+    let insert_index = match position {
+        InsertPosition::AtIndex(index) => index.min(new_entries.len()),
+        InsertPosition::BeforeElement(anchor) => {
+            let anchor = anchor_name(&anchor);
+            new_entries
+                .iter()
+                .position(|entry| entry.name == anchor)
+                .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", anchor)))?
+        }
+        InsertPosition::AfterElement(anchor) => {
+            let anchor = anchor_name(&anchor);
+            new_entries
+                .iter()
+                .position(|entry| entry.name == anchor)
+                .map(|index| index + 1)
+                .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", anchor)))?
+        }
+        InsertPosition::Append => {
+            if let Some(target) = target_parent.filter(|target| !matches!(*target, "" | "/")) {
+                let target = anchor_name(target);
+                new_entries
+                    .iter()
+                    .position(|entry| entry.name == target)
+                    .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", target)))?
+            } else {
+                new_entries.len()
+            }
+        }
+    };
+    new_entries.insert(insert_index, moved);
+
+    let new_order: Vec<String> = new_entries.iter().map(|entry| entry.name.clone()).collect();
+    if old_order == new_order {
+        return Ok(format!("/{}", source_name));
+    }
+
+    let reordered = rewrite_sheet_order(&workbook_xml, &new_entries)?;
+    let updated = rewrite_defined_name_scopes(&reordered, |scope| {
+        let old_index = scope as usize;
+        if old_index >= old_order.len() {
+            return Some(scope);
+        }
+        new_order
+            .iter()
+            .position(|name| name == &old_order[old_index])
+            .map(|index| index as u32)
+    })?;
+    package
+        .write_part_xml("xl/workbook.xml", &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!("/{}", source_name))
 }
 
 /// Move a cell's content from source to target.
@@ -300,25 +414,221 @@ pub fn swap_cells(
     Ok((path1_str, path2_str))
 }
 
-/// Find the end position of an XML element (handles both self-closing and regular closing tags).
-fn find_element_end(xml: &str, start: usize, tag: &str) -> usize {
-    // Check if self-closing: look for /> before >
-    let first_gt = xml[start..]
-        .find('>')
-        .map(|pos| start + pos)
-        .unwrap_or(xml.len());
+#[derive(Clone, Debug)]
+pub(crate) struct WorkbookSheetEntry {
+    pub name: String,
+    pub relationship_id: String,
+    pub xml: String,
+    pub range: Range<usize>,
+}
 
-    if first_gt > 0 && xml.as_bytes().get(first_gt - 1) == Some(&b'/') {
-        // Self-closing element: <tag .../>
-        first_gt + 1
-    } else {
-        // Regular element: find </tag>
-        let close_tag = format!("</{}>", tag);
-        xml[first_gt..]
-            .find(&close_tag)
-            .map(|pos| first_gt + pos + close_tag.len())
-            .unwrap_or(xml.len())
+pub(crate) fn workbook_sheet_entries(
+    workbook_xml: &str,
+) -> Result<Vec<WorkbookSheetEntry>, HandlerError> {
+    const RELATIONSHIPS_NS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let doc = roxmltree::Document::parse(workbook_xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid workbook.xml: {}", e)))?;
+    let sheets = doc
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "sheets")
+        .ok_or_else(|| HandlerError::OperationFailed("workbook has no sheets list".to_string()))?;
+
+    sheets
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "sheet")
+        .map(|node| {
+            let name = node.attribute("name").ok_or_else(|| {
+                HandlerError::OperationFailed("worksheet entry has no name".to_string())
+            })?;
+            let relationship_id = node
+                .attribute((RELATIONSHIPS_NS, "id"))
+                .or_else(|| node.attribute("r:id"))
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed(format!(
+                        "worksheet '{}' has no relationship ID",
+                        name
+                    ))
+                })?;
+            let range = node.range();
+            Ok(WorkbookSheetEntry {
+                name: name.to_string(),
+                relationship_id: relationship_id.to_string(),
+                xml: workbook_xml[range.clone()].to_string(),
+                range,
+            })
+        })
+        .collect()
+}
+
+/// Rewrite localSheetId values. Returning `None` removes that defined name.
+pub(crate) fn rewrite_defined_name_scopes(
+    xml: &str,
+    mapper: impl Fn(u32) -> Option<u32>,
+) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid workbook.xml: {}", e)))?;
+    let mut replacements: Vec<(Range<usize>, String)> = Vec::new();
+
+    for node in doc
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "definedName")
+    {
+        let Some(value) = node.attribute("localSheetId") else {
+            continue;
+        };
+        let scope = value.parse::<u32>().map_err(|_| {
+            HandlerError::OperationFailed(format!(
+                "definedName has invalid localSheetId '{}'",
+                value
+            ))
+        })?;
+        match mapper(scope) {
+            None => replacements.push((node.range(), String::new())),
+            Some(new_scope) if new_scope != scope => {
+                let value_range = attribute_value_range(xml, node.range(), "localSheetId")
+                    .ok_or_else(|| {
+                        HandlerError::OperationFailed(
+                            "cannot locate localSheetId attribute in workbook XML".to_string(),
+                        )
+                    })?;
+                replacements.push((value_range, new_scope.to_string()));
+            }
+            Some(_) => {}
+        }
     }
+    Ok(apply_replacements(xml, replacements))
+}
+
+fn attribute_value_range(
+    xml: &str,
+    node_range: Range<usize>,
+    attribute_name: &str,
+) -> Option<Range<usize>> {
+    let node_xml = &xml[node_range.clone()];
+    let opening_end = node_xml.find('>')?;
+    let opening = &node_xml[..opening_end];
+    let name_start = opening.find(attribute_name)?;
+    let mut cursor = name_start + attribute_name.len();
+    while opening.as_bytes().get(cursor)?.is_ascii_whitespace() {
+        cursor += 1;
+    }
+    if opening.as_bytes().get(cursor) != Some(&b'=') {
+        return None;
+    }
+    cursor += 1;
+    while opening.as_bytes().get(cursor)?.is_ascii_whitespace() {
+        cursor += 1;
+    }
+    let quote = *opening.as_bytes().get(cursor)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let value_start = cursor + 1;
+    let value_end = opening.as_bytes()[value_start..]
+        .iter()
+        .position(|byte| *byte == quote)?
+        + value_start;
+    Some((node_range.start + value_start)..(node_range.start + value_end))
+}
+
+fn rewrite_sheet_order(
+    workbook_xml: &str,
+    entries: &[WorkbookSheetEntry],
+) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(workbook_xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid workbook.xml: {}", e)))?;
+    let sheets = doc
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "sheets")
+        .ok_or_else(|| HandlerError::OperationFailed("workbook has no sheets list".to_string()))?;
+    let range = sheets.range();
+    let container = &workbook_xml[range.clone()];
+    let opening_end = container.find('>').ok_or_else(|| {
+        HandlerError::OperationFailed("malformed sheets list opening tag".to_string())
+    })? + 1;
+    let closing_start = container.rfind("</").ok_or_else(|| {
+        HandlerError::OperationFailed("malformed sheets list closing tag".to_string())
+    })?;
+    let content_range = (range.start + opening_end)..(range.start + closing_start);
+    let content = if entries.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n    {}\n  ",
+            entries
+                .iter()
+                .map(|entry| entry.xml.as_str())
+                .collect::<Vec<_>>()
+                .join("\n    ")
+        )
+    };
+    Ok(apply_replacements(
+        workbook_xml,
+        vec![(content_range, content)],
+    ))
+}
+
+fn remove_relationship_by_id(xml: &str, relationship_id: &str) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(xml).map_err(|e| {
+        HandlerError::OperationFailed(format!("invalid workbook relationships: {}", e))
+    })?;
+    let relationship = doc
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Relationship"
+                && node.attribute("Id") == Some(relationship_id)
+        })
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!(
+                "workbook relationship {} not found",
+                relationship_id
+            ))
+        })?;
+    Ok(remove_ranges(xml, vec![relationship.range()]))
+}
+
+fn remove_content_type_override(xml: &str, part_path: &str) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid content types: {}", e)))?;
+    let part_name = format!("/{}", part_path.trim_start_matches('/'));
+    let ranges = doc
+        .descendants()
+        .filter(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Override"
+                && node.attribute("PartName") == Some(part_name.as_str())
+        })
+        .map(|node| node.range())
+        .collect();
+    Ok(remove_ranges(xml, ranges))
+}
+
+fn relationships_part_path(part_path: &str) -> String {
+    match part_path.rsplit_once('/') {
+        Some((directory, file_name)) => format!("{}/_rels/{}.rels", directory, file_name),
+        None => format!("_rels/{}.rels", part_path),
+    }
+}
+
+fn remove_ranges(xml: &str, ranges: Vec<Range<usize>>) -> String {
+    apply_replacements(
+        xml,
+        ranges
+            .into_iter()
+            .map(|range| (range, String::new()))
+            .collect(),
+    )
+}
+
+fn apply_replacements(xml: &str, mut replacements: Vec<(Range<usize>, String)>) -> String {
+    replacements.sort_by(|left, right| right.0.start.cmp(&left.0.start));
+    let mut result = xml.to_string();
+    for (range, replacement) in replacements {
+        result.replace_range(range, &replacement);
+    }
+    result
 }
 
 /// Set properties on a cell identified by path like /Sheet1/A1.
@@ -1460,3 +1770,146 @@ fn replace_in_xml_text_nodes(
 // Re-export the find/replace property key list so the handler surface
 // matches the C# command registration.
 pub use handler_common::find_replace_property_keys;
+
+#[cfg(test)]
+mod sheet_order_tests {
+    use super::*;
+
+    const WORKBOOK_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="A" sheetId="1" r:id="rId1"/>
+    <sheet name="B" sheetId="3" r:id="rId4"/>
+    <sheet name="C" sheetId="9" r:id="rId7"/>
+  </sheets>
+  <definedNames>
+    <definedName name="scopeA" localSheetId="0">A!$A$1</definedName>
+    <definedName name="scopeB" localSheetId="1">B!$A$1</definedName>
+    <definedName name="scopeC" localSheetId="2">C!$A$1</definedName>
+    <definedName name="global">A!$B$1</definedName>
+  </definedNames>
+</workbook>"#;
+
+    const WORKBOOK_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId4" Type="worksheet" Target="worksheets/sheet2.xml"/>
+  <Relationship Id="rId7" Type="worksheet" Target="worksheets/sheet5.xml"/>
+</Relationships>"#;
+
+    const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Override PartName="/xl/workbook.xml" ContentType="workbook"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="worksheet"/>
+  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="worksheet"/>
+  <Override PartName="/xl/worksheets/sheet5.xml" ContentType="worksheet"/>
+</Types>"#;
+
+    fn package_fixture() -> OxmlPackage {
+        let mut package = OxmlPackage::create("unused.xlsx");
+        package.add_part("xl/workbook.xml", WORKBOOK_XML.as_bytes());
+        package.add_part("xl/_rels/workbook.xml.rels", WORKBOOK_RELS.as_bytes());
+        package.add_part("[Content_Types].xml", CONTENT_TYPES.as_bytes());
+        for part in ["sheet1.xml", "sheet2.xml", "sheet5.xml"] {
+            package.add_part(
+                &format!("xl/worksheets/{}", part),
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#,
+            );
+        }
+        package.add_part("xl/worksheets/_rels/sheet2.xml.rels", b"<Relationships/>");
+        package
+    }
+
+    fn sheet_names(xml: &str) -> Vec<String> {
+        workbook_sheet_entries(xml)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect()
+    }
+
+    fn scope(xml: &str, name: &str) -> Option<u32> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        doc.descendants()
+            .find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "definedName"
+                    && node.attribute("name") == Some(name)
+            })
+            .and_then(|node| node.attribute("localSheetId"))
+            .and_then(|value| value.parse().ok())
+    }
+
+    #[test]
+    fn insert_sheet_shifts_scopes_and_allocates_unique_package_ids() {
+        let mut package = package_fixture();
+        let properties = HashMap::from([("name".to_string(), "Inserted".to_string())]);
+
+        let path = crate::add::add_element(
+            &mut package,
+            "/",
+            "sheet",
+            InsertPosition::AtIndex(1),
+            &properties,
+        )
+        .unwrap();
+
+        assert_eq!(path, "/Inserted");
+        let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+        assert_eq!(sheet_names(&workbook), ["A", "Inserted", "B", "C"]);
+        assert_eq!(scope(&workbook, "scopeA"), Some(0));
+        assert_eq!(scope(&workbook, "scopeB"), Some(2));
+        assert_eq!(scope(&workbook, "scopeC"), Some(3));
+        assert!(workbook.contains(r#"sheetId="10""#));
+        assert!(workbook.contains(r#"r:id="rId8""#));
+        assert!(package.has_part("xl/worksheets/sheet6.xml"));
+        assert!(package
+            .read_part_xml("[Content_Types].xml")
+            .unwrap()
+            .contains("/xl/worksheets/sheet6.xml"));
+    }
+
+    #[test]
+    fn move_sheet_remaps_scopes_by_sheet_identity() {
+        let mut package = package_fixture();
+
+        move_sheet(
+            &mut package,
+            "/A",
+            None,
+            InsertPosition::AfterElement("/C".to_string()),
+        )
+        .unwrap();
+
+        let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+        assert_eq!(sheet_names(&workbook), ["B", "C", "A"]);
+        assert_eq!(scope(&workbook, "scopeA"), Some(2));
+        assert_eq!(scope(&workbook, "scopeB"), Some(0));
+        assert_eq!(scope(&workbook, "scopeC"), Some(1));
+        assert_eq!(scope(&workbook, "global"), None);
+    }
+
+    #[test]
+    fn remove_sheet_drops_own_scopes_and_cleans_package_references() {
+        let mut package = package_fixture();
+
+        remove_sheet(&mut package, "B").unwrap();
+
+        let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
+        assert_eq!(sheet_names(&workbook), ["A", "C"]);
+        assert_eq!(scope(&workbook, "scopeA"), Some(0));
+        assert_eq!(scope(&workbook, "scopeB"), None);
+        assert_eq!(scope(&workbook, "scopeC"), Some(1));
+        assert!(!package.has_part("xl/worksheets/sheet2.xml"));
+        assert!(!package.has_part("xl/worksheets/_rels/sheet2.xml.rels"));
+        assert!(!package
+            .read_part_xml("xl/_rels/workbook.xml.rels")
+            .unwrap()
+            .contains("rId4"));
+        assert!(!package
+            .read_part_xml("[Content_Types].xml")
+            .unwrap()
+            .contains("/xl/worksheets/sheet2.xml"));
+    }
+}
