@@ -45,6 +45,10 @@ const DOCX_FONT_TABLE_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable";
 const DOCX_FONT_TABLE_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml";
+const DOCX_FONT_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font";
+const DOCX_OBFUSCATED_FONT_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.obfuscatedFont";
 
 /// Create a numbering template or instance while maintaining the package parts
 /// Word requires.  The template emits all nine OOXML levels so it remains a
@@ -6017,6 +6021,132 @@ pub(crate) fn prepare_font_table_raw_replace(
         inject_docx_relationship(package, DOCX_DOCUMENT_RELS_PART, &relationship)?;
     }
     ensure_content_type_override(package, "/word/fontTable.xml", DOCX_FONT_TABLE_CONTENT_TYPE)
+}
+
+/// Attach a C# dump `embed-binary` payload to the font table, retaining the
+/// supplied source relationship id so the preceding `<w:embed*>` XML resolves.
+pub(crate) fn attach_font_table_binary(
+    package: &mut OxmlPackage,
+    relationship_id: &str,
+    data_uri: &str,
+) -> Result<(), HandlerError> {
+    if relationship_id.is_empty()
+        || relationship_id
+            .chars()
+            .any(|ch| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+    {
+        return Err(HandlerError::InvalidArgument(
+            "fontTable embed-binary requires a safe relationship id in xpath".to_string(),
+        ));
+    }
+    let (content_type, encoded) = data_uri
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .and_then(|(head, body)| head.strip_suffix(";base64").map(|kind| (kind, body)))
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(
+                "fontTable embed-binary requires a data:<content-type>;base64,... payload"
+                    .to_string(),
+            )
+        })?;
+    let bytes = base64_decode(encoded).map_err(|_| {
+        HandlerError::InvalidArgument("fontTable embed-binary has invalid base64 data".to_string())
+    })?;
+    if bytes.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "fontTable embed-binary requires non-empty data".to_string(),
+        ));
+    }
+
+    prepare_font_table_raw_replace(package)?;
+    let rels = package
+        .part_rels(DOCX_FONT_TABLE_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    if rels.get(relationship_id).is_some() {
+        return Err(HandlerError::InvalidArgument(format!(
+            "fontTable relationship '{}' already exists",
+            relationship_id
+        )));
+    }
+    let mut index = 1usize;
+    let part_path = loop {
+        let candidate = format!("word/fonts/font{}.odttf", index);
+        if !package.has_part(&candidate) {
+            break candidate;
+        }
+        index += 1;
+    };
+    package
+        .write_part(&part_path, bytes)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    let relationship = format!(
+        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"fonts/font{}.odttf\"/>",
+        relationship_id, DOCX_FONT_REL_TYPE, index
+    );
+    inject_docx_relationship(package, "word/_rels/fontTable.xml.rels", &relationship)?;
+    ensure_default_content_type(
+        package,
+        "odttf",
+        if content_type.is_empty() {
+            DOCX_OBFUSCATED_FONT_CONTENT_TYPE
+        } else {
+            content_type
+        },
+    )
+}
+
+fn ensure_default_content_type(
+    package: &mut OxmlPackage,
+    extension: &str,
+    content_type: &str,
+) -> Result<(), HandlerError> {
+    let xml = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    if xml.contains(&format!("Extension=\"{}\"", extension)) {
+        return Ok(());
+    }
+    let types_open = xml.find("<Types").ok_or_else(|| {
+        HandlerError::OperationFailed("malformed [Content_Types].xml".to_string())
+    })?;
+    let insertion = find_tag_close_after(&xml, types_open).ok_or_else(|| {
+        HandlerError::OperationFailed("malformed [Content_Types].xml".to_string())
+    })? + 1;
+    let default_xml = format!(
+        "<Default Extension=\"{}\" ContentType=\"{}\"/>",
+        extension, content_type
+    );
+    let mut updated = String::with_capacity(xml.len() + default_xml.len());
+    updated.push_str(&xml[..insertion]);
+    updated.push_str(&default_xml);
+    updated.push_str(&xml[insertion..]);
+    package
+        .write_part_xml("[Content_Types].xml", &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
+}
+
+fn base64_decode(value: &str) -> Result<Vec<u8>, ()> {
+    let mut bits = 0u32;
+    let mut nbits = 0u32;
+    let mut output = Vec::with_capacity(value.len() * 3 / 4);
+    for character in value.chars().filter(|character| !character.is_whitespace()) {
+        let digit = match character {
+            'A'..='Z' => character as u32 - 'A' as u32,
+            'a'..='z' => character as u32 - 'a' as u32 + 26,
+            '0'..='9' => character as u32 - '0' as u32 + 52,
+            '+' | '-' => 62,
+            '/' | '_' => 63,
+            '=' => break,
+            _ => return Err(()),
+        };
+        bits = (bits << 6) | digit;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            output.push((bits >> nbits) as u8);
+        }
+    }
+    Ok(output)
 }
 
 fn ensure_docx_comments_relationship(package: &mut OxmlPackage) -> Result<(), HandlerError> {

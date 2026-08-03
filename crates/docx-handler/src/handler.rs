@@ -1039,6 +1039,14 @@ impl DocumentHandler for WordHandler {
                 .map_err(|error| HandlerError::SaveError(error.to_string()));
         }
         if part_path.eq_ignore_ascii_case("/fontTable") {
+            if action.eq_ignore_ascii_case("embed-binary") {
+                let data_uri = xml.ok_or_else(|| {
+                    HandlerError::InvalidArgument(
+                        "/fontTable embed-binary requires a data URI in XML".to_string(),
+                    )
+                })?;
+                return mutations::attach_font_table_binary(&mut package, xpath.trim(), data_uri);
+            }
             mutations::prepare_font_table_raw_replace(&mut package)?;
             if action.eq_ignore_ascii_case("replace") {
                 let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {

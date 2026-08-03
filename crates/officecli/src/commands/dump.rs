@@ -91,10 +91,14 @@ pub fn handle_dump(
             }
             let xml =
                 oxml::xml_util::strip_prolog(xml.as_deref().expect("checked above")).to_string();
-            let output = serde_json::to_string(&vec![
+            let mut items = vec![
                 serde_json::json!({"command":"meta","dumpVersion":2}),
                 serde_json::json!({"command":"raw-set","part":replay_part,"xpath":xpath,"action":"replace","xml":xml}),
-            ]).map_err(HandlerError::JsonError)?;
+            ];
+            if normalized_path == "/fonttable" {
+                items.extend(docx_font_table_binary_items(&cmd.file)?);
+            }
+            let output = serde_json::to_string(&items).map_err(HandlerError::JsonError)?;
             if let Some(path) = cmd.out.filter(|path| path != "-") {
                 std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
                 return Ok(path);
@@ -198,6 +202,67 @@ pub fn handle_dump(
         let json = serde_json::to_string_pretty(&root).map_err(|e| HandlerError::JsonError(e))?;
         Ok(json)
     }
+}
+
+const DOCX_FONT_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font";
+const DOCX_OBFUSCATED_FONT_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.obfuscatedFont";
+
+fn docx_font_table_binary_items(file: &str) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let package = oxml::OxmlPackage::open(file, false)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let relationships = package
+        .part_rels("word/fontTable.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut fonts = relationships.by_type(DOCX_FONT_REL_TYPE);
+    fonts.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut items = Vec::new();
+    for relationship in fonts {
+        if relationship.target_mode.eq_ignore_ascii_case("external") {
+            continue;
+        }
+        let part_path = package.resolve_rel_target("word/fontTable.xml", &relationship.target);
+        let bytes = package
+            .read_part_bytes(&part_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let content_type = package
+            .content_types()
+            .content_type_for(&part_path)
+            .map(String::as_str)
+            .unwrap_or(DOCX_OBFUSCATED_FONT_CONTENT_TYPE);
+        items.push(serde_json::json!({
+            "command":"raw-set",
+            "part":"/fontTable",
+            "xpath":relationship.id,
+            "action":"embed-binary",
+            "xml":format!("data:{};base64,{}", content_type, base64_encode(bytes)),
+        }));
+    }
+    Ok(items)
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(first >> 2) as usize] as char);
+        output.push(TABLE[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            TABLE[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            TABLE[(third & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 fn docx_body_subtree_xpath(path: &str) -> Option<String> {

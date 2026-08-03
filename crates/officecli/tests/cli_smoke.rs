@@ -3764,6 +3764,77 @@ fn test_dump_docx_font_table_replays_into_fresh_document() {
 }
 
 #[test]
+fn test_dump_docx_font_table_replays_embedded_font_binary() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_embedded_font_source.docx");
+    let target = tmp.path().join("dump_embedded_font_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    let fonts_xml = r#"<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:font w:name="Embedded Face"><w:embedRegular r:id="rId42" w:fontKey="00112233445566778899AABBCCDDEEFF"/></w:font></w:fonts>"#;
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "raw-set",
+            &source_path,
+            "/fontTable",
+            "--xpath",
+            "/w:fonts",
+            "--action",
+            "replace",
+            "--xml",
+            fonts_xml,
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "raw-set",
+            &source_path,
+            "/fontTable",
+            "--xpath",
+            "rId42",
+            "--action",
+            "embed-binary",
+            "--xml",
+            "data:application/vnd.openxmlformats-officedocument.obfuscatedFont;base64,AAECAw==",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/fontTable"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"action\":\"embed-binary\""))
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    let target_package = oxml::OxmlPackage::open(&target_path, false).unwrap();
+    let font_rels = target_package.part_rels("word/fontTable.xml").unwrap();
+    let font_part = target_package.resolve_rel_target(
+        "word/fontTable.xml",
+        &font_rels.get("rId42").unwrap().target,
+    );
+    assert_eq!(
+        target_package
+            .read_part_bytes(&font_part)
+            .unwrap()
+            .as_slice(),
+        &[0, 1, 2, 3]
+    );
+}
+
+#[test]
 fn test_dump_docx_body_subtree_replays_into_fresh_document() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_body_source.docx");
