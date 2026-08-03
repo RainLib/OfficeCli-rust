@@ -3884,6 +3884,55 @@ fn test_dump_pptx_batch_replays_into_fresh_deck() {
 }
 
 #[test]
+fn test_dump_pptx_batch_creates_missing_slides() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_multislide_source.pptx");
+    let target = tmp.path().join("dump_multislide_target.pptx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["add", &source_path, "/", "--type", "slide"])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &source_path,
+            "/slide[2]",
+            "--type",
+            "shape",
+            "--prop",
+            "text=Second slide replay",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &target_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Second slide replay"));
+}
+
+#[test]
 fn test_dump_pptx_slide_subtree_replays_into_matching_slide() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_slide_source.pptx");

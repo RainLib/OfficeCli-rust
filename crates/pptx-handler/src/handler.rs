@@ -282,7 +282,35 @@ impl DocumentHandler for PptxHandler {
             ));
         }
         let mut package = self.package.borrow_mut();
-        let resolved = resolve_raw_part_path(&package, part_path)?;
+        let resolved = match resolve_raw_part_path(&package, part_path) {
+            Ok(path) => path,
+            Err(HandlerError::PathNotFound(_))
+                if semantic_index(part_path.trim_start_matches('/'), "slide").is_some()
+                    && action.eq_ignore_ascii_case("replace")
+                    && xpath
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|segment| segment.rsplit(':').next() == Some("sld")) =>
+            {
+                let requested = semantic_index(part_path.trim_start_matches('/'), "slide")
+                    .expect("guard established a slide index");
+                let current = crate::navigation::build_presentation(&package)?
+                    .slides
+                    .len();
+                for _ in current..requested {
+                    crate::add::add_element(
+                        &mut package,
+                        "/",
+                        "slide",
+                        handler_common::InsertPosition::Append,
+                        &HashMap::new(),
+                    )?;
+                }
+                resolve_raw_part_path(&package, part_path)?
+            }
+            Err(error) => return Err(error),
+        };
         crate::raw::apply_raw_set(&mut package, &resolved, xpath, action, xml)
     }
 
