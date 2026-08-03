@@ -4969,6 +4969,23 @@ fn test_set_json_reports_csharp_unsupported_property_warning() {
 }
 
 #[test]
+fn test_query_text_empty_result_prints_csharp_help_hint() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("query_empty.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["query", &p, "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "No matches. Run 'officecli docx query' for selector syntax.",
+        ));
+}
+
+#[test]
 fn test_validate_uses_csharp_judgment_exit_and_streams() {
     let tmp = temp_dir();
     let path = tmp.path().join("validate_judgment.docx");

@@ -80,6 +80,16 @@ pub fn handle_query(cmd: QueryCommand, format: OutputFormat) -> Result<String, H
                 .iter()
                 .map(|n| format!("{} ({})", n.path, n.element_type))
                 .collect();
+            if lines.is_empty() {
+                let extension = std::path::Path::new(&cmd.file)
+                    .extension()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .unwrap_or("document");
+                eprintln!(
+                    "No matches. Run 'officecli {} query' for selector syntax.",
+                    extension
+                );
+            }
             Ok(lines.join("\n"))
         }
         OutputFormat::Json => crate::commands::nodes_json_envelope(&nodes),

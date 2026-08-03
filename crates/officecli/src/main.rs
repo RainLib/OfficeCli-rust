@@ -195,7 +195,9 @@ fn main() {
                     std::process::exit(1);
                 }
             } else if validate_succeeded {
-                println!("{}", text);
+                if !text.is_empty() {
+                    println!("{}", text);
+                }
             } else {
                 eprintln!("{}", text);
                 std::process::exit(1);
