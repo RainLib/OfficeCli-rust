@@ -1238,7 +1238,7 @@ fn get_numbering_node(
         .filter(|node| node.is_element())
         .filter_map(|node| match node.tag_name().name() {
             "abstractNum" => node.attribute((W_NS, "abstractNumId")).map(|id| {
-                DocumentNode::new(
+                let mut item = DocumentNode::new(
                     &format!("/numbering/abstractNum[@id={}]", id),
                     "abstractNum",
                 )
@@ -1250,7 +1250,22 @@ fn get_numbering_node(
                             .filter(|child| child.has_tag_name("lvl"))
                             .count(),
                     ),
-                )
+                );
+                for (tag, key) in [
+                    ("multiLevelType", "type"),
+                    ("name", "name"),
+                    ("styleLink", "styleLink"),
+                    ("numStyleLink", "numStyleLink"),
+                ] {
+                    if let Some(value) = node
+                        .children()
+                        .find(|child| child.has_tag_name((W_NS, tag)))
+                        .and_then(|child| child.attribute((W_NS, "val")))
+                    {
+                        item = item.with_format(key, serde_json::Value::String(value.to_string()));
+                    }
+                }
+                item
             }),
             "num" => node.attribute((W_NS, "numId")).map(|id| {
                 let mut item = DocumentNode::new(&format!("/numbering/num[@id={}]", id), "num")

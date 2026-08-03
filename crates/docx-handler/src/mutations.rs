@@ -73,7 +73,7 @@ pub fn add_numbering_definition(
             )));
         }
         (
-            build_abstract_num(id, properties),
+            build_abstract_num(id, properties)?,
             format!("/numbering/abstractNum[@id={}]", id),
         )
     } else {
@@ -187,6 +187,9 @@ pub fn set_numbering_definition(
     path: &str,
     properties: &HashMap<String, String>,
 ) -> Result<Vec<String>, HandlerError> {
+    if path.starts_with("/numbering/abstractNum[@id=") {
+        return set_abstract_numbering_definition(package, path, properties);
+    }
     let id = path
         .strip_prefix("/numbering/num[@id=")
         .and_then(|value| value.strip_suffix(']'))
@@ -530,7 +533,7 @@ fn next_numbering_id(xml: &str, attr: &str) -> i32 {
         .unwrap_or(-1)
         + 1
 }
-fn build_abstract_num(id: i32, props: &HashMap<String, String>) -> String {
+fn build_abstract_num(id: i32, props: &HashMap<String, String>) -> Result<String, HandlerError> {
     let format = props.get("format").map(String::as_str).unwrap_or("decimal");
     let text = props.get("text").cloned().unwrap_or_else(|| {
         if format == "bullet" {
@@ -557,7 +560,139 @@ fn build_abstract_num(id: i32, props: &HashMap<String, String>) -> String {
             });
         levels.push_str(&format!("<w:lvl w:ilvl=\"{}\"><w:start w:val=\"1\"/><w:numFmt w:val=\"{}\"/><w:lvlText w:val=\"{}\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"{}\" w:hanging=\"360\"/></w:pPr></w:lvl>",level,escape_attr(f),escape_attr(&t),(level+1)*720));
     }
-    format!("<w:abstractNum w:abstractNumId=\"{}\"><w:multiLevelType w:val=\"hybridMultilevel\"/>{}</w:abstractNum>",id,levels)
+    let multi_level_type = normalize_multi_level_type(
+        props
+            .get("type")
+            .or_else(|| props.get("multiLevelType"))
+            .map(String::as_str)
+            .unwrap_or("hybridMultilevel"),
+    )?;
+    let mut header = format!("<w:multiLevelType w:val=\"{}\"/>", multi_level_type);
+    for (property, tag) in [
+        ("name", "name"),
+        ("styleLink", "styleLink"),
+        ("numStyleLink", "numStyleLink"),
+    ] {
+        if let Some(value) = props.get(property).filter(|value| !value.is_empty()) {
+            header.push_str(&format!("<w:{} w:val=\"{}\"/>", tag, escape_attr(value)));
+        }
+    }
+    Ok(format!(
+        "<w:abstractNum w:abstractNumId=\"{}\">{}{}</w:abstractNum>",
+        id, header, levels
+    ))
+}
+
+/// Update template-scoped properties while retaining every level child in its
+/// schema-prescribed position.  IDs are deliberately immutable because
+/// renaming them would silently orphan every `w:num` reference.
+fn set_abstract_numbering_definition(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let id = path
+        .strip_prefix("/numbering/abstractNum[@id=")
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    parse_numbering_id(id)?;
+    let xml = package
+        .read_part_xml(DOCX_NUMBERING_PART)
+        .map_err(|_| HandlerError::PathNotFound("numbering definition not found".to_string()))?;
+    let (start, end) = numbering_abstract_bounds(&xml, id)?;
+    let mut block = xml[start..end].to_string();
+    let mut unsupported = Vec::new();
+    if let Some(value) = properties
+        .get("type")
+        .or_else(|| properties.get("multiLevelType"))
+    {
+        upsert_abstract_header_value(
+            &mut block,
+            "multiLevelType",
+            normalize_multi_level_type(value)?,
+        )?;
+    }
+    for (property, tag) in [
+        ("name", "name"),
+        ("styleLink", "styleLink"),
+        ("numStyleLink", "numStyleLink"),
+    ] {
+        if let Some(value) = properties.get(property) {
+            upsert_abstract_header_value(&mut block, tag, escape_attr(value))?;
+        }
+    }
+    for key in properties.keys() {
+        if !matches!(
+            key.as_str(),
+            "type" | "multiLevelType" | "name" | "styleLink" | "numStyleLink"
+        ) {
+            unsupported.push(key.clone());
+        }
+    }
+    let mut updated = xml;
+    updated.replace_range(start..end, &block);
+    package
+        .write_part_xml(DOCX_NUMBERING_PART, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(unsupported)
+}
+
+fn normalize_multi_level_type(value: &str) -> Result<&'static str, HandlerError> {
+    match value.to_ascii_lowercase().as_str() {
+        "hybridmultilevel" | "hybrid" => Ok("hybridMultilevel"),
+        "multilevel" | "multi" => Ok("multilevel"),
+        "singlelevel" | "single" => Ok("singleLevel"),
+        _ => Err(HandlerError::InvalidArgument(format!(
+            "invalid multiLevelType '{}'",
+            value
+        ))),
+    }
+}
+
+fn upsert_abstract_header_value(
+    block: &mut String,
+    tag: &str,
+    value: impl AsRef<str>,
+) -> Result<(), HandlerError> {
+    let marker = format!("<w:{} ", tag);
+    if let Some(start) = block.find(&marker) {
+        let value_marker = "w:val=\"";
+        let value_start = block[start..]
+            .find(value_marker)
+            .map(|offset| start + offset + value_marker.len())
+            .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {} element", tag)))?;
+        let value_end = block[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {} value", tag)))?;
+        block.replace_range(value_start..value_end, value.as_ref());
+        return Ok(());
+    }
+    let order = ["multiLevelType", "name", "styleLink", "numStyleLink"];
+    let current = order
+        .iter()
+        .position(|item| *item == tag)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("unknown abstractNum tag {}", tag)))?;
+    let mut insert_at = block.find('>').ok_or_else(|| {
+        HandlerError::OperationFailed("invalid abstractNum opening tag".to_string())
+    })? + 1;
+    for previous in &order[..current] {
+        let previous_marker = format!("<w:{} ", previous);
+        if let Some(start) = block.find(&previous_marker) {
+            let end = block[start..]
+                .find("/>")
+                .map(|offset| start + offset + 2)
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("invalid abstractNum header".to_string())
+                })?;
+            insert_at = end;
+        }
+    }
+    block.insert_str(
+        insert_at,
+        &format!("<w:{} w:val=\"{}\"/>", tag, value.as_ref()),
+    );
+    Ok(())
 }
 
 fn build_num(

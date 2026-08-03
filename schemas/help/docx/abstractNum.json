@@ -4,11 +4,15 @@
   "element": "abstractNum",
   "parent": "numbering",
   "addParent": "/numbering",
-  "operations": { "add": true, "set": false, "get": true, "query": true, "remove": false },
+  "operations": { "add": true, "set": true, "get": true, "query": true, "remove": false },
   "paths": { "stable": ["/numbering/abstractNum[@id=N]"], "positional": ["/numbering/abstractNum[N]"] },
-  "note": "Numbering template. Add creates nine OOXML levels; format and text configure level 0 and provide defaults for the template.",
+  "note": "Numbering template. Add creates nine OOXML levels; format and text configure level 0 and provide defaults. Set supports the template name, style links and multiLevelType without changing its id.",
   "properties": {
     "id": { "type": "int", "add": true, "get": true, "enforcement": "strict" },
+    "type": { "type": "enum", "values": ["hybridMultilevel", "multilevel", "singleLevel"], "aliases": ["multiLevelType"], "add": true, "set": true, "get": true, "enforcement": "report" },
+    "name": { "type": "string", "add": true, "set": true, "get": true, "enforcement": "report" },
+    "styleLink": { "type": "string", "add": true, "set": true, "get": true, "enforcement": "report" },
+    "numStyleLink": { "type": "string", "add": true, "set": true, "get": true, "enforcement": "report" },
     "format": { "type": "string", "add": true, "get": false, "enforcement": "report" },
     "text": { "type": "string", "add": true, "get": false, "enforcement": "report" }
   }

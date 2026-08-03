@@ -809,6 +809,58 @@ fn test_docx_numbering_level_remove_only_drops_target_level() {
 }
 
 #[test]
+fn test_docx_abstract_num_top_level_properties_round_trip() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_abstract_num_properties.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "abstractNum",
+            "--properties",
+            "id=3",
+            "--properties",
+            "type=single",
+            "--properties",
+            "name=Initial outline",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/numbering/abstractNum[@id=3]",
+            "type=multi",
+            "name=Chapter outline",
+            "styleLink=MyListStyle",
+            "numStyleLink=OutlineList",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/numbering/abstractNum[@id=3]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"multilevel\""))
+        .stdout(predicate::str::contains("\"name\": \"Chapter outline\""))
+        .stdout(predicate::str::contains("\"styleLink\": \"MyListStyle\""))
+        .stdout(predicate::str::contains(
+            "\"numStyleLink\": \"OutlineList\"",
+        ));
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_docx_num_start_overrides_round_trip() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_num_start_overrides.docx");
