@@ -157,6 +157,7 @@ fn main() {
         commands::Command::Create(cmd) => commands::handle_create(cmd, format),
         commands::Command::Dump(cmd) => commands::handle_dump(cmd, format),
         commands::Command::Convert(cmd) => commands::handle_convert(cmd, format),
+        commands::Command::Config(cmd) => commands::handle_config(cmd),
         commands::Command::Batch(cmd) => commands::handle_batch(cmd, format),
         commands::Command::Info(cmd) => commands::handle_info(cmd, format),
         commands::Command::Merge(cmd) => commands::handle_merge(cmd, format),
@@ -174,7 +175,7 @@ fn main() {
         commands::Command::Unmark(cmd) => commands::handle_unmark(cmd, cli.json),
         commands::Command::Marks(cmd) => commands::handle_marks(cmd, cli.json),
         commands::Command::Goto(cmd) => commands::handle_goto(cmd, cli.json),
-        commands::Command::Mcp(_) => handle_mcp(),
+        commands::Command::Mcp(cmd) => handle_mcp(cmd),
         commands::Command::_SocketPath(cmd) => handle_socket_path(cmd),
     };
 
@@ -266,10 +267,177 @@ fn handle_unwatch(cmd: commands::UnwatchCommand) -> Result<String, HandlerError>
     Ok(format!("Watch server on port {} shutting down", port))
 }
 
-fn handle_mcp() -> Result<String, HandlerError> {
-    mcp::run_server()
-        .map(|_| "MCP server stopped".to_string())
-        .map_err(|e| HandlerError::OperationFailed(e.to_string()))
+fn handle_mcp(cmd: commands::McpCommand) -> Result<String, HandlerError> {
+    match cmd.args.as_slice() {
+        [] => mcp::run_server()
+            .map(|_| "MCP server stopped".to_string())
+            .map_err(|e| HandlerError::OperationFailed(e.to_string())),
+        [action] if action.eq_ignore_ascii_case("list") => mcp_list(),
+        [target] => mcp_install(target),
+        [action, target] if action.eq_ignore_ascii_case("uninstall") => mcp_uninstall(target),
+        _ => Err(HandlerError::InvalidArgument(
+            "Usage: officecli mcp [list|<target>|uninstall <target>]".to_string(),
+        )),
+    }
+}
+
+fn mcp_home() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Resolve a command that remains usable after upgrades where possible.  This
+/// follows the C# installer's ordering: user install, PATH wrapper, then the
+/// currently running binary as a development-build fallback.
+fn mcp_command_path() -> String {
+    let executable = if cfg!(windows) {
+        "officecli.exe"
+    } else {
+        "officecli"
+    };
+    let installed = mcp_home().join(".local/bin").join(executable);
+    if installed.is_file() {
+        return installed.to_string_lossy().into_owned();
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let candidate = directory.join(executable);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| executable.to_string())
+}
+
+fn mcp_target(target: &str) -> Result<(&'static str, std::path::PathBuf), HandlerError> {
+    let home = mcp_home();
+    match target.to_ascii_lowercase().as_str() {
+        "lms" | "lmstudio" | "lm-studio" => Ok(("lms", home.join(".cache/lm-studio/extensions/plugins/mcp/officecli"))),
+        "claude" | "claude-code" => Ok(("claude", home.join(".claude.json"))),
+        "cursor" => Ok(("cursor", home.join(".cursor/mcp.json"))),
+        "vscode" | "copilot" => Ok(("vscode", home.join(".vscode/mcp.json"))),
+        _ => Err(HandlerError::InvalidArgument(format!(
+            "Unknown target: {}. Supported: lms (LM Studio), claude (Claude Code), cursor, vscode (Copilot)",
+            target
+        ))),
+    }
+}
+
+fn mcp_install(target: &str) -> Result<String, HandlerError> {
+    let (target, path) = mcp_target(target)?;
+    let command = mcp_command_path();
+    if target == "lms" {
+        std::fs::create_dir_all(&path).map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        std::fs::write(path.join("manifest.json"), "{\"type\":\"plugin\",\"runner\":\"mcpBridge\",\"owner\":\"mcp\",\"name\":\"officecli\"}\n").map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        let bridge =
+            serde_json::to_string(&serde_json::json!({"command": command, "args": ["mcp"]}))
+                .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        std::fs::write(path.join("mcp-bridge-config.json"), format!("{bridge}\n"))
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        let installed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        std::fs::write(
+            path.join("install-state.json"),
+            format!("{{\"by\":\"mcp-bridge-v1\",\"at\":{installed_at}}}\n"),
+        )
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        return Ok("Registered officecli MCP in LM Studio.".to_string());
+    }
+    let mut root = read_mcp_json(&path);
+    let object = root.as_object_mut().ok_or_else(|| {
+        HandlerError::OperationFailed("invalid MCP configuration root".to_string())
+    })?;
+    let servers = object
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers
+        .as_object_mut()
+        .ok_or_else(|| HandlerError::OperationFailed("mcpServers is not an object".to_string()))?;
+    servers.insert(
+        "officecli".to_string(),
+        serde_json::json!({"command":command,"args":["mcp"]}),
+    );
+    write_mcp_json(&path, &root)?;
+    Ok(format!("Registered officecli MCP in {}.", target))
+}
+
+fn mcp_uninstall(target: &str) -> Result<String, HandlerError> {
+    let (target, path) = mcp_target(target)?;
+    if target == "lms" {
+        if path.exists() {
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        }
+        return Ok("Removed officecli MCP from LM Studio.".to_string());
+    }
+    let mut root = read_mcp_json(&path);
+    let remove_servers_key = if let Some(servers) = root
+        .get_mut("mcpServers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        servers.remove("officecli");
+        servers.is_empty()
+    } else {
+        false
+    };
+    if remove_servers_key {
+        root.as_object_mut()
+            .expect("MCP configuration is always an object")
+            .remove("mcpServers");
+    }
+    if path.exists() {
+        write_mcp_json(&path, &root)?;
+    }
+    Ok(format!("Removed officecli MCP from {}.", target))
+}
+
+fn mcp_list() -> Result<String, HandlerError> {
+    let mut lines = Vec::new();
+    for target in ["lms", "claude", "cursor", "vscode"] {
+        let (_, path) = mcp_target(target)?;
+        let registered = if target == "lms" {
+            path.join("mcp-bridge-config.json").exists()
+        } else {
+            read_mcp_json(&path)
+                .get("mcpServers")
+                .and_then(|v| v.get("officecli"))
+                .is_some()
+        };
+        lines.push(format!(
+            "{}: {}",
+            target,
+            if registered {
+                "registered"
+            } else {
+                "not registered"
+            }
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn read_mcp_json(path: &std::path::Path) -> serde_json::Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_mcp_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), HandlerError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    }
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    std::fs::write(path, text).map_err(|e| HandlerError::OperationFailed(e.to_string()))
 }
 
 fn handle_socket_path(cmd: commands::SocketPathCommand) -> Result<String, HandlerError> {
@@ -290,15 +458,22 @@ pub(crate) fn open_handler(
         .unwrap_or_default();
 
     match ext.as_str() {
-        "docx" => {
+        // Macro-enabled OOXML packages share the same WordprocessingML model.
+        // OxmlPackage preserves unknown parts (including vbaProject.bin), so
+        // routing .docm here enables safe structured edits without stripping
+        // the macro payload.
+        "docx" | "docm" => {
             let handler = docx_handler::WordHandler::open(file, editable)?;
             Ok(Box::new(handler))
         }
-        "xlsx" => {
+        // .xlsm uses the same SpreadsheetML handler; macro parts are retained
+        // untouched by the package read/write cycle.
+        "xlsx" | "xlsm" => {
             let handler = xlsx_handler::ExcelHandler::open(file, editable)?;
             Ok(Box::new(handler))
         }
-        "pptx" => {
+        // .pptm likewise shares PresentationML with .pptx.
+        "pptx" | "pptm" => {
             let handler = pptx_handler::PptxHandler::open(file, editable)?;
             Ok(Box::new(handler))
         }

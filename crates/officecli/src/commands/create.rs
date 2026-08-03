@@ -8,27 +8,43 @@ pub struct CreateCommand {
     pub file: String,
 
     /// Format: docx, xlsx, pptx
-    #[arg(long)]
+    #[arg(long, visible_alias = "type")]
     pub format: Option<String>,
+
+    /// Overwrite an existing file. Without this flag create refuses to replace data.
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub fn handle_create(
     cmd: CreateCommand,
     _format: handler_common::OutputFormat,
 ) -> Result<String, HandlerError> {
+    let mut output_file = cmd.file;
     let ext = cmd.format.unwrap_or_else(|| {
-        std::path::Path::new(&cmd.file)
+        std::path::Path::new(&output_file)
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
             .unwrap_or_default()
     });
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    if std::path::Path::new(&output_file).extension().is_none() && !ext.is_empty() {
+        output_file.push('.');
+        output_file.push_str(ext.trim_start_matches('.'));
+    }
+    if std::path::Path::new(&output_file).exists() && !cmd.force {
+        return Err(HandlerError::InvalidArgument(format!(
+            "file already exists: {}. Use --force to overwrite.",
+            output_file
+        )));
+    }
 
     let result = match ext.as_str() {
-        "docx" => create_blank_docx(&cmd.file)?,
-        "xlsx" => create_blank_xlsx(&cmd.file)?,
-        "pptx" => create_blank_pptx(&cmd.file)?,
-        "pdf" => create_blank_pdf(&cmd.file)?,
+        "docx" => create_blank_docx(&output_file)?,
+        "xlsx" => create_blank_xlsx(&output_file)?,
+        "pptx" => create_blank_pptx(&output_file)?,
+        "pdf" => create_blank_pdf(&output_file)?,
         other => {
             return Err(HandlerError::UnsupportedMode(format!(
                 "create {} not supported",

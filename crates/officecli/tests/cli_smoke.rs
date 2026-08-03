@@ -154,12 +154,97 @@ fn test_help_format_detail() {
 }
 
 #[test]
+fn test_pptx_note_help_alias() {
+    officecli()
+        .args(["help", "pptx", "note"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pptx:notes"))
+        .stdout(predicate::str::contains("Speaker notes"));
+}
+
+#[test]
 fn test_info() {
     officecli()
         .args(["info"])
         .assert()
         .success()
         .stdout(predicate::str::contains("OfficeCLI"));
+}
+
+#[test]
+fn test_config_csharp_compatibility_surface() {
+    let home = temp_dir();
+    officecli()
+        .args(["config", "autoUpdate"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout("true\n");
+    officecli()
+        .args(["config", "autoUpdate", "false"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout("autoUpdate = false\n");
+    officecli()
+        .args(["config", "autoUpdate"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout("false\n");
+    officecli()
+        .args(["config", "log", "clear"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout("Log cleared.\n");
+    officecli()
+        .args(["config", "other"])
+        .env("HOME", home.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Available: autoUpdate, log, log clear",
+        ));
+}
+
+#[test]
+fn test_mcp_registration_lifecycle() {
+    let home = temp_dir();
+    officecli()
+        .args(["mcp", "cursor"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Registered officecli MCP in cursor",
+        ));
+    officecli()
+        .args(["mcp", "list"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cursor: registered"));
+    officecli()
+        .args(["mcp", "uninstall", "cursor"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Removed officecli MCP from cursor",
+        ));
+    let cursor_config = std::fs::read_to_string(home.path().join(".cursor/mcp.json")).unwrap();
+    assert!(
+        !cursor_config.contains("mcpServers"),
+        "uninstall must not leave an empty mcpServers object"
+    );
+    officecli()
+        .args(["mcp", "unknown"])
+        .env("HOME", home.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Supported: lms"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -342,13 +427,2054 @@ fn test_add_and_get_paragraph() {
         ])
         .assert()
         .success();
-
     // Get the newly added paragraph at p[2]
     officecli()
         .args(["get", &p, "/body/p[2]"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Hello from test"));
+}
+
+#[test]
+fn test_docx_tabstop_uses_flat_csharp_compatible_get_path() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_tabstop.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "tabstop",
+            "--properties",
+            "pos=6cm",
+            "--properties",
+            "val=right",
+            "--properties",
+            "leader=dot",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/p[1]/tab[1]"));
+
+    officecli()
+        .args(["get", &p, "/body/p[1]/tab[1]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"pos\": \"3402\""))
+        .stdout(predicate::str::contains("\"val\": \"right\""))
+        .stdout(predicate::str::contains("\"leader\": \"dot\""));
+
+    officecli()
+        .args(["set", &p, "/body/p[1]/tab[1]", "leader=underscore"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[1]/tab[1]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"leader\": \"underscore\""));
+    officecli()
+        .args(["remove", &p, "/body/p[1]/tab[1]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[1]/tab[1]", "--json"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_docx_permission_range_add_get_remove() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_permission_range.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "permStart",
+            "--properties",
+            "id=7",
+            "--properties",
+            "ed=user@example.com",
+            "--properties",
+            "colFirst=0",
+            "--properties",
+            "colLast=2",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[1]/permStart[1]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("user@example.com"))
+        .stdout(predicate::str::contains("\"colLast\": \"2\""));
+    officecli()
+        .args(["remove", &p, "/body/p[1]/permStart[1]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_docx_numbering_definition_package_and_stable_get_paths() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_numbering.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "abstractNum",
+            "--properties",
+            "id=3",
+            "--properties",
+            "format=decimal",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "num",
+            "--properties",
+            "id=9",
+            "--properties",
+            "abstractNumId=3",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/numbering", "--depth", "1", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"levelCount\": 9"))
+        .stdout(predicate::str::contains("\"abstractNumId\": \"3\""));
+    officecli()
+        .args(["get", &p, "/numbering/num[@id=9]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"numId\": \"9\""));
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_docx_num_reference_update_rejects_dangling_template() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_numbering_set.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    for id in ["3", "4"] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/numbering",
+                "--type-name",
+                "abstractNum",
+                "--properties",
+                &format!("id={id}"),
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "num",
+            "--properties",
+            "id=9",
+            "--properties",
+            "abstractNumId=3",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["set", &p, "/numbering/num[@id=9]", "abstractNumId=4"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/numbering/num[@id=9]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"abstractNumId\": \"4\""));
+    officecli()
+        .args(["set", &p, "/numbering/num[@id=9]", "abstractNumId=99"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("abstractNumId=99 not found"));
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_numbering_level_set.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    for id in ["3", "4"] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/numbering",
+                "--type-name",
+                "abstractNum",
+                "--properties",
+                &format!("id={id}"),
+                "format=decimal",
+                "text=%1.",
+            ])
+            .assert()
+            .success();
+    }
+
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/numbering/abstractNum[@id=4]/level[0]",
+            "format=upperRoman",
+            "text=%1)",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "get",
+            &p,
+            "/numbering/abstractNum[@id=3]/level[0]",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\": \"decimal\""));
+    officecli()
+        .args([
+            "get",
+            &p,
+            "/numbering/abstractNum[@id=4]/level[0]",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\": \"upperRoman\""))
+        .stdout(predicate::str::contains("\"text\": \"%1)\""));
+}
+
+#[test]
+fn test_docx_num_start_overrides_round_trip() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_num_start_overrides.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "abstractNum",
+            "--properties",
+            "id=3",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "num",
+            "--properties",
+            "id=9",
+            "abstractNumId=3",
+            "start=5",
+            "startOverride.2=7",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/numbering/num[@id=9]",
+            "startOverride.0=8",
+            "startOverride.2=11",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/numbering/num[@id=9]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"startOverride.0\": \"8\""))
+        .stdout(predicate::str::contains("\"startOverride.2\": \"11\""));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_revision_run_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_revision_lifecycle.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=base ",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "run",
+            "--properties",
+            "text=added ",
+            "revision.type=ins",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "run",
+            "--properties",
+            "text=removed",
+            "revision.type=del",
+            "revision.author=Bea",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &p, "revision"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"revision\""))
+        .stdout(predicate::str::contains("\"author\": \"Ada\""))
+        .stdout(predicate::str::contains("\"author\": \"Bea\""));
+    officecli()
+        .args(["--json", "get", &p, "/revision[@id=1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"text\": \"added \""));
+    officecli()
+        .args(["set", &p, "/revision[@id=1]", "revision.action=accept"])
+        .assert()
+        .success();
+    officecli()
+        .args(["set", &p, "/body/p[2]/del[1]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("base added removed"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_move_revision_creates_and_resolves_range_markers() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_move_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=base ",
+        ])
+        .assert()
+        .success();
+    for (revision_type, text) in [("moveFrom", "from "), ("moveTo", "to")] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/body/p[2]",
+                "--type-name",
+                "run",
+                "--properties",
+                &format!("text={text}"),
+                &format!("revision.type={revision_type}"),
+                "revision.id=44",
+                "revision.author=Ada",
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args(["--json", "query", &p, "revision[@id=44]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"moveFrom\""))
+        .stdout(predicate::str::contains("\"type\": \"moveTo\""));
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]/moveFrom[1]",
+            "revision.action=accept",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("base to"));
+    officecli()
+        .args(["--json", "query", &p, "revision"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_format_revision_reject_restores_snapshot() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_format_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=base",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "run",
+            "--properties",
+            "text=changed",
+            "bold=true",
+            "revision.type=format",
+            "revision.id=7",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &p, "revision[@type=format]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"id\": \"7\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=7]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/p[2]/r[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"bold\": true").not());
+    officecli()
+        .args(["--json", "query", &p, "revision"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_set_existing_run_as_revision() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_set_existing_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=existing",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]/r[1]",
+            "revision.type=del",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/revision[@id=1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"text\": \"existing\""));
+    officecli()
+        .args(["set", &p, "/body/p[2]/del[1]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("existing"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_set_existing_run_format_revision_restores_prior_properties() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_set_format_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=existing",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]/r[1]",
+            "bold=true",
+            "revision.type=format",
+            "revision.id=3",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &p, "revision[@type=format]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"id\": \"3\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=3]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/p[2]/r[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"bold\": true").not());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_set_existing_paragraph_format_revision_restores_prior_properties() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_set_paragraph_format_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=existing",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "alignment=center",
+            "revision.type=format",
+            "revision.id=4",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &p, "revision[@type=format]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"id\": \"4\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=4]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/p[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"alignment\": \"center\"").not());
+    officecli()
+        .args(["--json", "query", &p, "revision"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_add_paragraph_format_revision_rejects_to_empty_snapshot() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_add_paragraph_format_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=existing",
+            "alignment=center",
+            "revision.type=format",
+            "revision.id=5",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/revision[@id=5]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"format\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=5]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/p[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"alignment\": \"center\"").not());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_row_insertion_revision_reject_removes_whole_row() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_row_insertion_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "table",
+            "--properties",
+            "rows=1",
+            "cols=1",
+            "r1c1=base",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/tbl[1]",
+            "--type-name",
+            "row",
+            "--properties",
+            "revision.type=ins",
+            "revision.id=12",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/revision[@id=12]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"ins\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=12]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/tbl[1]/tr[2]"])
+        .assert()
+        .failure();
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_existing_row_deletion_revision_accept_removes_whole_row() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_row_deletion_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "table",
+            "--properties",
+            "rows=1",
+            "cols=1",
+            "r1c1=base",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/tbl[1]/tr[1]",
+            "revision.type=del",
+            "revision.id=13",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["set", &p, "/revision[@id=13]", "revision.action=accept"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/tbl[1]/tr[1]"])
+        .assert()
+        .failure();
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_cell_insertion_revision_reject_removes_whole_cell() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_cell_insertion_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "table",
+            "--properties",
+            "rows=1",
+            "cols=1",
+            "r1c1=base",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/tbl[1]/tr[1]",
+            "--type-name",
+            "cell",
+            "--properties",
+            "text=added",
+            "revision.type=ins",
+            "revision.id=14",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/revision[@id=14]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"cellIns\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=14]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/tbl[1]/tr[1]/tc[2]"])
+        .assert()
+        .failure();
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_existing_cell_deletion_revision_accept_removes_whole_cell() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_cell_deletion_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "table",
+            "--properties",
+            "rows=1",
+            "cols=1",
+            "r1c1=base",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/tbl[1]/tr[1]/tc[1]",
+            "revision.type=del",
+            "revision.id=15",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/revision[@id=15]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"cellDel\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=15]", "revision.action=accept"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/tbl[1]/tr[1]/tc[1]"])
+        .assert()
+        .failure();
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_paragraph_mark_insertion_reject_merges_into_previous_paragraph() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_paragraph_mark_insertion.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    for (text, revision) in [("base", None), ("added", Some("20"))] {
+        let mut args = vec![
+            "add".to_string(),
+            p.clone(),
+            "--parent".to_string(),
+            "/body".to_string(),
+            "--type-name".to_string(),
+            "paragraph".to_string(),
+            "--properties".to_string(),
+            format!("text={text}"),
+        ];
+        if let Some(id) = revision {
+            args.extend([
+                "revision.type=ins".to_string(),
+                format!("revision.id={id}"),
+                "revision.author=Ada".to_string(),
+            ]);
+        }
+        officecli().args(&args).assert().success();
+    }
+    officecli()
+        .args(["set", &p, "/revision[@id=20]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[3]"])
+        .assert()
+        .failure();
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_paragraph_mark_deletion_accept_merges_into_next_paragraph() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_paragraph_mark_deletion.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    for (text, revision) in [("first", None), ("second", Some("21")), ("third", None)] {
+        let mut args = vec![
+            "add".to_string(),
+            p.clone(),
+            "--parent".to_string(),
+            "/body".to_string(),
+            "--type-name".to_string(),
+            "paragraph".to_string(),
+            "--properties".to_string(),
+            format!("text={text}"),
+        ];
+        if let Some(id) = revision {
+            args.extend([
+                "revision.type=del".to_string(),
+                format!("revision.id={id}"),
+                "revision.author=Ada".to_string(),
+            ]);
+        }
+        officecli().args(&args).assert().success();
+    }
+    officecli()
+        .args(["set", &p, "/revision[@id=21]", "revision.action=accept"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[4]"])
+        .assert()
+        .failure();
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("secondthird"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_find_replace_with_revision_tracks_precise_fragment() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_find_replace_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=prefix old suffix",
+            "bold=true",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "find=old",
+            "replace=new",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("replaced=1"));
+    officecli()
+        .args(["--json", "query", &p, "revision"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"del\""))
+        .stdout(predicate::str::contains("\"type\": \"ins\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=1]", "revision.action=accept"])
+        .assert()
+        .success();
+    officecli()
+        .args(["set", &p, "/revision[@id=2]", "revision.action=accept"])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prefix new suffix"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_find_format_with_revision_reject_restores_run_properties() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_find_format_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=match me",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "find=match",
+            "bold=true",
+            "revision.type=format",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("replaced=1"));
+    officecli()
+        .args(["--json", "query", &p, "revision[@type=format]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"format\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=1]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/p[2]/r[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"bold\": true").not());
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("match me"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_regex_find_format_with_revision_reject_restores_run_properties() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_regex_find_format_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=invoice 2026",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "find=[0-9]+",
+            "regex=true",
+            "bold=true",
+            "revision.type=format",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("replaced=1"));
+    officecli()
+        .args(["--json", "query", &p, "revision[@type=format]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"format\""));
+    officecli()
+        .args(["set", &p, "/revision[@id=1]", "revision.action=reject"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/p[2]/r[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"bold\": true").not());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_cross_run_find_replace_with_revision_tracks_each_fragment() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_cross_run_find_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=hel",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "run",
+            "--properties",
+            "text=lo world",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "find=hello",
+            "replace=hi",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("replaced=1"));
+    officecli()
+        .args(["--json", "query", &p, "revision"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"del\"").count(2))
+        .stdout(predicate::str::contains("\"type\": \"ins\""));
+    for id in ["1", "2", "3"] {
+        officecli()
+            .args([
+                "set",
+                &p,
+                &format!("/revision[@id={id}]"),
+                "revision.action=accept",
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi world"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_cross_run_regex_find_replace_with_revision_expands_captures() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_cross_run_regex_find_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=item-",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "run",
+            "--properties",
+            "text=42",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "find=(\\w+)-(\\d+)",
+            "regex=true",
+            "replace=$2:$1",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("replaced=1"));
+    for id in ["1", "2", "3"] {
+        officecli()
+            .args([
+                "set",
+                &p,
+                &format!("/revision[@id={id}]"),
+                "revision.action=accept",
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42:item"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_tracked_find_rejects_hyperlink_boundary() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_tracked_find_hyperlink_boundary.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=prefix ",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "hyperlink",
+            "--properties",
+            "text=link",
+            "url=https://example.com",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "run",
+            "--properties",
+            "text=tail",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "find=linktail",
+            "replace=x",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("inline structure boundary"));
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prefix linktail"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_comment_set_formats_existing_body_without_flattening() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_comment_set_format.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "comment",
+            "--properties",
+            "text=review me",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/comments/comment[@commentId=0]",
+            "bold=true",
+            "italic=true",
+            "alignment=center",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/comments.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<w:b />"))
+        .stdout(predicate::str::contains("<w:i />"))
+        .stdout(predicate::str::contains("<w:jc w:val=\"center\" />"))
+        .stdout(predicate::str::contains("review me"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_comment_body_run_get_and_set_are_path_scoped() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_comment_body_run_path.docx");
+    let p = path.to_string_lossy().to_string();
+    let run_path = "/comments/comment[@commentId=0]/p[1]/r[1]";
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "comment",
+            "--properties",
+            "text=first body",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, run_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"r\""))
+        .stdout(predicate::str::contains("first body"));
+    officecli()
+        .args(["set", &p, run_path, "text=edited body", "bold=true"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/comments.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("edited body"))
+        .stdout(predicate::str::contains("<w:b />"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_comment_body_add_and_remove_paragraph_run() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_comment_body_add_remove.docx");
+    let p = path.to_string_lossy().to_string();
+    let comment_path = "/comments/comment[@commentId=0]";
+    let paragraph_path = "/comments/comment[@commentId=0]/p[1]";
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "comment",
+            "--properties",
+            "text=first",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            paragraph_path,
+            "--type-name",
+            "run",
+            "--properties",
+            "text= second",
+            "bold=true",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/r[2]"));
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            comment_path,
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=third",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/p[2]"));
+    officecli()
+        .args(["--json", "get", &p, "/comments/comment[@commentId=0]/p[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("third"));
+    officecli()
+        .args(["remove", &p, "/comments/comment[@commentId=0]/p[1]/r[2]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["remove", &p, "/comments/comment[@commentId=0]/p[2]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/comments.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(" second").not())
+        .stdout(predicate::str::contains("third").not())
+        .stdout(predicate::str::contains("first"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_query_paragraph_and_run_includes_comment_body() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_comment_query_subtree.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "comment",
+            "--properties",
+            "text=comment text",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/comments/comment[@commentId=0]/p[1]/r[1]",
+            "bold=true",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &p, "p"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "/comments/comment[@commentId=0]/p[1]",
+        ));
+    officecli()
+        .args(["--json", "query", &p, "r[bold]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "/comments/comment[@commentId=0]/p[1]/r[1]",
+        ));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_raw_comments_extended_logical_alias_preserves_thread_metadata() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_comments_extended_alias.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "comment",
+            "--properties",
+            "text=parent",
+            "author=Ada",
+            "done=true",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "comment",
+            "--properties",
+            "text=reply",
+            "author=Bea",
+            "parentId=0",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "/commentsExtended"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("w15:commentEx"))
+        .stdout(predicate::str::contains("w15:paraIdParent"))
+        .stdout(predicate::str::contains("w15:done=\"1\""));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_add_markdown_expands_editable_blocks() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_markdown_blocks.docx");
+    let p = path.to_string_lossy().to_string();
+    let markdown = "# Title\n\nA paragraph\ncontinued\n\n- first\n2. second\n\n> quote\n\n```txt\nlet x = 1;\n```";
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "markdown",
+            "--properties",
+            &format!("markdown={markdown}"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/p[2]"));
+    officecli()
+        .args(["--json", "get", &p, "/body/p[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Title"))
+        .stdout(predicate::str::contains("Heading1"));
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("A paragraph continued"))
+        .stdout(predicate::str::contains("• first"))
+        .stdout(predicate::str::contains("2. second"))
+        .stdout(predicate::str::contains("let x = 1;"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_add_markdown_emits_inline_format_runs() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_markdown_inline.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "markdown",
+            "--properties",
+            "markdown=plain **bold** *italic* ~~gone~~ `code`",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<w:b />"))
+        .stdout(predicate::str::contains("<w:i />"))
+        .stdout(predicate::str::contains("<w:strike />"))
+        .stdout(predicate::str::contains("Consolas"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_add_markdown_emits_editable_gfm_table() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_markdown_table.docx");
+    let p = path.to_string_lossy().to_string();
+    let markdown = "| Name | Value |\n| --- | :---: |\n| Ada | **42** |\n| Bea | 7 |";
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "markdown",
+            "--properties",
+            &format!("markdown={markdown}"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/tbl[1]"));
+    officecli()
+        .args(["--json", "get", &p, "/body/tbl[1]/tr[2]/tc[2]/p[1]/r[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<w:tbl"))
+        .stdout(predicate::str::contains("<w:b />"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_drawingml_shape_and_textbox_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_drawingml_shapes.docx");
+    let p = path.to_string_lossy();
+    officecli().args(["create", &p]).assert().success();
+
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "shape",
+            "--properties",
+            "geometry=ellipse,width=4cm,height=2cm,fill=FF0000",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/shape[1]"));
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "textbox",
+            "--properties",
+            "text=Sidebar note,width=6cm,geometry=roundRect",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/textbox[1]"));
+    officecli()
+        .args(["--json", "get", &p, "/body/textbox[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Sidebar note"))
+        .stdout(predicate::str::contains("roundRect"));
+    officecli()
+        .args(["set", &p, "/body/shape[1]", "geometry=diamond", "width=4cm"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/shape[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1440000"));
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prst=\"diamond\""))
+        .stdout(predicate::str::contains("wps:wsp"));
+    officecli()
+        .args(["remove", &p, "/body/textbox[1]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Sidebar note").not());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_add_native_mermaid_flowchart_group() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_docx_diagram.docx");
+    let p = path.to_string_lossy();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "diagram",
+            "--properties",
+            "mermaid=flowchart TD; A[Start] -->|next| B{Ready?}; B --> C[Done],width=10cm",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/group[1]"));
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wpg:wgp"))
+        .stdout(predicate::str::contains("Diagram node"))
+        .stdout(predicate::str::contains("diamond"))
+        .stdout(predicate::str::contains("Start"))
+        .stdout(predicate::str::contains("next"));
+    officecli()
+        .args(["--json", "get", &p, "/body/group[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Start"));
+    officecli()
+        .args(["set", &p, "/body/group[1]", "width=8cm"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/group[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2880000"));
+    officecli().args(["validate", &p]).assert().success();
+    officecli()
+        .args(["remove", &p, "/body/group[1]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wpg:wgp").not());
+}
+
+#[test]
+fn test_pptx_add_native_mermaid_flowchart_group() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_diagram.pptx");
+    let p = path.to_string_lossy();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "diagram",
+            "--properties",
+            "mermaid=flowchart LR; A[Start] --> B{Ready?} --> C[Done]",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/slide[1]/group[1]"));
+    officecli()
+        .args(["raw", &p, "ppt/slides/slide1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("p:grpSp"))
+        .stdout(predicate::str::contains("Diagram node"))
+        .stdout(predicate::str::contains("diamond"))
+        .stdout(predicate::str::contains("Start"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_add_native_mermaid_sequence_group() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_docx_sequence_diagram.docx");
+    let p = path.to_string_lossy();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "diagram",
+            "--properties",
+            "mermaid=sequenceDiagram; participant A as Alice; participant B as Bob; A->>B: Hello; B-->>A: Reply",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/group[1]"));
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice"))
+        .stdout(predicate::str::contains("Hello"))
+        .stdout(predicate::str::contains("prstDash"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_pptx_add_native_mermaid_sequence_group() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_sequence_diagram.pptx");
+    let p = path.to_string_lossy();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "diagram",
+            "--properties",
+            "mermaid=sequenceDiagram; participant A as Alice; participant B as Bob; A->>B: Hello; B-->>A: Reply",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/slide[1]/group[1]"));
+    officecli()
+        .args(["raw", &p, "ppt/slides/slide1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice"))
+        .stdout(predicate::str::contains("Hello"))
+        .stdout(predicate::str::contains("prstDash"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_cross_run_find_format_with_revision_tracks_exact_fragments() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_cross_run_find_format_revision.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=hel",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[2]",
+            "--type-name",
+            "run",
+            "--properties",
+            "text=lo world",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[2]",
+            "find=hello",
+            "bold=true",
+            "revision.type=format",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("replaced=1"));
+    officecli()
+        .args(["--json", "query", &p, "revision[@type=format]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"format\"").count(2));
+    for id in ["1", "2"] {
+        officecli()
+            .args([
+                "set",
+                &p,
+                &format!("/revision[@id={id}]"),
+                "revision.action=reject",
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args(["view", &p, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello world"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_get_save_extracts_docx_drawing_payload_to_nested_destination() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_get_save_image.docx");
+    let output = tmp.path().join("nested/exported-image.bin");
+    let p = path.to_string_lossy().to_string();
+    let output_string = output.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "image",
+            "--properties",
+            "payloadBase64=AAEC",
+            "--properties",
+            "format=png",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args([
+            "get",
+            &p,
+            "/body/p[1]/drawing[1]",
+            "--depth",
+            "0",
+            "--save",
+            &output_string,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("savedTo"))
+        .stdout(predicate::str::contains("savedBytes"))
+        .stdout(predicate::str::contains("image/png"));
+
+    assert_eq!(std::fs::read(output).unwrap(), vec![0, 1, 2]);
 }
 
 #[test]
@@ -703,6 +2829,136 @@ fn test_xlsx_view_outline() {
 }
 
 #[test]
+fn test_xlsx_modern_formula_ooxml_round_trip() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("modern_formula.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/Sheet1",
+            "--type-name",
+            "cell",
+            "--properties",
+            "ref=A1",
+            "formula=SEQUENCE(2)",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/worksheets/sheet1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_xlfn.SEQUENCE(2)"))
+        .stdout(predicate::str::contains("t=\"array\" ref=\"A1\""));
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/A1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""formula": "SEQUENCE(2)""#));
+}
+
+#[test]
+fn test_xlsx_in_cell_rich_value_image_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("in_cell_image.xlsx");
+    let image = tmp.path().join("pixel.png");
+    let p = path.to_string_lossy().to_string();
+    std::fs::write(
+        &image,
+        [
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, b'I', b'E', b'N', b'D',
+            0xae, 0x42, 0x60, 0x82,
+        ],
+    )
+    .unwrap();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/Sheet1",
+            "--type-name",
+            "cell",
+            "--properties",
+            "ref=B2",
+            &format!("image={}", image.display()),
+            "alt=Product photo",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/Sheet1",
+            "--type-name",
+            "cell",
+            "--properties",
+            "ref=C3",
+            &format!("image={}", image.display()),
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/worksheets/sheet1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#"t="e" vm="1""#))
+        .stdout(predicate::str::contains(r#"t="e" vm="2""#))
+        .stdout(predicate::str::contains("#VALUE!"));
+    officecli()
+        .args(["raw", &p, "xl/metadata.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("XLRICHVALUE"))
+        .stdout(predicate::str::contains("rvb"));
+    officecli()
+        .args(["raw", &p, "xl/richData/rdrichvalue.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Product photo"));
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/B2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""type": "Image""#))
+        .stdout(predicate::str::contains(r#""text": "[image]""#))
+        .stdout(predicate::str::contains(r#""alt": "Product photo""#))
+        .stdout(predicate::str::contains(
+            r#""image.contentType": "image/png""#,
+        ));
+    officecli()
+        .args(["--json", "query", &p, "type=image"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""path": "/Sheet1/B2""#))
+        .stdout(predicate::str::contains(r#""type": "Image""#));
+    officecli()
+        .args(["get", &p, "/Sheet1/B2:image.fileSize"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Text: 20"));
+    officecli()
+        .args(["set", &p, "/Sheet1/B2", "image=none"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/worksheets/sheet1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#"<c r="B2"/>"#))
+        .stdout(predicate::str::contains(r#"<c r="C3" t="e" vm="2""#));
+}
+
+#[test]
 fn test_xlsx_detected_table_query_and_row_predicate() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_xlsx_detected_table.xlsx");
@@ -873,6 +3129,150 @@ fn test_pptx_add_slide() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Slides"));
+}
+
+#[test]
+fn test_pptx_linebreak_add_get_remove_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_linebreak.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/presentation",
+            "--type-name",
+            "slide",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "textbox",
+            "--properties",
+            "text=before",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]/shape[1]/paragraph[1]",
+            "--type-name",
+            "br",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "/slide[1]/shape[1]/paragraph[1]/br[1]",
+        ));
+    officecli()
+        .args(["--json", "get", &p, "/slide[1]/shape[1]/paragraph[1]/br[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"linebreak\""));
+    officecli()
+        .args(["remove", &p, "/slide[1]/shape[1]/paragraph[1]/br[1]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/slide[1]/shape[1]/paragraph[1]/br[1]"])
+        .assert()
+        .failure();
+    officecli().args(["validate", &p]).assert().success();
+    officecli()
+        .args(["help", "pptx", "linebreak"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("linebreak"));
+}
+
+#[test]
+fn test_pptx_modern_comment_thread_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_modern_comments.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "modernComment",
+            "--properties",
+            "text=Root",
+            "author=Ada Lovelace",
+            "created=2026-01-02T03:04:05+08:00",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/slide[1]/modernComment[1]"));
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "modernComment",
+            "--properties",
+            "text=Reply",
+            "parent=/slide[1]/modernComment[1]",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "/slide[1]/modernComment[1]/reply[1]",
+        ));
+    officecli()
+        .args(["--json", "get", &p, "/slide[1]/modernComment[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"child_count\": 1"))
+        .stdout(predicate::str::contains("2026-01-01T19:04:05Z"));
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/slide[1]/modernComment[1]",
+            "text=Edited",
+            "resolved=true",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &p, "modernComment"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Edited"))
+        .stdout(predicate::str::contains("\"resolved\": true"));
+    officecli()
+        .args(["remove", &p, "/slide[1]/modernComment[1]/reply[1]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["remove", &p, "/slide[1]/modernComment[1]"])
+        .assert()
+        .success();
+    officecli().args(["validate", &p]).assert().success();
+    officecli()
+        .args(["help", "pptx", "modernComment"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("modernComment"));
 }
 
 #[test]

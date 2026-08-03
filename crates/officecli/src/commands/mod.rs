@@ -1,6 +1,7 @@
 mod add;
 mod add_part;
 mod batch;
+mod config;
 mod convert;
 mod create;
 mod dump;
@@ -52,6 +53,7 @@ pub fn offset_map_value(handler: &dyn DocumentHandler) -> Option<serde_json::Val
 pub use add::AddCommand;
 pub use add_part::AddPartCommand;
 pub use batch::BatchCommand;
+pub use config::{handle_config, ConfigCommand};
 pub use convert::{parse_engine, ConvertCommand};
 pub use create::CreateCommand;
 pub use dump::DumpCommand;
@@ -206,7 +208,11 @@ pub struct SocketPathCommand {
 
 /// Start an MCP stdio server for AI agent integration
 #[derive(Args)]
-pub struct McpCommand;
+pub struct McpCommand {
+    /// `list`, a target name, or `uninstall <target>`; omit to start the stdio server.
+    #[arg(trailing_var_arg = true)]
+    pub args: Vec<String>,
+}
 
 #[derive(clap::Subcommand)]
 pub enum Command {
@@ -246,6 +252,8 @@ pub enum Command {
     Dump(DumpCommand),
     /// Convert legacy Office formats (.doc, .xls, .ppt) to modern (.docx, .xlsx, .pptx)
     Convert(ConvertCommand),
+    /// Read or update OfficeCLI compatibility settings
+    Config(ConfigCommand),
     /// Run commands from inline JSON, a file, or stdin
     Batch(BatchCommand),
     /// Show info about the tool or document topics

@@ -29,6 +29,11 @@ pub struct BatchCommand {
     /// Emit the refreshed text+offset map after the batch (and per op) in JSON output.
     #[arg(long)]
     pub emit_map: bool,
+
+    /// Persist successful operations even when another operation fails.
+    /// Without this flag a batch is atomic: failed batches are not saved.
+    #[arg(long)]
+    pub best_effort: bool,
 }
 
 /// Per-paragraph (or per-element) ledger of applied text-length edits.
@@ -51,10 +56,14 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
         .map_err(|e| HandlerError::InvalidArgument(format!("invalid batch JSON: {}", e)))?;
 
     if !cmd.emit_map {
-        if let Some(output) = try_handle_docx_range_set_batch(&cmd.file, &ops, format)? {
+        if let Some(output) =
+            try_handle_docx_range_set_batch(&cmd.file, &ops, format, cmd.best_effort)?
+        {
             return Ok(output);
         }
-        if let Some(output) = try_handle_docx_bookmark_add_batch(&cmd.file, &ops, format)? {
+        if let Some(output) =
+            try_handle_docx_bookmark_add_batch(&cmd.file, &ops, format, cmd.best_effort)?
+        {
             return Ok(output);
         }
     }
@@ -83,14 +92,23 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
             op: op.command.clone(),
             result,
         });
+        if !cmd.best_effort && results.last().is_some_and(|result| result.result.is_err()) {
+            break;
+        }
     }
 
-    // Auto-save after batch operations if any mutation was performed
+    // By default a batch is transactional at the package boundary: handlers
+    // mutate their in-memory package only, so omitting save leaves the source
+    // file untouched after any error. --best-effort retains the historical
+    // partial-save behaviour as an explicit opt-in.
+    let has_error = results.iter().any(|r| r.result.is_err());
     let has_mutations = results.iter().any(|r| {
         matches!(r.op.as_str(), "set" | "add" | "remove" | "move" | "copy") && r.result.is_ok()
     });
-    if has_mutations {
+    if has_mutations && (cmd.best_effort || !has_error) {
         handler.save()?;
+    } else if has_error && !cmd.best_effort {
+        mark_batch_results_rolled_back(&mut results);
     }
 
     let output = if format == OutputFormat::Json {
@@ -166,6 +184,7 @@ fn try_handle_docx_bookmark_add_batch(
     file: &str,
     ops: &[BatchOp],
     format: OutputFormat,
+    best_effort: bool,
 ) -> Result<Option<String>, HandlerError> {
     if ops.is_empty() || !is_docx_path(file) || !ops.iter().all(is_bookmark_add_op) {
         return Ok(None);
@@ -177,7 +196,7 @@ fn try_handle_docx_bookmark_add_batch(
         .collect::<Vec<docx_handler::AddBatchItem>>();
     let handler = docx_handler::WordHandler::open(file, true)?;
     let add_results = handler.add_batch(&items)?;
-    let results = add_results
+    let mut results = add_results
         .into_iter()
         .map(|result| BatchResult {
             op: "add".to_string(),
@@ -185,8 +204,11 @@ fn try_handle_docx_bookmark_add_batch(
         })
         .collect::<Vec<_>>();
 
-    if results.iter().any(|r| r.result.is_ok()) {
+    let has_error = results.iter().any(|r| r.result.is_err());
+    if results.iter().any(|r| r.result.is_ok()) && (best_effort || !has_error) {
         handler.save()?;
+    } else if has_error && !best_effort {
+        mark_batch_results_rolled_back(&mut results);
     }
 
     let output = if format == OutputFormat::Json {
@@ -208,6 +230,7 @@ fn try_handle_docx_range_set_batch(
     file: &str,
     ops: &[BatchOp],
     format: OutputFormat,
+    best_effort: bool,
 ) -> Result<Option<String>, HandlerError> {
     if ops.is_empty() || !is_docx_path(file) || !ops.iter().all(is_range_set_op) {
         return Ok(None);
@@ -219,7 +242,7 @@ fn try_handle_docx_range_set_batch(
         .collect::<Vec<docx_handler::SetRangeBatchItem>>();
     let handler = docx_handler::WordHandler::open(file, true)?;
     let set_results = handler.set_range_batch(&items)?;
-    let results = set_results
+    let mut results = set_results
         .into_iter()
         .map(|result| BatchResult {
             op: "set".to_string(),
@@ -227,8 +250,11 @@ fn try_handle_docx_range_set_batch(
         })
         .collect::<Vec<_>>();
 
-    if results.iter().any(|r| r.result.is_ok()) {
+    let has_error = results.iter().any(|r| r.result.is_err());
+    if results.iter().any(|r| r.result.is_ok()) && (best_effort || !has_error) {
         handler.save()?;
+    } else if has_error && !best_effort {
+        mark_batch_results_rolled_back(&mut results);
     }
 
     let output = if format == OutputFormat::Json {
@@ -244,6 +270,12 @@ fn try_handle_docx_range_set_batch(
             .join("\n")
     };
     Ok(Some(output))
+}
+
+fn mark_batch_results_rolled_back(results: &mut [BatchResult]) {
+    for result in results.iter_mut().filter(|result| result.result.is_ok()) {
+        result.result = Err("rolled back because another batch operation failed".to_string());
+    }
 }
 
 fn is_docx_path(file: &str) -> bool {

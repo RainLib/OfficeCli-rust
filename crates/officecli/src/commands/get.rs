@@ -1,26 +1,72 @@
 use clap::Args;
 use handler_common::{HandlerError, OutputFormat};
 
+/// The maximum node nesting callers may request.  This keeps `get --depth`
+/// bounded on malformed or deliberately deeply nested Office XML.
+const MAX_GET_DEPTH: usize = 128;
+
 /// Retrieve a specific element at a path with its content and metadata
 #[derive(Args)]
 pub struct GetCommand {
     /// Document file path
     pub file: String,
 
-    /// Path to the element (e.g. /body/p[1], /slide[1]/shape[2])
-    pub path: String,
+    /// Path to the element (e.g. /body/p[1], /slide[1]/shape[2]). Defaults to root.
+    pub path: Option<String>,
 
     /// Depth of children to return
     #[arg(short, long, default_value = "1")]
     pub depth: usize,
+
+    /// Extract the node's backing binary payload (picture, OLE, or media) to this file
+    #[arg(long)]
+    pub save: Option<String>,
 }
 
 pub fn handle_get(cmd: GetCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, false)?;
-    let node = handler.get(&cmd.path, cmd.depth)?;
+    let path = cmd.path.as_deref().unwrap_or("/");
+    let depth = cmd.depth.min(MAX_GET_DEPTH);
+    let mut node = handler.get(path, depth)?;
+
+    if let Some(save_path) = cmd.save.as_deref() {
+        // Keep the CLI contract friendly for scripts: a nested output directory
+        // need not already exist.  The handler still determines whether the
+        // requested node actually has a backing binary part.
+        if let Some(parent) = std::path::Path::new(save_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    HandlerError::OperationFailed(format!(
+                        "failed to create destination directory '{}': {}",
+                        parent.display(),
+                        err
+                    ))
+                })?;
+            }
+        }
+
+        let binary = handler.try_extract_binary(path, save_path)?.ok_or_else(|| {
+            HandlerError::OperationFailed(format!(
+                "node at '{}' has no binary payload to extract (only picture, OLE, media, or embedded nodes can be saved)",
+                path
+            ))
+        })?;
+        node.format.insert(
+            "savedTo".to_string(),
+            Some(serde_json::Value::String(save_path.to_string())),
+        );
+        node.format.insert(
+            "savedBytes".to_string(),
+            Some(serde_json::Value::from(binary.byte_count)),
+        );
+        node.format.insert(
+            "savedContentType".to_string(),
+            Some(serde_json::Value::String(binary.content_type)),
+        );
+    }
 
     match format {
-        OutputFormat::Text => format_node_text(&node, cmd.depth),
+        OutputFormat::Text => format_node_text(&node, depth),
         OutputFormat::Json => Ok(serde_json::to_string_pretty(&node)?),
     }
 }

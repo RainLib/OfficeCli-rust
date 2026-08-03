@@ -1,22 +1,22 @@
 # OfficeCLI C# → Rust 对齐基线
 
 本文档是 Rust 迁移的持久入口。后续对齐工作先读取本目录，不再重新扫描整个
-C# 仓库；只有 `source/OfficeCLI` 的上游提交发生变化时，才检查基线之后的增量。
+C# 仓库；只有 `source/OfficeCli` 的上游提交发生变化时，才检查基线之后的增量。
 
 ## 当前基线
 
 | 项目 | 值 |
 |---|---|
-| 记录日期 | 2026-07-20 |
-| C# 源码目录 | `source/OfficeCLI` |
+| 记录日期 | 2026-08-03 |
+| C# 源码目录 | `source/OfficeCli` |
 | C# 上游 | `iOfficeAI/OfficeCLI` 的 `origin/main` |
-| C# 基线提交 | `0b3557bbec29f073f5df6b92b4b8dcefa7e3c160` |
-| C# 版本 | `1.0.139` |
-| Rust 基线提交 | `06f0d89cd8d033b04e3fa6ca9ce3497bbbde55d6` |
+| C# 基线提交 | `b2f30dd9eaa7459b4d5b5ecc2387402f8e01d412` |
+| C# 版本 | `1.0.143` |
+| Rust 基线提交 | `4e8d5a3ab93199fea2ff522c8dbce9dcdd7d471f` |
 | Rust 版本 | `0.1.18` |
 | 同步前 C# 本地快照 | 分支 `local/pre-upstream-sync-20260720`，提交 `9f69b9b1` |
 
-`source/OfficeCLI/main` 已快进到 `origin/main`，工作区干净。同步前发现的 327 个
+`source/OfficeCli/main` 已快进到 `origin/main`，工作区干净。同步前发现的 327 个
 暂存文件没有丢失，已经保存在上述本地快照分支。
 
 ## 后续增量流程
@@ -24,17 +24,17 @@ C# 仓库；只有 `source/OfficeCLI` 的上游提交发生变化时，才检查
 1. 获取上游，但不要覆盖本地改动：
 
    ```bash
-   git -C source/OfficeCLI fetch --prune origin main
-   git -C source/OfficeCLI status --short --branch
+   git -C source/OfficeCli fetch --prune origin main
+   git -C source/OfficeCli status --short --branch
    ```
 
 2. 仅检查本基线之后的变化：
 
    ```bash
-   git -C source/OfficeCLI log --reverse --oneline \
-     0b3557bbec29f073f5df6b92b4b8dcefa7e3c160..origin/main
-   git -C source/OfficeCLI diff --stat \
-     0b3557bbec29f073f5df6b92b4b8dcefa7e3c160..origin/main
+   git -C source/OfficeCli log --reverse --oneline \
+     b2f30dd9eaa7459b4d5b5ecc2387402f8e01d412..origin/main
+   git -C source/OfficeCli diff --stat \
+     b2f30dd9eaa7459b4d5b5ecc2387402f8e01d412..origin/main
    ```
 
 3. 按提交和文件格式更新 `migration-ledger.tsv`。一个迁移批次只处理一个可独立
@@ -62,13 +62,13 @@ Rust 已有主要文档命令：
 `open`、`close`、`watch`、`unwatch`、`view`、`get`、`query`、`set`、`add`、
 `remove`、`move`、`swap`、`refresh`、`raw`、`raw-set`、`add-part`、
 `validate`、`save`、`batch`、`dump`、`import`、`create`、`merge`、
-`plugins`、`help`、`install`、`load_skill`、`skills` 和 `mcp`。
+`plugins`、`help`、`install`、`load_skill`、`skills`、`config` 和 `mcp`。
 
 仍需对齐的命令行为：
 
-- `--output-schema-crc` 缺失；
-- `config <key> [value]` 缺失；
-- C# 的 `mcp list`、`mcp <target>`、`mcp uninstall <target>` 生命周期管理缺失；
+- `config <key> [value]` 的 autoUpdate/log/log clear 配置面已迁移；后台更新和文件日志
+  仍待作为不影响文档操作的独立批次评估；
+- `mcp list`、`mcp <target>`、`mcp uninstall <target>` 已支持 LM Studio、Claude、Cursor、VS Code 的基础注册生命周期；Claude CLI 的并发配置协调和用户可读的客户端重启提示仍待对齐；
 - `skill`/`skills` 别名、skills 自动探测目标和引用文件安装语义不完整；
 - C# 支持 `watch <file> mark|unmark|marks|goto`，Rust 目前主要保留隐藏的顶层
   兼容命令；
@@ -79,14 +79,13 @@ Rust 额外提供 `extract-text`、`convert`、`info` 和原生 PDF handler。�
 
 ### Help schema
 
-C# 有 150 个 schema JSON，Rust 有 140 个。Rust 缺少：
+C# 有 150 个 schema JSON，Rust 已有同名 schema；其中仍有行为范围差异：
 
-- DOCX：`abstractNum`、`diagram`、`level`、`num`、`permStart`、`revision`、
-  `shape`、`tab`、`textbox`；
-- PPTX：`diagram`、`linebreak`。
+- DOCX：`diagram` 的 sequence、完整 Mermaid 路由与图片渲染；
+- PPTX：`diagram`。
 
-Rust 独有 `docx/trackedchange.json`；需要先确认它能否完整替代 C# 的
-`revision.json`，不能只按文件名直接覆盖。
+Rust 独有 `docx/trackedchange.json` 已保留为兼容 schema；新增的
+`docx/revision.json` 描述 C# 风格的 synthetic revision 路径和 action 命令。
 
 ### Handler 风险排序
 
@@ -99,9 +98,10 @@ P0 表示可能导致文件损坏、引用悬空或作用域错误：
 
 P1 表示主要功能缺口：
 
-- XLSX 动态数组、现代公式边界语义和 in-cell image/richValue；
-- DOCX 编号定义、修订/权限范围、diagram/shape/textbox 的结构化增删改；
-- PPTX diagram、line break、动画/过渡、现代评论及演示文稿级设置的行为覆盖；
+- XLSX 已支持现代函数的 OOXML 命名空间、LET/LAMBDA 参数及动态数组锚点，并支持 raster in-cell image/richValue 的写入、读取和查询；多单元格溢出结果持久化、求值函数族，以及复杂外部 richValue/metadata 链校验仍待对齐；
+- DOCX 编号定义、修订/权限范围、diagram 的 Mermaid/组合图形输出，以及
+  shape/textbox 的完整宿主范围和高级 DrawingML 属性；
+- PPTX 的旧式 `p:cm` 批注与现代 `p188` 线程批注均已支持 add/get/query/set/remove：现代批注会维护 presentation 作者表、每页评论部件、回复线程、关系和内容类型；讲者备注会创建可继承的母版占位符和反向关系，并克隆独立主题；若源文档无主题则生成 schema 完整的 Office 默认主题。diagram、line break、动画/过渡及演示文稿级设置仍需继续核验其高级行为；
 - 缺失 schema 与 handler 支持同步迁移；
 - `load_skill`、schema CRC 和 MCP 安装生命周期。
 
