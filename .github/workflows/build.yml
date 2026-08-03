@@ -1,19 +1,15 @@
 name: Build & Release
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
     tags:
       - 'v*'
-  pull_request:
-    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  # ── CI: lint + test (fast, runs on every push/PR) ────────────────────
+  # ── Release validation: lint + test on v* tags ──────────────────────
   ci:
     name: Lint & Test
     runs-on: ubuntu-latest
@@ -48,7 +44,6 @@ jobs:
   # ── Build: cross-platform release binaries ───────────────────────────
   build:
     needs: ci
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
         include:
