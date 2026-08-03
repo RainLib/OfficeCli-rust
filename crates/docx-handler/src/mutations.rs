@@ -40,6 +40,11 @@ const DOCX_NUMBERING_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
 const DOCX_NUMBERING_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
+const DOCX_FONT_TABLE_PART: &str = "word/fontTable.xml";
+const DOCX_FONT_TABLE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable";
+const DOCX_FONT_TABLE_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml";
 
 /// Create a numbering template or instance while maintaining the package parts
 /// Word requires.  The template emits all nine OOXML levels so it remains a
@@ -5982,6 +5987,36 @@ fn ensure_comments_part(package: &mut OxmlPackage) -> Result<String, HandlerErro
 /// replacement emitted by `dump /comments`.
 pub(crate) fn prepare_comments_raw_replace(package: &mut OxmlPackage) -> Result<(), HandlerError> {
     ensure_comments_part(package).map(|_| ())
+}
+
+/// Create the package graph required by a C# `raw-set /fontTable` replay.
+/// A normal blank DOCX deliberately has no font table, so the replacement must
+/// establish the OOXML part, main-document relationship and content-type
+/// override before its root can be addressed.
+pub(crate) fn prepare_font_table_raw_replace(
+    package: &mut OxmlPackage,
+) -> Result<(), HandlerError> {
+    if !package.has_part(DOCX_FONT_TABLE_PART) {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:fonts xmlns:w=\"{}\"></w:fonts>",
+            W_NS
+        );
+        package
+            .write_part_xml(DOCX_FONT_TABLE_PART, &xml)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    let rels = package
+        .read_part_xml(DOCX_DOCUMENT_RELS_PART)
+        .unwrap_or_default();
+    if !rels.contains(DOCX_FONT_TABLE_REL_TYPE) {
+        let relationship = format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"fontTable.xml\"/>",
+            next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART),
+            DOCX_FONT_TABLE_REL_TYPE
+        );
+        inject_docx_relationship(package, DOCX_DOCUMENT_RELS_PART, &relationship)?;
+    }
+    ensure_content_type_override(package, "/word/fontTable.xml", DOCX_FONT_TABLE_CONTENT_TYPE)
 }
 
 fn ensure_docx_comments_relationship(package: &mut OxmlPackage) -> Result<(), HandlerError> {

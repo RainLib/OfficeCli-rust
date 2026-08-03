@@ -3714,6 +3714,56 @@ fn test_dump_docx_theme_replays_into_fresh_document() {
 }
 
 #[test]
+fn test_dump_docx_font_table_replays_into_fresh_document() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_font_table_source.docx");
+    let target = tmp.path().join("dump_font_table_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    let fonts_xml = r#"<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:font w:name="Source Face"><w:altName w:val="Fallback Face"/></w:font></w:fonts>"#;
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "raw-set",
+            &source_path,
+            "/fontTable",
+            "--xpath",
+            "/w:fonts",
+            "--action",
+            "replace",
+            "--xml",
+            fonts_xml,
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/FONTTABLE"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"part\":\"/fontTable\""))
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &target_path, "/fontTable"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Source Face"))
+        .stdout(predicate::str::contains("Fallback Face"));
+}
+
+#[test]
 fn test_dump_docx_body_subtree_replays_into_fresh_document() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_body_source.docx");

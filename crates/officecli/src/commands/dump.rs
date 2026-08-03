@@ -60,23 +60,37 @@ pub fn handle_dump(
                 }
                 return Ok(output);
             }
-            let (part, xpath) = match logical_path {
-                "/" | "/document" => ("word/document.xml", "/w:document"),
-                "/styles" => ("word/styles.xml", "/w:styles"),
-                "/settings" => ("word/settings.xml", "/w:settings"),
-                "/numbering" => ("word/numbering.xml", "/w:numbering"),
-                "/comments" => ("/comments", "/w:comments"),
-                "/theme" => ("/theme", "/a:theme"),
-                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /body/p[N], /body/tbl[N], /theme, /styles, /settings, /numbering, and /comments; use --dom for other subtrees".to_string())),
-            };
-            let replay_part = if logical_path == "/" {
-                "/document"
-            } else {
-                logical_path
+            let normalized_path = logical_path.to_ascii_lowercase();
+            let (part, xpath, replay_part) = match normalized_path.as_str() {
+                "/" | "/document" => ("word/document.xml", "/w:document", "/document"),
+                "/styles" => ("word/styles.xml", "/w:styles", "/styles"),
+                "/settings" => ("word/settings.xml", "/w:settings", "/settings"),
+                "/numbering" => ("word/numbering.xml", "/w:numbering", "/numbering"),
+                "/comments" => ("/comments", "/w:comments", "/comments"),
+                "/theme" => ("/theme", "/a:theme", "/theme"),
+                "/fonttable" => ("/fontTable", "/w:fonts", "/fontTable"),
+                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /body/p[N], /body/tbl[N], /theme, /fontTable, /styles, /settings, /numbering, and /comments; use --dom for other subtrees".to_string())),
             };
             let handler = crate::open_handler(&cmd.file, false)?;
-            let xml = handler.raw(part, handler_common::RawOptions::default())?;
-            let xml = oxml::xml_util::strip_prolog(&xml).to_string();
+            let xml = match handler.raw(part, handler_common::RawOptions::default()) {
+                Ok(xml) => Some(xml),
+                Err(_) if normalized_path == "/fonttable" => None,
+                Err(error) => return Err(error),
+            };
+            if xml.is_none() {
+                let output = serde_json::to_string(&vec![
+                    serde_json::json!({"command":"meta","dumpVersion":2}),
+                ])
+                .map_err(HandlerError::JsonError)?;
+                if let Some(path) = cmd.out.filter(|path| path != "-") {
+                    std::fs::write(&path, format!("{}\n", output))
+                        .map_err(HandlerError::IoError)?;
+                    return Ok(path);
+                }
+                return Ok(output);
+            }
+            let xml =
+                oxml::xml_util::strip_prolog(xml.as_deref().expect("checked above")).to_string();
             let output = serde_json::to_string(&vec![
                 serde_json::json!({"command":"meta","dumpVersion":2}),
                 serde_json::json!({"command":"raw-set","part":replay_part,"xpath":xpath,"action":"replace","xml":xml}),

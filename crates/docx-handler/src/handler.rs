@@ -1038,6 +1038,17 @@ impl DocumentHandler for WordHandler {
                 .write_part_xml("word/commentsExtended.xml", replacement)
                 .map_err(|error| HandlerError::SaveError(error.to_string()));
         }
+        if part_path.eq_ignore_ascii_case("/fontTable") {
+            mutations::prepare_font_table_raw_replace(&mut package)?;
+            if action.eq_ignore_ascii_case("replace") {
+                let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {
+                    HandlerError::InvalidArgument("/fontTable replace requires XML".to_string())
+                })?;
+                return package
+                    .write_part_xml("word/fontTable.xml", replacement)
+                    .map_err(|error| HandlerError::SaveError(error.to_string()));
+            }
+        }
         let resolved = resolve_docx_raw_part_path(&package, part_path)?;
         crate::raw::apply_raw_set(&mut package, &resolved, xpath, action, xml)
     }
@@ -1243,6 +1254,7 @@ fn resolve_docx_raw_part_path(
         "numbering" => return Ok("word/numbering.xml".to_string()),
         "comments" => return Ok("word/comments.xml".to_string()),
         "commentsextended" => return Ok("word/commentsExtended.xml".to_string()),
+        "fonttable" => return Ok("word/fontTable.xml".to_string()),
         _ => {}
     }
     if alias == "theme" {
