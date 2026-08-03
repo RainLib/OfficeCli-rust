@@ -4946,6 +4946,29 @@ fn test_json_envelopes_wrap_writes_and_failures() {
 }
 
 #[test]
+fn test_set_json_reports_csharp_unsupported_property_warning() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("set_warning.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    let output = officecli()
+        .args(["--json", "set", &p, "/body/p[1]", "definitelyUnknown=value"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["success"], true);
+    assert_eq!(json["warnings"][0]["code"], "unsupported_property");
+    assert!(json["warnings"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("definitelyUnknown"));
+}
+
+#[test]
 fn test_validate_uses_csharp_judgment_exit_and_streams() {
     let tmp = temp_dir();
     let path = tmp.path().join("validate_judgment.docx");

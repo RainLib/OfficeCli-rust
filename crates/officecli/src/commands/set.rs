@@ -179,6 +179,19 @@ pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, Handl
                 serde_json::Value::String("OK".to_string()),
             );
             extensions.insert("unsupported".to_string(), serde_json::json!(unsupported));
+            let warnings = unsupported
+                .iter()
+                .filter(|property| !property.starts_with("replaced="))
+                .map(|property| {
+                    serde_json::json!({
+                        "message": format!("Unsupported property: {}", property),
+                        "code": "unsupported_property",
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !warnings.is_empty() {
+                extensions.insert("warnings".to_string(), serde_json::Value::Array(warnings));
+            }
             if let Some(map) = offset_map {
                 extensions.insert("offset_map".to_string(), map);
             }
