@@ -3053,28 +3053,23 @@ fn add_table(
         .map(|(i, _)| i)
         .collect();
 
-    let insert_idx = resolve_insert_index_simple(&position, content_items.len());
-
-    match insert_idx {
-        Some(idx) => {
-            let real_idx = if idx < content_items.len() {
-                content_items[idx]
-            } else {
-                dom.root.children[body_idx].children.len()
-            };
-            dom.root.children[body_idx].children.insert(real_idx, table);
+    let real_idx = match &position {
+        InsertPosition::AtIndex(idx) => content_items
+            .get(*idx)
+            .copied()
+            .unwrap_or_else(|| body_append_index(&dom.root.children[body_idx].children)),
+        InsertPosition::Append => body_append_index(&dom.root.children[body_idx].children),
+        InsertPosition::AfterElement(_) | InsertPosition::BeforeElement(_) => {
+            resolve_insert_index(dom, parent, &position)?
+                .unwrap_or_else(|| body_append_index(&dom.root.children[body_idx].children))
         }
-        None => {
-            dom.root.children[body_idx].children.push(table);
-        }
-    }
-
-    let mut tbl_idx = 0;
-    for child in &dom.root.children[body_idx].children {
-        if child.element_type == WordElementType::Table {
-            tbl_idx += 1;
-        }
-    }
+    };
+    let tbl_idx = dom.root.children[body_idx].children[..real_idx]
+        .iter()
+        .filter(|child| child.element_type == WordElementType::Table)
+        .count()
+        + 1;
+    dom.root.children[body_idx].children.insert(real_idx, table);
     Ok(format!("/body/tbl[{}]", tbl_idx))
 }
 

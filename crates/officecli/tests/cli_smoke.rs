@@ -562,6 +562,44 @@ fn test_add_accepts_csharp_position_flags() {
 }
 
 #[test]
+fn test_docx_table_before_anchor_inserts_at_requested_position() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_table_before_anchor.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body",
+            "--type",
+            "paragraph",
+            "--prop",
+            "text=anchor",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body",
+            "--type",
+            "table",
+            "--before",
+            "/body/p[2]",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created: /body/tbl[1]"));
+    officecli()
+        .args(["get", &p, "/body/tbl[1]"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_docx_tabstop_uses_flat_csharp_compatible_get_path() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_tabstop.docx");
