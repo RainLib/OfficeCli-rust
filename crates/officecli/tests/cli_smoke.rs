@@ -3614,6 +3614,43 @@ fn test_dump_docx_batch_replays_into_fresh_document() {
         .stdout(predicate::str::contains("Round trip"));
 }
 
+#[test]
+fn test_dump_xlsx_batch_replays_into_fresh_workbook() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_source.xlsx");
+    let target = tmp.path().join("dump_target.xlsx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["set", &source_path, "/Sheet1/A1", "value=Round trip"])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &target_path, "/Sheet1/A1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Round trip"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Raw — read a part by name
 // ═══════════════════════════════════════════════════════════════════════

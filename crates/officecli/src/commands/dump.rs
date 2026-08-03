@@ -40,6 +40,23 @@ pub fn handle_dump(
             }
             return Ok(output);
         }
+        if extension.eq_ignore_ascii_case("xlsx") && cmd.path.as_deref().unwrap_or("/") == "/" {
+            let handler = crate::open_handler(&cmd.file, false)?;
+            let root = handler.get("/", 0)?;
+            let mut items = vec![serde_json::json!({"command":"meta","dumpVersion":2})];
+            let workbook = handler.raw("/workbook", handler_common::RawOptions::default())?;
+            items.push(serde_json::json!({"command":"raw-set","part":"/workbook","xpath":"/workbook","action":"replace","xml":oxml::xml_util::strip_prolog(&workbook)}));
+            for sheet in root.children {
+                let xml = handler.raw(&sheet.path, handler_common::RawOptions::default())?;
+                items.push(serde_json::json!({"command":"raw-set","part":sheet.path,"xpath":"/worksheet","action":"replace","xml":oxml::xml_util::strip_prolog(&xml)}));
+            }
+            let output = serde_json::to_string(&items).map_err(HandlerError::JsonError)?;
+            if let Some(path) = cmd.out.filter(|path| path != "-") {
+                std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
+                return Ok(path);
+            }
+            return Ok(output);
+        }
         return Err(HandlerError::UnsupportedMode("replayable dump currently supports full .docx documents; use --dom for the Rust DOM export".to_string()));
     }
     let handler = crate::open_handler(&cmd.file, false)?;
