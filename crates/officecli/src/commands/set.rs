@@ -51,6 +51,14 @@ pub struct SetCommand {
     /// Use this after range edits to re-address elements whose node structure changed.
     #[arg(long)]
     pub emit_map: bool,
+
+    /// Watch server port used only with the `selected` pseudo-path.
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    /// Watch document id used only with the `selected` pseudo-path.
+    #[arg(long)]
+    pub id: Option<String>,
 }
 
 pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, HandlerError> {
@@ -97,7 +105,37 @@ pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, Handl
     } else {
         cmd.path.unwrap_or_default()
     };
-    let unsupported = handler.set(&path_str, &properties)?;
+    let selected_paths = if path_str.eq_ignore_ascii_case("selected") {
+        let id = cmd
+            .id
+            .clone()
+            .unwrap_or_else(|| crate::commands::default_id(&cmd.file));
+        let response = crate::commands::get_json(
+            crate::commands::resolve_port(cmd.port),
+            &format!("/{id}/selection"),
+        )?;
+        response
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("invalid watch selection response".to_string())
+            })?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        vec![path_str]
+    };
+    if selected_paths.is_empty() {
+        return Err(HandlerError::OperationFailed(
+            "no elements are currently selected".to_string(),
+        ));
+    }
+    let mut unsupported = Vec::new();
+    for path in selected_paths {
+        unsupported.extend(handler.set(&path, &properties)?);
+    }
     handler.save()?;
 
     let offset_map = if cmd.emit_map {
