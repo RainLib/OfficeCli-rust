@@ -1,7 +1,9 @@
 /// Mutation operations for xlsx documents: set cell values, formulas, remove, move, copy.
 use crate::dom_types::*;
+use crate::formula;
 use crate::helpers;
 use crate::navigation;
+use crate::rich_value_image;
 use handler_common::{
     self, extract_find_replace_props, replace_in_string, FindReplaceOptions, HandlerError,
     InsertPosition,
@@ -693,7 +695,15 @@ pub fn set_cell_properties(
                 )?;
             }
             "formula" => {
-                modified_xml = set_cell_formula(&modified_xml, &cell_ref_str, value, &p)?;
+                let qualified =
+                    formula::qualify_for_ooxml(value).map_err(HandlerError::InvalidArgument)?;
+                modified_xml = set_cell_formula(&modified_xml, &cell_ref_str, &qualified, &p)?;
+            }
+            "image" => {}
+            "alt" | "altText" | "alttext" | "description" | "image.alt" => {
+                if !properties.contains_key("image") {
+                    unsupported.push(format!("{key} (only valid alongside image=)"));
+                }
             }
             "style" => {
                 style_parts.push(value.clone());
@@ -763,6 +773,21 @@ pub fn set_cell_properties(
     if !style_parts.is_empty() {
         let combined = style_parts.join(";");
         modified_xml = set_cell_style(&modified_xml, &cell_ref_str, &combined, &p)?;
+    }
+
+    if let Some(source) = properties.get("image") {
+        modified_xml = if source.is_empty() || source.eq_ignore_ascii_case("none") {
+            remove_in_cell_image(&modified_xml, &cell_ref_str, &p)?
+        } else {
+            let alt = properties
+                .get("alt")
+                .or_else(|| properties.get("altText"))
+                .or_else(|| properties.get("alttext"))
+                .or_else(|| properties.get("description"))
+                .or_else(|| properties.get("image.alt"));
+            let vm = rich_value_image::add_image(package, source, alt.map(String::as_str))?;
+            set_in_cell_image(&modified_xml, &cell_ref_str, vm, &p)?
+        };
     }
 
     // Write back the modified XML
@@ -883,6 +908,54 @@ fn set_cell_formula(
     }
 }
 
+fn set_in_cell_image(
+    xml: &str,
+    cell_ref: &str,
+    value_metadata_index: usize,
+    p: &str,
+) -> Result<String, HandlerError> {
+    let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
+    let style = if let Some(start) = xml.find(&cell_pattern) {
+        let end = find_cell_element_end(xml, start, p)?;
+        extract_existing_style(&xml[start..end])
+    } else {
+        String::new()
+    };
+    let style = if style.is_empty() {
+        String::new()
+    } else {
+        format!(" {style}")
+    };
+    let replacement = format!(
+        "<{}c r=\"{}\"{} t=\"e\" vm=\"{}\"><{}v>#VALUE!</{}v></{}c>",
+        p, cell_ref, style, value_metadata_index, p, p, p
+    );
+    replace_or_insert_cell(xml, cell_ref, &replacement, p)
+}
+
+fn remove_in_cell_image(xml: &str, cell_ref: &str, p: &str) -> Result<String, HandlerError> {
+    let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
+    let Some(start) = xml.find(&cell_pattern) else {
+        return Ok(xml.to_string());
+    };
+    let end = find_cell_element_end(xml, start, p)?;
+    let existing = &xml[start..end];
+    if !existing.contains(" vm=") || !existing.contains(">#VALUE!<") {
+        return Ok(xml.to_string());
+    }
+    let style = extract_existing_style(existing);
+    let style = if style.is_empty() {
+        String::new()
+    } else {
+        format!(" {style}")
+    };
+    let replacement = format!("<{}c r=\"{}\"{}/>", p, cell_ref, style);
+    let mut result = xml[..start].to_string();
+    result.push_str(&replacement);
+    result.push_str(&xml[end..]);
+    Ok(result)
+}
+
 /// Set the style index of a cell.
 fn set_cell_style(
     xml: &str,
@@ -932,7 +1005,17 @@ fn build_cell_xml(
     let mut cell = format!("<{}c {}>", p, attrs);
 
     if let Some(f) = formula {
-        cell.push_str(&format!("<{}f>{}</{}f>", p, f, p));
+        let spill = if formula::is_dynamic_array_formula(f) {
+            format!(" t=\"array\" ref=\"{}\"", ref_str)
+        } else {
+            String::new()
+        };
+        cell.push_str(&format!(
+            "<{}f{spill}>{}</{}f>",
+            p,
+            escape_xml_formula(f),
+            p
+        ));
     }
 
     if !v_content.is_empty() {
@@ -941,6 +1024,13 @@ fn build_cell_xml(
 
     cell.push_str(&format!("</{}c>", p));
     cell
+}
+
+fn escape_xml_formula(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Find the end position of a <c> element in XML text.
@@ -1122,6 +1212,23 @@ fn insert_new_cell(
     p: &str,
 ) -> Result<String, HandlerError> {
     let new_cell = build_cell_xml(ref_str, t_attr, v_content, formula, style_attr, p);
+    replace_or_insert_cell(xml, ref_str, &new_cell, p)
+}
+
+fn replace_or_insert_cell(
+    xml: &str,
+    ref_str: &str,
+    new_cell: &str,
+    p: &str,
+) -> Result<String, HandlerError> {
+    let cell_pattern = format!("<{}c r=\"{}\"", p, ref_str);
+    if let Some(start) = xml.find(&cell_pattern) {
+        let end = find_cell_element_end(xml, start, p)?;
+        let mut result = xml[..start].to_string();
+        result.push_str(new_cell);
+        result.push_str(&xml[end..]);
+        return Ok(result);
+    }
 
     // Find <sheetData> opening tag
     let sd_start = xml.find(&format!("<{}sheetData", p)).ok_or_else(|| {
@@ -1153,7 +1260,7 @@ fn insert_new_cell(
 
         // Insert cell after the row opening tag
         let mut result = xml[..row_gt].to_string();
-        result.push_str(&new_cell);
+        result.push_str(new_cell);
         result.push_str(&xml[row_gt..]);
         Ok(result)
     } else {

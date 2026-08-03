@@ -1,6 +1,8 @@
 /// Add operations for xlsx documents: add cells, rows, sheets.
 use crate::dom_types::*;
+use crate::formula;
 use crate::helpers;
+use crate::rich_value_image;
 use handler_common::{HandlerError, InsertPosition};
 use oxml::OxmlPackage;
 use std::collections::HashMap;
@@ -59,7 +61,24 @@ fn add_cell(
     })?;
 
     let value = properties.get("value").cloned().unwrap_or_default();
-    let formula = properties.get("formula").cloned();
+    let formula = properties
+        .get("formula")
+        .map(|value| formula::qualify_for_ooxml(value))
+        .transpose()
+        .map_err(HandlerError::InvalidArgument)?;
+    let image_vm = properties
+        .get("image")
+        .filter(|source| !source.is_empty() && !source.eq_ignore_ascii_case("none"))
+        .map(|source| {
+            let alt = properties
+                .get("alt")
+                .or_else(|| properties.get("altText"))
+                .or_else(|| properties.get("alttext"))
+                .or_else(|| properties.get("description"))
+                .or_else(|| properties.get("image.alt"));
+            rich_value_image::add_image(package, source, alt.map(String::as_str))
+        })
+        .transpose()?;
 
     // Validate the cell reference
     let cr = CellRef::parse(ref_str).ok_or_else(|| {
@@ -106,12 +125,22 @@ fn add_cell(
     };
 
     // Build the cell XML
-    let cell_xml = if let Some(f) = &formula {
+    let cell_xml = if let Some(vm) = image_vm {
+        format!(
+            "<c r=\"{}\" t=\"e\" vm=\"{}\"><v>#VALUE!</v></c>",
+            ref_str, vm
+        )
+    } else if let Some(f) = &formula {
         let mut cell = format!("<c r=\"{}\"", ref_str);
         if !t_attr.is_empty() {
             cell.push_str(&format!(" {}", t_attr));
         }
-        cell.push_str(&format!("><f>{}</f>", f));
+        let spill = if formula::is_dynamic_array_formula(f) {
+            format!(" t=\"array\" ref=\"{}\"", ref_str)
+        } else {
+            String::new()
+        };
+        cell.push_str(&format!("><f{spill}>{}</f>", escape_xml(f)));
         if !v_content.is_empty() {
             cell.push_str(&format!("<v>{}</v>", v_content));
         }

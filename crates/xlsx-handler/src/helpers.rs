@@ -1,5 +1,6 @@
 /// Parsing helpers for xlsx OOXML parts.
 use crate::dom_types::*;
+use crate::formula;
 use oxml::OxmlPackage;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -152,6 +153,7 @@ pub fn parse_sheet(
     let mut cell_ref_str = String::new();
     let mut cell_value_type = CellValueType::Number;
     let mut cell_style_index: Option<usize> = None;
+    let mut cell_value_metadata_index: Option<usize> = None;
     let mut cell_value: Option<String> = None;
     let mut cell_formula: Option<String> = None;
     let mut in_v = false;
@@ -171,6 +173,7 @@ pub fn parse_sheet(
                     cell_formula = None;
                     cell_value_type = CellValueType::Number;
                     cell_style_index = None;
+                    cell_value_metadata_index = None;
 
                     for attr in e.attributes().filter_map(|a| a.ok()) {
                         let key = attr.key.as_ref();
@@ -183,6 +186,9 @@ pub fn parse_sheet(
                         } else if key == b"s" {
                             let s_val = String::from_utf8_lossy(attr.value.as_ref());
                             cell_style_index = s_val.parse::<usize>().ok();
+                        } else if key == b"vm" {
+                            let vm_val = String::from_utf8_lossy(attr.value.as_ref());
+                            cell_value_metadata_index = vm_val.parse::<usize>().ok();
                         }
                     }
                 }
@@ -205,7 +211,9 @@ pub fn parse_sheet(
                     cell_value = Some(e.unescape().unwrap_or_default().to_string());
                 }
                 if in_f {
-                    cell_formula = Some(e.unescape().unwrap_or_default().to_string());
+                    cell_formula = Some(formula::unqualify_for_readback(
+                        &e.unescape().unwrap_or_default(),
+                    ));
                 }
                 if in_is_t {
                     // Inline-string cells store text in <is><t>…</t></is>;
@@ -251,6 +259,7 @@ pub fn parse_sheet(
                                 formula: cell_formula.clone(),
                                 display_value,
                                 style_index: cell_style_index,
+                                value_metadata_index: cell_value_metadata_index,
                             },
                         );
                     }
@@ -263,6 +272,7 @@ pub fn parse_sheet(
                     cell_ref_str.clear();
                     cell_value_type = CellValueType::Number;
                     cell_style_index = None;
+                    cell_value_metadata_index = None;
 
                     for attr in e.attributes().filter_map(|a| a.ok()) {
                         let key = attr.key.as_ref();
@@ -275,6 +285,9 @@ pub fn parse_sheet(
                         } else if key == b"s" {
                             let s_val = String::from_utf8_lossy(attr.value.as_ref());
                             cell_style_index = s_val.parse::<usize>().ok();
+                        } else if key == b"vm" {
+                            let vm_val = String::from_utf8_lossy(attr.value.as_ref());
+                            cell_value_metadata_index = vm_val.parse::<usize>().ok();
                         }
                     }
 
@@ -298,6 +311,7 @@ pub fn parse_sheet(
                                 formula: None,
                                 display_value: String::new(),
                                 style_index: cell_style_index,
+                                value_metadata_index: cell_value_metadata_index,
                             },
                         );
                     }

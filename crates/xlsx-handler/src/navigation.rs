@@ -8,6 +8,7 @@
 ///   /SheetName/A1:style -> cell style property
 use crate::dom_types::*;
 use crate::helpers;
+use crate::rich_value_image;
 use handler_common::DocumentNode;
 use handler_common::HandlerError;
 use oxml::OxmlPackage;
@@ -39,7 +40,18 @@ pub fn parse_path(path: &str) -> Result<PathComponents, HandlerError> {
         let idx = path.find(':').unwrap();
         let prop = &path[idx + 1..];
         // Validate property names
-        if !["value", "formula", "style", "type", "ref"].contains(&prop) {
+        if ![
+            "value",
+            "formula",
+            "style",
+            "type",
+            "ref",
+            "alt",
+            "image.contentType",
+            "image.fileSize",
+        ]
+        .contains(&prop)
+        {
             return Err(HandlerError::InvalidPath(format!(
                 "unknown property '{}': path '{}'",
                 prop, path
@@ -222,6 +234,24 @@ pub fn get_node_at_path(
                 cell_node =
                     cell_node.with_format("styleIndex", serde_json::Value::Number(si.into()));
             }
+            if let Some(vm) = cell.value_metadata_index {
+                if let Some(image) = rich_value_image::read_image_info(package, vm) {
+                    cell_node = cell_node
+                        .with_text("[image]")
+                        .with_format("type", serde_json::Value::String("Image".to_string()))
+                        .with_format(
+                            "image.contentType",
+                            serde_json::Value::String(image.content_type),
+                        )
+                        .with_format(
+                            "image.fileSize",
+                            serde_json::Value::Number(image.byte_size.into()),
+                        );
+                    if let Some(alt) = image.alt {
+                        cell_node = cell_node.with_format("alt", serde_json::Value::String(alt));
+                    }
+                }
+            }
 
             Ok(cell_node)
         }
@@ -241,13 +271,24 @@ pub fn get_node_at_path(
                 ))
             })?;
 
-            let path_str = format!("/{}{}:{}", ws.name, cell.ref_str, prop);
+            let path_str = format!("/{}/{}:{}", ws.name, cell.ref_str, prop);
+            let image = cell
+                .value_metadata_index
+                .and_then(|vm| rich_value_image::read_image_info(package, vm));
             let value = match prop.as_str() {
                 "value" => cell.display_value.clone(),
                 "formula" => cell.formula.clone().unwrap_or_default(),
                 "style" => cell.style_index.map(|s| s.to_string()).unwrap_or_default(),
-                "type" => cell_type_label(&cell.value_type).to_string(),
+                "type" => image
+                    .as_ref()
+                    .map(|_| "Image".to_string())
+                    .unwrap_or_else(|| cell_type_label(&cell.value_type).to_string()),
                 "ref" => cell.ref_str.clone(),
+                "alt" => image.and_then(|image| image.alt).unwrap_or_default(),
+                "image.contentType" => image.map(|image| image.content_type).unwrap_or_default(),
+                "image.fileSize" => image
+                    .map(|image| image.byte_size.to_string())
+                    .unwrap_or_default(),
                 _ => return Err(HandlerError::UnsupportedProperty(prop)),
             };
 

@@ -1,6 +1,7 @@
 /// Query operations for xlsx documents.
 use crate::dom_types::*;
 use crate::helpers;
+use crate::rich_value_image;
 use handler_common::DocumentNode;
 use handler_common::HandlerError;
 use oxml::OxmlPackage;
@@ -44,14 +45,14 @@ pub fn query_cells(
             .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
 
         for cell in ws.cells.values() {
-            results.push(make_cell_node(ws, cell));
+            results.push(make_cell_node(package, ws, cell));
         }
     } else if selector == "formula" {
         // All formula cells
         for ws in &model.sheets {
             for cell in ws.cells.values() {
                 if cell.formula.is_some() {
-                    results.push(make_cell_node(ws, cell));
+                    results.push(make_cell_node(package, ws, cell));
                 }
             }
         }
@@ -75,6 +76,20 @@ pub fn query_cells(
         }
     } else if let Some(type_name) = selector.strip_prefix("type=") {
         // Type selector
+        if type_name.eq_ignore_ascii_case("image") {
+            for ws in &model.sheets {
+                for cell in ws.cells.values() {
+                    if cell
+                        .value_metadata_index
+                        .and_then(|vm| rich_value_image::read_image_info(package, vm))
+                        .is_some()
+                    {
+                        results.push(make_cell_node(package, ws, cell));
+                    }
+                }
+            }
+            return Ok(results);
+        }
         let target_type = match type_name {
             "number" => CellValueType::Number,
             "sharedString" => CellValueType::SharedString,
@@ -92,7 +107,7 @@ pub fn query_cells(
         for ws in &model.sheets {
             for cell in ws.cells.values() {
                 if cell.value_type == target_type {
-                    results.push(make_cell_node(ws, cell));
+                    results.push(make_cell_node(package, ws, cell));
                 }
             }
         }
@@ -138,7 +153,7 @@ pub fn query_cells(
         for row in start_ref.row..=end_ref.row {
             for col in start_ref.col..=end_ref.col {
                 if let Some(cell) = ws.cells.get(&(row, col)) {
-                    results.push(make_cell_node(ws, cell));
+                    results.push(make_cell_node(package, ws, cell));
                 }
             }
         }
@@ -758,12 +773,32 @@ fn make_pivot_node(pt: &PivotTableDef) -> DocumentNode {
     node
 }
 
-fn make_cell_node(ws: &Worksheet, cell: &Cell) -> DocumentNode {
-    let path = format!("/{}{}", ws.name, cell.ref_str);
+fn make_cell_node(package: &OxmlPackage, ws: &Worksheet, cell: &Cell) -> DocumentNode {
+    let path = format!("/{}/{}", ws.name, cell.ref_str);
     let mut node = DocumentNode::new(&path, "cell").with_text(cell.display_value.clone());
 
     if let Some(f) = &cell.formula {
         node = node.with_preview(f.clone());
+    }
+
+    if let Some(image) = cell
+        .value_metadata_index
+        .and_then(|vm| rich_value_image::read_image_info(package, vm))
+    {
+        node = node
+            .with_text("[image]")
+            .with_format("type", serde_json::Value::String("Image".to_string()))
+            .with_format(
+                "image.contentType",
+                serde_json::Value::String(image.content_type),
+            )
+            .with_format(
+                "image.fileSize",
+                serde_json::Value::Number(image.byte_size.into()),
+            );
+        if let Some(alt) = image.alt {
+            node = node.with_format("alt", serde_json::Value::String(alt));
+        }
     }
 
     node
@@ -787,6 +822,7 @@ mod tests {
             formula: None,
             display_value: value.to_string(),
             style_index: None,
+            value_metadata_index: None,
         }
     }
 

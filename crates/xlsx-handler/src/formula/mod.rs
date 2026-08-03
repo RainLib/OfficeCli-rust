@@ -4,11 +4,13 @@
 //! lookup, date/time, statistical, conditional, financial, and trig functions.
 
 mod functions;
+mod modern;
 mod parser;
 mod resolver;
 pub mod tokenizer;
 pub mod types;
 
+pub use modern::{is_dynamic_array_formula, qualify_for_ooxml, unqualify_for_readback};
 pub use parser::CellResolver;
 pub use resolver::WorkbookResolver;
 pub use types::{format_number, FormulaResult};

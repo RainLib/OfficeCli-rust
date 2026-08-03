@@ -32,6 +32,34 @@
       "readback": "formula text without leading =",
       "enforcement": "report"
     },
+    "image": {
+      "type": "string",
+      "description": "Excel 365 in-cell image (Place in Cell / richValue). This is the cell value, not a floating drawing. Accepts a local raster image path (png, jpg, gif, bmp, tiff, webp); SVG is not supported. Use image=none on Set to remove the cell pointer while retaining package history.",
+      "add": true, "set": true, "get": false,
+      "examples": ["--prop image=photo.png --prop alt=\"Product photo\"", "--prop image=none"],
+      "enforcement": "strict"
+    },
+    "alt": {
+      "type": "string",
+      "description": "Alternative text for image= richValue content. Aliases: altText, description, image.alt.",
+      "aliases": ["altText", "alttext", "description", "image.alt"],
+      "add": true, "set": true, "get": true,
+      "enforcement": "report"
+    },
+    "image.contentType": {
+      "type": "string",
+      "description": "Read-only MIME type of an in-cell richValue image media part.",
+      "add": false, "set": false, "get": true,
+      "readback": "MIME type string",
+      "enforcement": "report"
+    },
+    "image.fileSize": {
+      "type": "int",
+      "description": "Read-only byte size of an in-cell richValue image media part.",
+      "add": false, "set": false, "get": true,
+      "readback": "size in bytes",
+      "enforcement": "report"
+    },
     "numberformat": {
       "type": "string",
       "description": "Excel format code — covers number, date, percentage, currency, and text (@). \"@\" forces String storage on subsequent values.",

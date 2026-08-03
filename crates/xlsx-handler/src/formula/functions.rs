@@ -12,6 +12,13 @@ pub fn eval_function(
     args: &[FormulaResult],
     resolver: &dyn CellResolver,
 ) -> Option<FormulaResult> {
+    // Formula XML stores post-2016 functions as `_xlfn.NAME` (and FILTER as
+    // `_xlfn._xlws.FILTER`). The tokenizer replaces dots with underscores,
+    // so normalize those wire names before dispatching the user-facing name.
+    let name = name
+        .strip_prefix("_XLFN__XLWS_")
+        .or_else(|| name.strip_prefix("_XLFN_"))
+        .unwrap_or(name);
     // Helper closures
     let nums = || flatten_numbers(args);
     let num = |i: usize| args.get(i).map(|a| a.as_number()).unwrap_or(0.0);
@@ -198,6 +205,33 @@ pub fn eval_function(
                 Some(FormulaResult::Error("#N/A".to_string()))
             }
         }
+
+        // ===== Modern dynamic arrays (numeric subset) =====
+        // FormulaResult currently represents an array as a flattened numeric
+        // vector. This gives cache/evaluator parity for scalar consumers and
+        // establishes the correct values for the spill anchor; writing the
+        // remaining spill cells is deliberately handled by the worksheet layer.
+        "SEQUENCE" => Some(eval_sequence(args)),
+        "SORT" => Some(eval_sort(args)),
+        "SORTBY" => Some(eval_sortby(args)),
+        "UNIQUE" => Some(eval_unique(args)),
+        "FILTER" => Some(eval_filter(args)),
+        "XLOOKUP" => Some(eval_xlookup(args)),
+        "XMATCH" => Some(eval_xmatch(args)),
+        "TAKE" => Some(eval_take(args)),
+        "DROP" => Some(eval_drop(args)),
+        // FormulaResult arrays are presently flattened. TOCOL/TOROW therefore
+        // share the same value result, but still need dispatch for consumers of
+        // the spill anchor rather than falling through as unevaluated formulas.
+        "TOCOL" | "TOROW" => Some(FormulaResult::Array(array_values(args.first()))),
+        // Until the worksheet layer persists two-dimensional spill geometry,
+        // horizontal and vertical stacks are value-equivalent flattened arrays.
+        "HSTACK" | "VSTACK" => Some(FormulaResult::Array(
+            args.iter()
+                .flat_map(|arg| array_values(Some(arg)))
+                .collect(),
+        )),
+        "RANDARRAY" => Some(eval_randarray(args)),
         "CHOOSE" => {
             let idx = num(0) as usize;
             if idx >= 1 && idx < args.len() {
@@ -612,6 +646,184 @@ fn flatten_numbers(args: &[FormulaResult]) -> Vec<f64> {
     result
 }
 
+fn array_values(value: Option<&FormulaResult>) -> Vec<f64> {
+    match value {
+        Some(FormulaResult::Array(values)) => values.clone(),
+        Some(value) if !value.is_error() => vec![value.as_number()],
+        _ => Vec::new(),
+    }
+}
+
+fn eval_sequence(args: &[FormulaResult]) -> FormulaResult {
+    let rows = args.first().map(FormulaResult::as_number).unwrap_or(1.0) as isize;
+    let columns = args.get(1).map(FormulaResult::as_number).unwrap_or(1.0) as isize;
+    let start = args.get(2).map(FormulaResult::as_number).unwrap_or(1.0);
+    let step = args.get(3).map(FormulaResult::as_number).unwrap_or(1.0);
+    if rows < 1 || columns < 1 {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let count = match (rows as usize).checked_mul(columns as usize) {
+        Some(count) if count <= 1_000_000 => count,
+        _ => return FormulaResult::Error("#NUM!".to_string()),
+    };
+    FormulaResult::Array(
+        (0..count)
+            .map(|index| start + index as f64 * step)
+            .collect(),
+    )
+}
+
+fn eval_sort(args: &[FormulaResult]) -> FormulaResult {
+    let mut values = array_values(args.first());
+    let descending = args.get(2).is_some_and(|value| value.as_number() < 0.0);
+    values.sort_by(|left, right| left.total_cmp(right));
+    if descending {
+        values.reverse();
+    }
+    FormulaResult::Array(values)
+}
+
+fn eval_sortby(args: &[FormulaResult]) -> FormulaResult {
+    if args.len() < 2 {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let values = array_values(args.first());
+    let keys = array_values(args.get(1));
+    if values.len() != keys.len() {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let descending = args.get(2).is_some_and(|value| value.as_number() < 0.0);
+    let mut pairs: Vec<_> = values.into_iter().zip(keys).collect();
+    pairs.sort_by(|left, right| left.1.total_cmp(&right.1));
+    if descending {
+        pairs.reverse();
+    }
+    FormulaResult::Array(pairs.into_iter().map(|(value, _)| value).collect())
+}
+
+fn eval_unique(args: &[FormulaResult]) -> FormulaResult {
+    let source = array_values(args.first());
+    let exactly_once = args.get(2).is_some_and(|value| value.as_number() != 0.0);
+    let mut result = Vec::new();
+    for value in &source {
+        let occurrences = source.iter().filter(|other| **other == *value).count();
+        if (!exactly_once || occurrences == 1) && !result.contains(value) {
+            result.push(*value);
+        }
+    }
+    FormulaResult::Array(result)
+}
+
+fn eval_filter(args: &[FormulaResult]) -> FormulaResult {
+    if args.len() < 2 {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let source = array_values(args.first());
+    let include = array_values(args.get(1));
+    if source.len() != include.len() {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let result: Vec<f64> = source
+        .into_iter()
+        .zip(include)
+        .filter_map(|(value, keep)| (keep != 0.0).then_some(value))
+        .collect();
+    if result.is_empty() {
+        args.get(2)
+            .cloned()
+            .unwrap_or_else(|| FormulaResult::Error("#CALC!".to_string()))
+    } else {
+        FormulaResult::Array(result)
+    }
+}
+
+fn eval_xlookup(args: &[FormulaResult]) -> FormulaResult {
+    if args.len() < 3 {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let lookup = args[0].as_number();
+    let lookup_values = array_values(args.get(1));
+    let return_values = array_values(args.get(2));
+    if lookup_values.len() != return_values.len() {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    lookup_values
+        .iter()
+        .position(|value| *value == lookup)
+        .and_then(|index| return_values.get(index).copied())
+        .map(FormulaResult::Number)
+        .or_else(|| args.get(3).cloned())
+        .unwrap_or_else(|| FormulaResult::Error("#N/A".to_string()))
+}
+
+fn eval_xmatch(args: &[FormulaResult]) -> FormulaResult {
+    if args.len() < 2 {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let lookup = args[0].as_number();
+    array_values(args.get(1))
+        .iter()
+        .position(|value| *value == lookup)
+        .map(|index| FormulaResult::Number((index + 1) as f64))
+        .unwrap_or_else(|| FormulaResult::Error("#N/A".to_string()))
+}
+
+fn eval_take(args: &[FormulaResult]) -> FormulaResult {
+    let values = array_values(args.first());
+    let rows = args.get(1).map(FormulaResult::as_number).unwrap_or(0.0) as isize;
+    if rows == 0 {
+        return FormulaResult::Error("#CALC!".to_string());
+    }
+    let count = rows.unsigned_abs().min(values.len());
+    if rows > 0 {
+        FormulaResult::Array(values.into_iter().take(count).collect())
+    } else {
+        let start = values.len() - count;
+        FormulaResult::Array(values.into_iter().skip(start).collect())
+    }
+}
+
+fn eval_drop(args: &[FormulaResult]) -> FormulaResult {
+    let values = array_values(args.first());
+    let rows = args.get(1).map(FormulaResult::as_number).unwrap_or(0.0) as isize;
+    if rows.unsigned_abs() >= values.len() {
+        return FormulaResult::Error("#CALC!".to_string());
+    }
+    if rows >= 0 {
+        FormulaResult::Array(values.into_iter().skip(rows as usize).collect())
+    } else {
+        let count = values.len() - rows.unsigned_abs();
+        FormulaResult::Array(values.into_iter().take(count).collect())
+    }
+}
+
+fn eval_randarray(args: &[FormulaResult]) -> FormulaResult {
+    let rows = args.first().map(FormulaResult::as_number).unwrap_or(1.0) as isize;
+    let columns = args.get(1).map(FormulaResult::as_number).unwrap_or(1.0) as isize;
+    let min = args.get(2).map(FormulaResult::as_number).unwrap_or(0.0);
+    let max = args.get(3).map(FormulaResult::as_number).unwrap_or(1.0);
+    let whole = args.get(4).is_some_and(|value| value.as_number() != 0.0);
+    if rows < 1 || columns < 1 || min > max {
+        return FormulaResult::Error("#VALUE!".to_string());
+    }
+    let count = match (rows as usize).checked_mul(columns as usize) {
+        Some(count) if count <= 1_000_000 => count,
+        _ => return FormulaResult::Error("#NUM!".to_string()),
+    };
+    FormulaResult::Array(
+        (0..count)
+            .map(|_| {
+                let value = min + rand_f64() * (max - min + if whole { 1.0 } else { 0.0 });
+                if whole {
+                    value.floor()
+                } else {
+                    value
+                }
+            })
+            .collect(),
+    )
+}
+
 fn eval_stdev(nums: &[f64], sample: bool) -> Option<FormulaResult> {
     let min_len = if sample { 2 } else { 1 };
     if nums.len() < min_len {
@@ -843,5 +1055,146 @@ trait Pipe<T> {
 impl<T> Pipe<T> for T {
     fn pipe<U, F: FnOnce(T) -> U>(self, f: F) -> U {
         f(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EmptyResolver;
+
+    impl CellResolver for EmptyResolver {
+        fn resolve_cell(&self, _cell_ref: &str) -> FormulaResult {
+            FormulaResult::Blank
+        }
+
+        fn resolve_sheet_cell(&self, _sheet_cell_ref: &str) -> FormulaResult {
+            FormulaResult::Blank
+        }
+
+        fn expand_range(&self, _range_expr: &str) -> Vec<(String, FormulaResult)> {
+            Vec::new()
+        }
+    }
+
+    fn numbers(result: Option<FormulaResult>) -> Vec<f64> {
+        match result {
+            Some(FormulaResult::Array(values)) => values,
+            other => panic!("expected numeric array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modern_dynamic_functions_accept_ooxml_function_names() {
+        let resolver = EmptyResolver;
+        assert!(matches!(
+            super::super::evaluate_with_resolver("_xlfn.SEQUENCE(4)", &resolver),
+            FormulaResult::Number(value) if value == 1.0
+        ));
+        assert_eq!(
+            numbers(eval_function(
+                "_XLFN_SEQUENCE",
+                &[FormulaResult::Number(4.0), FormulaResult::Number(1.0)],
+                &resolver,
+            )),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(
+            numbers(eval_function(
+                "_XLFN__XLWS_FILTER",
+                &[
+                    FormulaResult::Array(vec![10.0, 20.0, 30.0]),
+                    FormulaResult::Array(vec![1.0, 0.0, 1.0]),
+                ],
+                &resolver,
+            )),
+            vec![10.0, 30.0]
+        );
+    }
+
+    #[test]
+    fn modern_lookup_sort_unique_take_and_drop_evaluate_numeric_arrays() {
+        let resolver = EmptyResolver;
+        assert_eq!(
+            numbers(eval_function(
+                "SORT",
+                &[FormulaResult::Array(vec![3.0, 1.0, 2.0])],
+                &resolver,
+            )),
+            vec![1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            numbers(eval_function(
+                "UNIQUE",
+                &[FormulaResult::Array(vec![2.0, 1.0, 2.0, 3.0])],
+                &resolver,
+            )),
+            vec![2.0, 1.0, 3.0]
+        );
+        assert!(matches!(
+            eval_function(
+                "XLOOKUP",
+                &[
+                    FormulaResult::Number(2.0),
+                    FormulaResult::Array(vec![1.0, 2.0]),
+                    FormulaResult::Array(vec![10.0, 20.0]),
+                ],
+                &resolver,
+            ),
+            Some(FormulaResult::Number(20.0))
+        ));
+        assert_eq!(
+            numbers(eval_function(
+                "TAKE",
+                &[
+                    FormulaResult::Array(vec![1.0, 2.0, 3.0]),
+                    FormulaResult::Number(-2.0)
+                ],
+                &resolver,
+            )),
+            vec![2.0, 3.0]
+        );
+        assert_eq!(
+            numbers(eval_function(
+                "DROP",
+                &[
+                    FormulaResult::Array(vec![1.0, 2.0, 3.0]),
+                    FormulaResult::Number(1.0)
+                ],
+                &resolver,
+            )),
+            vec![2.0, 3.0]
+        );
+        assert_eq!(
+            numbers(eval_function(
+                "SORTBY",
+                &[
+                    FormulaResult::Array(vec![10.0, 30.0, 20.0]),
+                    FormulaResult::Array(vec![1.0, 3.0, 2.0]),
+                ],
+                &resolver,
+            )),
+            vec![10.0, 20.0, 30.0]
+        );
+        assert_eq!(
+            numbers(eval_function(
+                "_XLFN_HSTACK",
+                &[
+                    FormulaResult::Array(vec![1.0, 2.0]),
+                    FormulaResult::Array(vec![3.0]),
+                ],
+                &resolver,
+            )),
+            vec![1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            numbers(eval_function(
+                "_XLFN_TOCOL",
+                &[FormulaResult::Array(vec![2.0, 4.0])],
+                &resolver,
+            )),
+            vec![2.0, 4.0]
+        );
     }
 }

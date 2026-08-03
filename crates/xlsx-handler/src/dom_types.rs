@@ -110,6 +110,8 @@ pub struct Cell {
     pub display_value: String,
     /// Style index (x:c/@s)
     pub style_index: Option<usize>,
+    /// Value-metadata index (x:c/@vm), used by Excel rich values.
+    pub value_metadata_index: Option<usize>,
 }
 
 /// A parsed worksheet.

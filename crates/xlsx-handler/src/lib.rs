@@ -10,6 +10,7 @@ pub mod mutations;
 pub mod navigation;
 pub mod query;
 pub mod raw;
+pub mod rich_value_image;
 pub mod text_offset;
 pub mod view;
 
