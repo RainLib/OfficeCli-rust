@@ -998,7 +998,8 @@ impl DocumentHandler for WordHandler {
 
     fn raw(&self, part_path: &str, opts: RawOptions) -> Result<String, HandlerError> {
         let package = self.package.borrow();
-        read_raw(&package, normalize_docx_part_path(part_path), opts)
+        let resolved = resolve_docx_raw_part_path(&package, part_path)?;
+        read_raw(&package, &resolved, opts)
     }
 
     fn raw_set(
@@ -1028,13 +1029,8 @@ impl DocumentHandler for WordHandler {
                 .write_part_xml("word/commentsExtended.xml", replacement)
                 .map_err(|error| HandlerError::SaveError(error.to_string()));
         }
-        crate::raw::apply_raw_set(
-            &mut package,
-            normalize_docx_part_path(part_path),
-            xpath,
-            action,
-            xml,
-        )
+        let resolved = resolve_docx_raw_part_path(&package, part_path)?;
+        crate::raw::apply_raw_set(&mut package, &resolved, xpath, action, xml)
     }
 
     fn add_part(
@@ -1226,11 +1222,101 @@ impl DocumentHandler for WordHandler {
 /// C# batch resources address a few Word package parts by logical names.
 /// Keep the physical part path accepted too, while accepting the logical names
 /// makes a commentsExtended round-trip portable across both implementations.
-fn normalize_docx_part_path(part_path: &str) -> &str {
-    match part_path {
-        "/comments" => "word/comments.xml",
-        "/commentsExtended" => "word/commentsExtended.xml",
-        _ => part_path,
+fn resolve_docx_raw_part_path(
+    package: &OxmlPackage,
+    part_path: &str,
+) -> Result<String, HandlerError> {
+    let alias = part_path.trim_matches('/');
+    match alias.to_ascii_lowercase().as_str() {
+        "document" => return Ok("word/document.xml".to_string()),
+        "styles" => return Ok("word/styles.xml".to_string()),
+        "settings" => return Ok("word/settings.xml".to_string()),
+        "numbering" => return Ok("word/numbering.xml".to_string()),
+        "comments" => return Ok("word/comments.xml".to_string()),
+        "commentsextended" => return Ok("word/commentsExtended.xml".to_string()),
+        _ => {}
+    }
+    if alias == "theme" {
+        return indexed_document_relationship(package, THEME_REL, 1, "theme");
+    }
+    for (prefix, rel_type) in [
+        ("header", HEADER_REL),
+        ("footer", FOOTER_REL),
+        ("chart", CHART_REL),
+    ] {
+        if let Some(index) = semantic_part_index(alias, prefix) {
+            return indexed_document_relationship(package, rel_type, index, prefix);
+        }
+    }
+    Ok(alias.to_string())
+}
+
+const THEME_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+const HEADER_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+const FOOTER_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+const CHART_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+
+fn semantic_part_index(path: &str, prefix: &str) -> Option<usize> {
+    path.strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('['))
+        .and_then(|suffix| suffix.strip_suffix(']'))
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .filter(|index| *index > 0)
+}
+
+fn indexed_document_relationship(
+    package: &OxmlPackage,
+    relationship_type: &str,
+    index: usize,
+    label: &str,
+) -> Result<String, HandlerError> {
+    let rels = package
+        .part_rels("word/document.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut matches = rels.by_type(relationship_type);
+    matches.sort_by(|left, right| left.id.cmp(&right.id));
+    matches
+        .into_iter()
+        .nth(index - 1)
+        .map(|rel| package.resolve_rel_target("word/document.xml", &rel.target))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("{}[{}]", label, index)))
+}
+
+#[cfg(test)]
+mod raw_part_path_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_csharp_semantic_raw_relationship_paths() {
+        let mut package = OxmlPackage::create("semantic-parts.docx");
+        package.add_part("word/document.xml", b"<w:document/>");
+        package.add_part(
+            "word/_rels/document.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer4.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart9.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme3.xml"/></Relationships>"#,
+        );
+        package.add_part("word/header2.xml", b"<w:hdr/>");
+        package.add_part("word/footer4.xml", b"<w:ftr/>");
+        package.add_part("word/charts/chart9.xml", b"<c:chartSpace/>");
+        package.add_part("word/theme/theme3.xml", b"<a:theme/>");
+
+        assert_eq!(
+            resolve_docx_raw_part_path(&package, "/theme").unwrap(),
+            "word/theme/theme3.xml"
+        );
+        assert_eq!(
+            resolve_docx_raw_part_path(&package, "/header[1]").unwrap(),
+            "word/header2.xml"
+        );
+        assert_eq!(
+            resolve_docx_raw_part_path(&package, "/footer[1]").unwrap(),
+            "word/footer4.xml"
+        );
+        assert_eq!(
+            resolve_docx_raw_part_path(&package, "/chart[1]").unwrap(),
+            "word/charts/chart9.xml"
+        );
     }
 }
 
