@@ -5540,6 +5540,21 @@ fn test_batch_docx() {
 }
 
 #[test]
+fn test_batch_accepts_csharp_command_envelope() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("batch_envelope.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    let envelope = r#"{"commands":[{"command":"set","path":"/body/p[1]","props":{"text":"Envelope replay"}}]}"#;
+    officecli().args(["batch", &p, envelope]).assert().success();
+    officecli()
+        .args(["view", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Envelope replay"));
+}
+
+#[test]
 fn test_batch_accepts_csharp_dump_meta_and_raw_set_items() {
     let tmp = temp_dir();
     let path = tmp.path().join("batch_raw_set.docx");
