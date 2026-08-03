@@ -3765,6 +3765,19 @@ fn test_pptx_theme_and_default_font_lifecycle() {
         .assert()
         .success();
     officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/slide[1]",
+            "--type-name",
+            "shape",
+            "--properties",
+            "text=Themed preview",
+        ])
+        .assert()
+        .success();
+    officecli()
         .args(["--json", "get", &p, "/theme"])
         .assert()
         .success()
@@ -3790,6 +3803,11 @@ fn test_pptx_theme_and_default_font_lifecycle() {
             r#"<a:accent1><a:srgbClr val="112233""#,
         ))
         .stdout(predicate::str::contains(r#"typeface="Tahoma""#));
+    officecli()
+        .args(["view", &p, "-m", "html"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("font-family:'Tahoma',sans-serif"));
     officecli().args(["validate", &p]).assert().success();
 }
 

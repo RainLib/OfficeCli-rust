@@ -1900,22 +1900,26 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
     theme_colors.insert("accent6".to_string(), "F79646".to_string());
     theme_colors.insert("hlink".to_string(), "0000FF".to_string());
 
-    if let Ok(theme_xml) = package.read_part_xml("ppt/theme/theme1.xml") {
-        if let Ok(theme_doc) = roxmltree::Document::parse(&theme_xml) {
-            if let Some(scheme) = theme_doc
-                .descendants()
-                .find(|n| n.has_tag_name("clrScheme"))
-            {
-                for child in scheme.children() {
-                    let name = child.tag_name().name();
-                    if let Some(srgb) = child.descendants().find(|n| n.has_tag_name("srgbClr")) {
-                        if let Some(val) = srgb.attribute("val") {
-                            theme_colors.insert(name.to_string(), val.to_string());
-                        }
-                    } else if let Some(sys) = child.descendants().find(|n| n.has_tag_name("sysClr"))
-                    {
-                        if let Some(val) = sys.attribute("lastClr") {
-                            theme_colors.insert(name.to_string(), val.to_string());
+    if let Ok(Some(theme_path)) = crate::presentation::theme_path(package) {
+        if let Ok(theme_xml) = package.read_part_xml(&theme_path) {
+            if let Ok(theme_doc) = roxmltree::Document::parse(&theme_xml) {
+                if let Some(scheme) = theme_doc
+                    .descendants()
+                    .find(|n| n.has_tag_name("clrScheme"))
+                {
+                    for child in scheme.children() {
+                        let name = child.tag_name().name();
+                        if let Some(srgb) = child.descendants().find(|n| n.has_tag_name("srgbClr"))
+                        {
+                            if let Some(val) = srgb.attribute("val") {
+                                theme_colors.insert(name.to_string(), val.to_string());
+                            }
+                        } else if let Some(sys) =
+                            child.descendants().find(|n| n.has_tag_name("sysClr"))
+                        {
+                            if let Some(val) = sys.attribute("lastClr") {
+                                theme_colors.insert(name.to_string(), val.to_string());
+                            }
                         }
                     }
                 }
@@ -3189,6 +3193,23 @@ fn is_title_placeholder(shape: Option<roxmltree::Node<'_, '_>>) -> bool {
     false
 }
 
+fn resolve_theme_font_fallback(package: &OxmlPackage, is_title: bool) -> Option<String> {
+    let path = crate::presentation::theme_path(package).ok().flatten()?;
+    let xml = package.read_part_xml(&path).ok()?;
+    let document = roxmltree::Document::parse(&xml).ok()?;
+    let font_scheme = document
+        .descendants()
+        .find(|item| item.has_tag_name("fontScheme"))?;
+    let family = if is_title { "majorFont" } else { "minorFont" };
+    let typeface = font_scheme
+        .children()
+        .find(|item| item.has_tag_name(family))?
+        .children()
+        .find(|item| item.has_tag_name("latin"))?
+        .attribute("typeface")?;
+    (!typeface.is_empty() && !typeface.starts_with('+')).then(|| typeface.to_string())
+}
+
 fn render_text_body(
     node: &roxmltree::Node,
     theme_colors: &HashMap<String, String>,
@@ -3214,7 +3235,7 @@ fn render_text_body_with_context(
     theme_colors: &HashMap<String, String>,
     output: &mut String,
     placeholder_shape: Option<roxmltree::Node<'_, '_>>,
-    _placeholder_part: Option<&OxmlPackage>,
+    placeholder_package: Option<&OxmlPackage>,
     layout_tree: Option<roxmltree::Node<'_, '_>>,
     master_tree: Option<roxmltree::Node<'_, '_>>,
     master_text_styles: Option<roxmltree::Node<'_, '_>>,
@@ -3225,19 +3246,25 @@ fn render_text_body_with_context(
     let mut last_auto_key = String::new();
 
     let is_title = is_title_placeholder(placeholder_shape);
-    let mut theme_font_fallback = None;
-    if let Some(master) = master_tree {
-        if let Some(font_scheme) = master.descendants().find(|n| n.has_tag_name("fontScheme")) {
-            let font_node = if is_title {
-                font_scheme.children().find(|n| n.has_tag_name("majorFont"))
-            } else {
-                font_scheme.children().find(|n| n.has_tag_name("minorFont"))
-            };
-            if let Some(fn_nd) = font_node {
-                if let Some(latin) = fn_nd.children().find(|n| n.has_tag_name("latin")) {
-                    if let Some(typeface) = latin.attribute("typeface") {
-                        if !typeface.starts_with('+') {
-                            theme_font_fallback = Some(typeface);
+    // Resolve through presentation/master relationships rather than assuming
+    // `ppt/theme/theme1.xml`: imported decks regularly use other theme part
+    // names, and `/theme` edits must be visible in the preview immediately.
+    let mut theme_font_fallback =
+        placeholder_package.and_then(|package| resolve_theme_font_fallback(package, is_title));
+    if theme_font_fallback.is_none() {
+        if let Some(master) = master_tree {
+            if let Some(font_scheme) = master.descendants().find(|n| n.has_tag_name("fontScheme")) {
+                let font_node = if is_title {
+                    font_scheme.children().find(|n| n.has_tag_name("majorFont"))
+                } else {
+                    font_scheme.children().find(|n| n.has_tag_name("minorFont"))
+                };
+                if let Some(fn_nd) = font_node {
+                    if let Some(latin) = fn_nd.children().find(|n| n.has_tag_name("latin")) {
+                        if let Some(typeface) = latin.attribute("typeface") {
+                            if !typeface.starts_with('+') {
+                                theme_font_fallback = Some(typeface.to_string());
+                            }
                         }
                     }
                 }
@@ -3482,7 +3509,7 @@ fn render_text_body_with_context(
                     &run,
                     theme_colors,
                     default_font_size,
-                    theme_font_fallback,
+                    theme_font_fallback.as_deref(),
                     slide_rels,
                     output,
                 );

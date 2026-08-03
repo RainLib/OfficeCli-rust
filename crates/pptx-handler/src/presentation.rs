@@ -402,7 +402,7 @@ fn theme_color_slots() -> [(&'static str, &'static str); 12] {
     ]
 }
 
-fn theme_path(package: &OxmlPackage) -> Result<Option<String>, HandlerError> {
+pub(crate) fn theme_path(package: &OxmlPackage) -> Result<Option<String>, HandlerError> {
     let rels = package
         .part_rels(PRESENTATION)
         .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
@@ -752,4 +752,28 @@ fn write(package: &mut OxmlPackage, path: &str, xml: &str) -> Result<(), Handler
     package
         .write_part_xml(path, xml)
         .map_err(|error| HandlerError::SaveError(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_path_uses_the_related_part_not_a_fixed_theme1_name() {
+        let mut package = OxmlPackage::create("custom-theme.pptx");
+        package.add_part(
+            PRESENTATION,
+            br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"#,
+        );
+        package.add_part(
+            PRESENTATION_RELS,
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="themes/custom.xml"/></Relationships>"#,
+        );
+        package.add_part("ppt/themes/custom.xml", b"<a:theme/>");
+
+        assert_eq!(
+            theme_path(&package).unwrap().as_deref(),
+            Some("ppt/themes/custom.xml")
+        );
+    }
 }
