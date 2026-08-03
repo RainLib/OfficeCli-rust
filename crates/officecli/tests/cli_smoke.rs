@@ -3580,6 +3580,50 @@ fn test_xlsx_raw_and_raw_set_accept_csharp_semantic_sheet_paths() {
         .stdout(predicate::str::contains("codeName=\"SemanticRaw\""));
 }
 
+#[test]
+fn test_xlsx_raw_accepts_csharp_drawing_chart_and_relationship_paths() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("raw_chart_paths.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/Sheet1",
+            "--type",
+            "chart",
+            "--prop",
+            "sheet=Sheet1",
+            "--prop",
+            "title=Raw chart",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args(["raw", &p, "/Sheet1/drawing"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wsDr"));
+    officecli()
+        .args(["raw", &p, "/Sheet1/chart[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("chartSpace"));
+    officecli()
+        .args(["raw", &p, "/chart[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("chartSpace"));
+    officecli()
+        .args(["raw", &p, "/Sheet1/rId1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wsDr"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Extract-text — pull plain text
 // ═══════════════════════════════════════════════════════════════════════

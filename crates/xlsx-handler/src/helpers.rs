@@ -6,6 +6,11 @@ use oxml::OxmlPackage;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+const DRAWING_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing";
+const RELATIONSHIPS_NS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
 /// Parse the workbook.xml to extract the sheet list.
 /// Returns (sheet_name, part_path, rel_id) for each sheet.
 pub fn parse_workbook(package: &OxmlPackage) -> Result<Vec<(String, String, String)>, String> {
@@ -99,17 +104,149 @@ pub fn resolve_raw_part_path(
         _ => {}
     }
 
+    if let Some((sheet_name, suffix)) = alias.rsplit_once('/') {
+        let sheet_part = sheet_part_by_name(package, sheet_name)?;
+        if suffix == "drawing" {
+            return drawing_part_for_sheet(package, &sheet_part);
+        }
+        if let Some(chart_index) = parse_chart_index(suffix) {
+            return chart_part_for_sheet(package, &sheet_part, chart_index);
+        }
+        if suffix.starts_with(['r', 'R']) {
+            return relationship_part_for_sheet(package, &sheet_part, suffix);
+        }
+    }
+    if let Some(chart_index) = parse_chart_index(alias) {
+        return chart_part_globally(package, chart_index);
+    }
+
+    sheet_part_by_name(package, alias).map_err(|_| {
+        HandlerError::PathNotFound(format!(
+            "unknown XLSX raw part '{}'; use /workbook, /styles, /sharedStrings, /theme, /<SheetName>, /<SheetName>/drawing, /<SheetName>/chart[N], /chart[N], or a zip-internal .xml path",
+            part_path
+        ))
+    })
+}
+
+fn sheet_part_by_name(package: &OxmlPackage, sheet_name: &str) -> Result<String, HandlerError> {
     let sheets = parse_workbook(package).map_err(HandlerError::OperationFailed)?;
     sheets
         .into_iter()
-        .find(|(name, _, _)| name == alias)
+        .find(|(name, _, _)| name == sheet_name)
         .map(|(_, path, _)| path)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))
+}
+
+fn drawing_part_for_sheet(package: &OxmlPackage, sheet_part: &str) -> Result<String, HandlerError> {
+    let rels = package
+        .part_rels(sheet_part)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let drawing = rels
+        .by_type(DRAWING_RELATIONSHIP_TYPE)
+        .into_iter()
+        .min_by(|left, right| left.id.cmp(&right.id))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("drawing for '{}'", sheet_part)))?;
+    Ok(package.resolve_rel_target(sheet_part, &drawing.target))
+}
+
+fn relationship_part_for_sheet(
+    package: &OxmlPackage,
+    sheet_part: &str,
+    relationship_id: &str,
+) -> Result<String, HandlerError> {
+    let rels = package
+        .part_rels(sheet_part)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let relationship = rels.get(relationship_id).ok_or_else(|| {
+        HandlerError::PathNotFound(format!(
+            "relationship '{}' on '{}'",
+            relationship_id, sheet_part
+        ))
+    })?;
+    if relationship.target_mode.eq_ignore_ascii_case("External") {
+        return Err(HandlerError::UnsupportedMode(format!(
+            "raw access to external relationship '{}' is not supported",
+            relationship_id
+        )));
+    }
+    Ok(package.resolve_rel_target(sheet_part, &relationship.target))
+}
+
+fn chart_part_for_sheet(
+    package: &OxmlPackage,
+    sheet_part: &str,
+    chart_index: usize,
+) -> Result<String, HandlerError> {
+    let drawing_part = drawing_part_for_sheet(package, sheet_part)?;
+    let chart_ids = chart_relationship_ids(package, &drawing_part)?;
+    let chart_id = chart_ids
+        .get(chart_index.saturating_sub(1))
         .ok_or_else(|| {
-            HandlerError::PathNotFound(format!(
-                "unknown XLSX raw part '{}'; use /workbook, /styles, /sharedStrings, /theme, /<SheetName>, or a zip-internal .xml path",
-                part_path
-            ))
+            HandlerError::PathNotFound(format!("chart[{}] on '{}'", chart_index, sheet_part))
+        })?;
+    relationship_part(package, &drawing_part, chart_id)
+}
+
+fn chart_part_globally(package: &OxmlPackage, chart_index: usize) -> Result<String, HandlerError> {
+    let sheets = parse_workbook(package).map_err(HandlerError::OperationFailed)?;
+    let mut charts = Vec::new();
+    for (_, sheet_part, _) in sheets {
+        if let Ok(drawing_part) = drawing_part_for_sheet(package, &sheet_part) {
+            for chart_id in chart_relationship_ids(package, &drawing_part)? {
+                charts.push(relationship_part(package, &drawing_part, &chart_id)?);
+            }
+        }
+    }
+    charts
+        .get(chart_index.saturating_sub(1))
+        .cloned()
+        .ok_or_else(|| HandlerError::PathNotFound(format!("chart[{}]", chart_index)))
+}
+
+fn relationship_part(
+    package: &OxmlPackage,
+    source_part: &str,
+    relationship_id: &str,
+) -> Result<String, HandlerError> {
+    let rels = package
+        .part_rels(source_part)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let relationship = rels.get(relationship_id).ok_or_else(|| {
+        HandlerError::PathNotFound(format!(
+            "relationship '{}' on '{}'",
+            relationship_id, source_part
+        ))
+    })?;
+    Ok(package.resolve_rel_target(source_part, &relationship.target))
+}
+
+fn chart_relationship_ids(
+    package: &OxmlPackage,
+    drawing_part: &str,
+) -> Result<Vec<String>, HandlerError> {
+    let xml = package
+        .read_part_xml(drawing_part)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let document = roxmltree::Document::parse(&xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid drawing XML: {}", e)))?;
+    Ok(document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "chart")
+        .filter_map(|node| {
+            node.attribute((RELATIONSHIPS_NS, "id"))
+                .or_else(|| node.attribute("r:id"))
+                .map(ToOwned::to_owned)
         })
+        .collect())
+}
+
+fn parse_chart_index(segment: &str) -> Option<usize> {
+    segment
+        .strip_prefix("chart[")?
+        .strip_suffix(']')?
+        .parse::<usize>()
+        .ok()
+        .filter(|index| *index > 0)
 }
 
 /// Parse the shared strings table from xl/sharedStrings.xml.

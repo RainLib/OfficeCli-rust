@@ -726,7 +726,7 @@ fn add_chart_real(
     let ws_dir = part_dir(&ws_part);
 
     // worksheet.xml.rels — link drawing.
-    let ws_rels_path = format!("xl/_rels/{}.rels", strip_xl_prefix(&ws_part));
+    let ws_rels_path = relationships_part_path(&ws_part);
     let drawing_target = relative_path(&ws_dir, &drawing_path);
     let drawing_rel_id = next_rel_id_in_part(package, &ws_rels_path);
     let drawing_rel_xml = format!(
@@ -754,7 +754,7 @@ fn add_chart_real(
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     // drawing.xml.rels — link chart.
-    let drawing_rels_path = format!("xl/_rels/{}.rels", strip_xl_prefix(&drawing_path));
+    let drawing_rels_path = relationships_part_path(&drawing_path);
     let chart_target = relative_path("xl/drawings", &chart_path);
     let chart_rel_id = "rId1".to_string();
     let chart_rel_xml = format!(
@@ -799,9 +799,14 @@ fn part_dir(part: &str) -> String {
     }
 }
 
-/// Strip leading "xl/" if present.
-fn strip_xl_prefix(part: &str) -> String {
-    part.strip_prefix("xl/").unwrap_or(part).to_string()
+/// Construct the relationship-part path for an OOXML package part.
+/// E.g. `xl/worksheets/sheet1.xml` becomes
+/// `xl/worksheets/_rels/sheet1.xml.rels`.
+fn relationships_part_path(part_path: &str) -> String {
+    match part_path.rsplit_once('/') {
+        Some((directory, file_name)) => format!("{}/_rels/{}.rels", directory, file_name),
+        None => format!("_rels/{}.rels", part_path),
+    }
 }
 
 /// Compute a relative path from `from_dir` to `to_part`.
@@ -1362,7 +1367,7 @@ fn add_image_real(
     let ws_dir = part_dir(&ws_part);
 
     // worksheet.xml.rels → drawing.
-    let ws_rels_path = format!("xl/_rels/{}.rels", strip_xl_prefix(&ws_part));
+    let ws_rels_path = relationships_part_path(&ws_part);
     let drawing_target = relative_path(&ws_dir, &drawing_path);
     let drawing_rel_id = next_rel_id_in_part(package, &ws_rels_path);
     let drawing_rel_xml = format!(
@@ -1389,7 +1394,7 @@ fn add_image_real(
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     // drawing.xml.rels → image.
-    let drawing_rels_path = format!("xl/_rels/{}.rels", strip_xl_prefix(&drawing_path));
+    let drawing_rels_path = relationships_part_path(&drawing_path);
     let image_target = relative_path("xl/drawings", &media_path);
     let image_rel_id = "rId1".to_string();
     let image_rel_xml = format!(
