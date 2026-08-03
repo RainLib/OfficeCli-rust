@@ -2,13 +2,28 @@
   "$schema": "../_schema.json",
   "format": "docx",
   "element": "level",
+  "elementAliases": ["lvl"],
   "parent": "abstractNum",
-  "operations": { "add": false, "set": true, "get": true, "query": false, "remove": false },
+  "addParent": "/numbering/abstractNum[@id=N]",
+  "operations": { "add": true, "set": true, "get": true, "query": false, "remove": false },
   "paths": { "stable": ["/numbering/abstractNum[@id=N]/level[L]"] },
-  "note": "Read a zero-based numbering level L (0..8) from an abstractNum. Readback includes ilvl, format (numFmt), and text (lvlText). Creation currently occurs with add abstractNum, which emits nine levels.",
+  "note": "A zero-based numbering level L (0..8) under an abstractNum. Add requires ilvl and replaces an existing level with the same ilvl in place; get returns ilvl, format and text.",
   "properties": {
-    "ilvl": { "type": "int", "get": true, "enforcement": "report" },
-    "format": { "type": "string", "set": true, "get": true, "enforcement": "report" },
-    "text": { "type": "string", "set": true, "get": true, "enforcement": "report" }
+    "ilvl": { "type": "int", "add": true, "get": true, "enforcement": "strict" },
+    "format": { "type": "string", "aliases": ["numFmt"], "add": true, "set": true, "get": true, "enforcement": "report" },
+    "text": { "type": "string", "aliases": ["lvlText"], "add": true, "set": true, "get": true, "enforcement": "report" },
+    "start": { "type": "int", "add": true, "enforcement": "report" },
+    "indent": { "type": "int", "add": true, "enforcement": "report" },
+    "hanging": { "type": "int", "add": true, "enforcement": "report" },
+    "justification": { "type": "enum", "values": ["left", "center", "right"], "aliases": ["jc"], "add": true, "enforcement": "report" },
+    "suff": { "type": "enum", "values": ["tab", "space", "nothing"], "add": true, "enforcement": "report" },
+    "lvlRestart": { "type": "int", "add": true, "enforcement": "report" },
+    "isLgl": { "type": "bool", "add": true, "enforcement": "report" },
+    "direction": { "type": "enum", "values": ["rtl", "ltr"], "aliases": ["dir", "bidi"], "add": true, "enforcement": "report" },
+    "font": { "type": "string", "add": true, "enforcement": "report" },
+    "size": { "type": "font-size", "add": true, "enforcement": "report" },
+    "color": { "type": "color", "add": true, "enforcement": "report" },
+    "bold": { "type": "bool", "add": true, "enforcement": "report" },
+    "italic": { "type": "bool", "add": true, "enforcement": "report" }
   }
 }

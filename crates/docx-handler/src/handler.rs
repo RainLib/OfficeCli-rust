@@ -788,6 +788,13 @@ impl DocumentHandler for WordHandler {
                 properties,
             );
         }
+        if matches!(element_type, "level" | "lvl") && parent.starts_with("/numbering/") {
+            return mutations::add_numbering_level(
+                &mut self.package.borrow_mut(),
+                parent,
+                properties,
+            );
+        }
         let mut dom = self.parse_dom()?;
         let new_path = add_element(&mut dom, parent, element_type, position, properties, wrap)?;
         self.write_dom(&dom)?;

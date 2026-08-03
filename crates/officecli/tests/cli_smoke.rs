@@ -697,6 +697,70 @@ fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
 }
 
 #[test]
+fn test_docx_numbering_level_add_replaces_matching_ilvl() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_numbering_level_add.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "abstractNum",
+            "--properties",
+            "id=3",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering/abstractNum[@id=3]",
+            "--type-name",
+            "lvl",
+            "--properties",
+            "ilvl=2",
+            "--properties",
+            "format=upperRoman",
+            "--properties",
+            "lvlText=%1.%2.%3",
+            "--properties",
+            "start=5",
+            "--properties",
+            "indent=1440",
+            "--properties",
+            "hanging=360",
+            "--properties",
+            "font=Symbol",
+            "--properties",
+            "bold=true",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "get",
+            &p,
+            "/numbering/abstractNum[@id=3]/level[2]",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\": \"upperRoman\""))
+        .stdout(predicate::str::contains("\"text\": \"%1.%2.%3\""));
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_docx_num_start_overrides_round_trip() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_num_start_overrides.docx");

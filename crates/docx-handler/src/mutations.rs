@@ -117,6 +117,51 @@ pub fn add_numbering_definition(
     Ok(path)
 }
 
+/// Add or replace one `w:lvl` beneath an existing numbering template.  Levels
+/// are keyed by their OOXML `ilvl`, rather than their physical child position:
+/// this mirrors Word's semantics and avoids creating duplicate counters when a
+/// template was initially seeded with all nine default levels.
+pub fn add_numbering_level(
+    package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let abstract_num_id = parent
+        .strip_prefix("/numbering/abstractNum[@id=")
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| {
+            HandlerError::InvalidPath(
+                "level must be added under /numbering/abstractNum[@id=N]".to_string(),
+            )
+        })?;
+    parse_numbering_id(abstract_num_id)?;
+    let level = properties
+        .get("ilvl")
+        .ok_or_else(|| HandlerError::InvalidArgument("level requires ilvl=0..8".to_string()))
+        .and_then(|value| parse_level_index(value, "ilvl"))?;
+    let xml = package
+        .read_part_xml(DOCX_NUMBERING_PART)
+        .map_err(|_| HandlerError::PathNotFound("numbering definition not found".to_string()))?;
+    let (abstract_start, abstract_end) = numbering_abstract_bounds(&xml, abstract_num_id)?;
+    let level_xml = build_numbering_level(level, properties)?;
+    let mut updated = xml;
+    if let Some((start, end)) =
+        numbering_level_bounds(&updated, abstract_start, abstract_end, level)?
+    {
+        updated.replace_range(start..end, &level_xml);
+    } else {
+        let insert_at = abstract_end - "</w:abstractNum>".len();
+        updated.insert_str(insert_at, &level_xml);
+    }
+    package
+        .write_part_xml(DOCX_NUMBERING_PART, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!(
+        "/numbering/abstractNum[@id={}]/level[{}]",
+        abstract_num_id, level
+    ))
+}
+
 /// Update a numbering instance's template reference without permitting a
 /// dangling `w:abstractNumId` pointer.
 pub fn set_numbering_definition(
@@ -245,6 +290,209 @@ fn parse_numbering_id(value: &str) -> Result<i32, HandlerError> {
     value
         .parse::<i32>()
         .map_err(|_| HandlerError::InvalidArgument(format!("invalid numbering id '{}'", value)))
+}
+
+fn parse_level_index(value: &str, property: &str) -> Result<u8, HandlerError> {
+    let level = value.parse::<u8>().map_err(|_| {
+        HandlerError::InvalidArgument(format!("{} must be an integer 0..8", property))
+    })?;
+    if level > 8 {
+        return Err(HandlerError::InvalidArgument(format!(
+            "{} must be 0..8 (got {})",
+            property, level
+        )));
+    }
+    Ok(level)
+}
+
+fn numbering_abstract_bounds(xml: &str, id: &str) -> Result<(usize, usize), HandlerError> {
+    let marker = format!("<w:abstractNum w:abstractNumId=\"{}\"", id);
+    let start = xml
+        .find(&marker)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("abstractNum {} not found", id)))?;
+    let end = xml[start..]
+        .find("</w:abstractNum>")
+        .map(|offset| start + offset + "</w:abstractNum>".len())
+        .ok_or_else(|| HandlerError::OperationFailed("invalid abstractNum".to_string()))?;
+    Ok((start, end))
+}
+
+fn numbering_level_bounds(
+    xml: &str,
+    abstract_start: usize,
+    abstract_end: usize,
+    level: u8,
+) -> Result<Option<(usize, usize)>, HandlerError> {
+    let marker = format!("<w:lvl w:ilvl=\"{}\"", level);
+    let Some(offset) = xml[abstract_start..abstract_end].find(&marker) else {
+        return Ok(None);
+    };
+    let start = abstract_start + offset;
+    let end = xml[start..abstract_end]
+        .find("</w:lvl>")
+        .map(|offset| start + offset + "</w:lvl>".len())
+        .ok_or_else(|| HandlerError::OperationFailed("invalid level".to_string()))?;
+    Ok(Some((start, end)))
+}
+
+fn build_numbering_level(
+    level: u8,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let start = properties
+        .get("start")
+        .map(|value| parse_numbering_id(value))
+        .transpose()?
+        .unwrap_or(1);
+    let format = properties
+        .get("format")
+        .or_else(|| properties.get("numFmt"))
+        .map(String::as_str)
+        .unwrap_or("decimal");
+    let text = properties
+        .get("lvlText")
+        .or_else(|| properties.get("text"))
+        .cloned()
+        .unwrap_or_else(|| {
+            if format.eq_ignore_ascii_case("bullet") {
+                "•".to_string()
+            } else {
+                format!("%{}.", level + 1)
+            }
+        });
+    let mut content = format!(
+        "<w:start w:val=\"{}\"/><w:numFmt w:val=\"{}\"/>",
+        start,
+        escape_attr(format)
+    );
+    if let Some(value) = properties.get("lvlRestart") {
+        content.push_str(&format!(
+            "<w:lvlRestart w:val=\"{}\"/>",
+            parse_numbering_id(value)?
+        ));
+    }
+    if properties
+        .get("isLgl")
+        .is_some_and(|value| is_truthy_string(value))
+    {
+        content.push_str("<w:isLgl/>");
+    }
+    if let Some(value) = properties.get("suff") {
+        let suffix = match value.to_ascii_lowercase().as_str() {
+            "tab" | "space" | "nothing" | "none" => value,
+            _ => {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "invalid suff '{}': tab, space, or nothing expected",
+                    value
+                )))
+            }
+        };
+        content.push_str(&format!("<w:suff w:val=\"{}\"/>", escape_attr(suffix)));
+    }
+    content.push_str(&format!("<w:lvlText w:val=\"{}\"/>", escape_attr(&text)));
+    if let Some(value) = properties
+        .get("justification")
+        .or_else(|| properties.get("jc"))
+    {
+        let value = match value.to_ascii_lowercase().as_str() {
+            "left" | "start" => "left",
+            "center" => "center",
+            "right" | "end" => "right",
+            _ => {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "invalid justification '{}'",
+                    value
+                )))
+            }
+        };
+        content.push_str(&format!("<w:lvlJc w:val=\"{}\"/>", value));
+    }
+    let indent = properties
+        .get("indent")
+        .map(|value| parse_numbering_id(value))
+        .transpose()?;
+    let hanging = properties
+        .get("hanging")
+        .map(|value| parse_numbering_id(value))
+        .transpose()?;
+    let bidi = properties
+        .get("direction")
+        .or_else(|| properties.get("dir"))
+        .or_else(|| properties.get("bidi"))
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "rtl" | "righttoleft" | "right-to-left" | "true" | "1" => Ok(true),
+            "ltr" | "lefttoright" | "left-to-right" | "false" | "0" | "" => Ok(false),
+            _ => Err(HandlerError::InvalidArgument(format!(
+                "invalid direction '{}'",
+                value
+            ))),
+        })
+        .transpose()?;
+    if indent.is_some() || hanging.is_some() || bidi == Some(true) {
+        content.push_str("<w:pPr>");
+        if bidi == Some(true) {
+            content.push_str("<w:bidi/>");
+        }
+        if indent.is_some() || hanging.is_some() {
+            content.push_str("<w:ind");
+            if let Some(value) = indent {
+                content.push_str(&format!(" w:left=\"{}\"", value));
+            }
+            if let Some(value) = hanging {
+                content.push_str(&format!(" w:hanging=\"{}\"", value));
+            }
+            content.push_str("/>");
+        }
+        content.push_str("</w:pPr>");
+    }
+    let mut run_properties = String::new();
+    if let Some(value) = properties.get("font").filter(|value| !value.is_empty()) {
+        let value = escape_attr(value);
+        run_properties.push_str(&format!(
+            "<w:rFonts w:ascii=\"{0}\" w:hAnsi=\"{0}\" w:eastAsia=\"{0}\"/>",
+            value
+        ));
+    }
+    if properties
+        .get("bold")
+        .is_some_and(|value| is_truthy_string(value))
+    {
+        run_properties.push_str("<w:b/>");
+    }
+    if properties
+        .get("italic")
+        .is_some_and(|value| is_truthy_string(value))
+    {
+        run_properties.push_str("<w:i/>");
+    }
+    if let Some(value) = properties.get("color").filter(|value| !value.is_empty()) {
+        run_properties.push_str(&format!(
+            "<w:color w:val=\"{}\"/>",
+            escape_attr(value.trim_start_matches('#'))
+        ));
+    }
+    if let Some(value) = properties.get("size").filter(|value| !value.is_empty()) {
+        let points = value.parse::<f64>().map_err(|_| {
+            HandlerError::InvalidArgument(format!("size must be a point value (got '{}')", value))
+        })?;
+        if !points.is_finite() {
+            return Err(HandlerError::InvalidArgument(
+                "size must be finite".to_string(),
+            ));
+        }
+        run_properties.push_str(&format!("<w:sz w:val=\"{}\"/>", (points * 2.0).round()));
+    }
+    if !run_properties.is_empty() {
+        content.push_str(&format!("<w:rPr>{}</w:rPr>", run_properties));
+    }
+    Ok(format!("<w:lvl w:ilvl=\"{}\">{}</w:lvl>", level, content))
+}
+
+fn is_truthy_string(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 fn next_numbering_id(xml: &str, attr: &str) -> i32 {
     xml.split(&format!("w:{}=\"", attr))
