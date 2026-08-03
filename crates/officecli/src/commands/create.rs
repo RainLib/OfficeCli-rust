@@ -135,6 +135,7 @@ fn create_blank_docx_with_locale(
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
 </Types>"#;
     let minimal_content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -189,6 +190,7 @@ fn create_blank_docx_with_locale(
     let document_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
 </Relationships>"#;
 
     let mut pkg = OxmlPackage::create(path);
@@ -204,6 +206,13 @@ fn create_blank_docx_with_locale(
     pkg.add_part("word/document.xml", document_xml.as_bytes());
     if !minimal {
         pkg.add_part("word/styles.xml", styles_xml.as_bytes());
+        // Keep non-minimal Word creation aligned with C# BlankDocCreator:
+        // styles and future theme-font references resolve through a real
+        // theme part, and `dump /theme` can replay into a fresh document.
+        pkg.add_part(
+            "word/theme/theme1.xml",
+            default_theme_xml(locale).as_bytes(),
+        );
         pkg.add_part("word/_rels/document.xml.rels", document_rels.as_bytes());
     }
 

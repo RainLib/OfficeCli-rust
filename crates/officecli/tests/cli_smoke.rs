@@ -3666,6 +3666,54 @@ fn test_dump_docx_styles_replays_semantic_part() {
 }
 
 #[test]
+fn test_dump_docx_theme_replays_into_fresh_document() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_theme_source.docx");
+    let target = tmp.path().join("dump_theme_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "raw-set",
+            &source_path,
+            "/theme",
+            "--xpath",
+            "/a:theme",
+            "--action",
+            "setattr",
+            "--xml",
+            "name=Source Theme",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/theme"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"part\":\"/theme\""))
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &target_path, "/theme"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("name=\"Source Theme\""));
+}
+
+#[test]
 fn test_dump_docx_body_subtree_replays_into_fresh_document() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_body_source.docx");
