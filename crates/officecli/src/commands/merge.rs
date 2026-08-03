@@ -7,24 +7,60 @@ pub struct MergeCommand {
     /// Document file path (template with {{key}} placeholders)
     pub file: String,
 
-    /// JSON data (inline object or path to .json file)
-    pub data: String,
+    /// Legacy JSON data argument, or C# output path when --data is used.
+    pub argument: String,
+
+    /// JSON data (inline object or path to .json file; C#-compatible spelling).
+    #[arg(long)]
+    pub data: Option<String>,
 
     /// Output file path (defaults to overwriting the input)
     #[arg(short, long)]
     pub out: Option<String>,
+
+    /// Overwrite a C#-style positional output file.
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub fn handle_merge(cmd: MergeCommand, _format: OutputFormat) -> Result<String, HandlerError> {
-    let handler = crate::open_handler(&cmd.file, true)?;
+    if cmd.data.is_some() && cmd.out.is_some() {
+        return Err(HandlerError::InvalidArgument(
+            "--out cannot be combined with C# --data syntax; use positional output only."
+                .to_string(),
+        ));
+    }
+    let (data_arg, target_file, csharp_syntax) = match cmd.data {
+        Some(data) => (data, cmd.argument, true),
+        None => (
+            cmd.argument,
+            cmd.out.clone().unwrap_or_else(|| cmd.file.clone()),
+            false,
+        ),
+    };
+    if csharp_syntax {
+        if std::path::Path::new(&target_file).exists() && !cmd.force {
+            return Err(HandlerError::InvalidArgument(format!(
+                "File already exists: {}. Use --force to overwrite.",
+                target_file
+            )));
+        }
+        std::fs::copy(&cmd.file, &target_file).map_err(|error| {
+            HandlerError::OperationFailed(format!(
+                "failed to copy template '{}' to '{}': {}",
+                cmd.file, target_file, error
+            ))
+        })?;
+    }
+    let handler = crate::open_handler(&target_file, true)?;
 
     // Parse merge data (file or inline JSON)
-    let json_text = if cmd.data.ends_with(".json") && std::path::Path::new(&cmd.data).exists() {
-        std::fs::read_to_string(&cmd.data).map_err(|e| {
-            HandlerError::OperationFailed(format!("failed to read JSON file '{}': {}", cmd.data, e))
+    let json_text = if data_arg.ends_with(".json") && std::path::Path::new(&data_arg).exists() {
+        std::fs::read_to_string(&data_arg).map_err(|e| {
+            HandlerError::OperationFailed(format!("failed to read JSON file '{}': {}", data_arg, e))
         })?
     } else {
-        cmd.data.clone()
+        data_arg
     };
 
     // Parse JSON into flat key-value map
@@ -37,17 +73,24 @@ pub fn handle_merge(cmd: MergeCommand, _format: OutputFormat) -> Result<String, 
     if let Some(out) = cmd.out {
         // Save to a different file — we need to save first then copy
         handler.save()?;
-        std::fs::copy(&cmd.file, &out).map_err(|e| {
+        std::fs::copy(&target_file, &out).map_err(|e| {
             HandlerError::OperationFailed(format!("failed to copy to '{}': {}", out, e))
         })?;
     } else {
         handler.save()?;
     }
 
-    Ok(format!(
-        "Merged: {} replacement(s), {} unresolved placeholder(s)",
-        result.replaced_count, result.unresolved_count
-    ))
+    if csharp_syntax {
+        Ok(format!(
+            "Merged: {}\n  Replaced keys: {}",
+            target_file, result.replaced_count
+        ))
+    } else {
+        Ok(format!(
+            "Merged: {} replacement(s), {} unresolved placeholder(s)",
+            result.replaced_count, result.unresolved_count
+        ))
+    }
 }
 
 /// Parse JSON data (object or file) into a flat HashMap.

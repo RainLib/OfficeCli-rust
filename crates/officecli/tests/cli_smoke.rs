@@ -317,6 +317,53 @@ fn test_import_accepts_csharp_positional_source_file() {
 }
 
 #[test]
+fn test_merge_accepts_csharp_template_output_syntax() {
+    let tmp = temp_dir();
+    let template = tmp.path().join("merge_template.docx");
+    let output = tmp.path().join("merge_output.docx");
+    let template_path = template.to_string_lossy().to_string();
+    let output_path = output.to_string_lossy().to_string();
+
+    officecli()
+        .args(["create", &template_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &template_path,
+            "/body",
+            "--type",
+            "paragraph",
+            "--prop",
+            "text=Hello {{name}}",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "merge",
+            &template_path,
+            &output_path,
+            "--data",
+            r#"{"name":"Ada"}"#,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Merged:"));
+    officecli()
+        .args(["view", &template_path, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello {{name}}"));
+    officecli()
+        .args(["view", &output_path, "-m", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello Ada"));
+}
+
+#[test]
 fn test_create_pptx() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_create.pptx");
