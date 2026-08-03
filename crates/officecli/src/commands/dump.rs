@@ -40,18 +40,18 @@ pub fn handle_dump(
             .unwrap_or_default();
         if extension.eq_ignore_ascii_case("docx") {
             let logical_path = path.as_deref().unwrap_or("/");
-            if logical_path == "/body" {
+            if let Some(xpath) = docx_body_subtree_xpath(logical_path) {
                 let handler = crate::open_handler(&cmd.file, false)?;
                 let document =
                     handler.raw("word/document.xml", handler_common::RawOptions::default())?;
-                let body = oxml::xml_util::find_elements_by_xpath(&document, "/w:document/w:body")
+                let subtree = oxml::xml_util::find_elements_by_xpath(&document, &xpath)
                     .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
                     .into_iter()
                     .next()
-                    .ok_or_else(|| HandlerError::PathNotFound("/body".to_string()))?;
+                    .ok_or_else(|| HandlerError::PathNotFound(logical_path.to_string()))?;
                 let output = serde_json::to_string(&vec![
                     serde_json::json!({"command":"meta","dumpVersion":2}),
-                    serde_json::json!({"command":"raw-set","part":"/document","xpath":"/w:document/w:body","action":"replace","xml":body}),
+                    serde_json::json!({"command":"raw-set","part":"/document","xpath":xpath,"action":"replace","xml":subtree}),
                 ]).map_err(HandlerError::JsonError)?;
                 if let Some(path) = cmd.out.filter(|path| path != "-") {
                     std::fs::write(&path, format!("{}\n", output))
@@ -65,7 +65,7 @@ pub fn handle_dump(
                 "/styles" => ("word/styles.xml", "/w:styles"),
                 "/settings" => ("word/settings.xml", "/w:settings"),
                 "/numbering" => ("word/numbering.xml", "/w:numbering"),
-                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /styles, /settings, and /numbering; use --dom for other subtrees".to_string())),
+                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /body/p[N], /body/tbl[N], /styles, /settings, and /numbering; use --dom for other subtrees".to_string())),
             };
             let replay_part = if logical_path == "/" {
                 "/document"
@@ -182,4 +182,25 @@ pub fn handle_dump(
         let json = serde_json::to_string_pretty(&root).map_err(|e| HandlerError::JsonError(e))?;
         Ok(json)
     }
+}
+
+fn docx_body_subtree_xpath(path: &str) -> Option<String> {
+    if path == "/body" {
+        return Some("/w:document/w:body".to_string());
+    }
+    let suffix = path.strip_prefix("/body/")?;
+    let mut xpath = "/w:document/w:body".to_string();
+    for segment in suffix.split('/') {
+        let (name, predicate) = segment.split_once('[').unwrap_or((segment, ""));
+        if !matches!(name, "p" | "tbl" | "tr" | "tc" | "r") {
+            return None;
+        }
+        xpath.push_str("/w:");
+        xpath.push_str(name);
+        if !predicate.is_empty() {
+            xpath.push('[');
+            xpath.push_str(predicate);
+        }
+    }
+    Some(xpath)
 }

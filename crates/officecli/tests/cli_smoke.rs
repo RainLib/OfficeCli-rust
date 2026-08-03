@@ -3711,6 +3711,43 @@ fn test_dump_docx_body_subtree_replays_into_fresh_document() {
 }
 
 #[test]
+fn test_dump_docx_paragraph_subtree_replays_into_fresh_document() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_paragraph_source.docx");
+    let target = tmp.path().join("dump_paragraph_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["set", &source_path, "/body/p[1]", "text=Paragraph replay"])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/body/p[1]"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &target_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Paragraph replay"));
+}
+
+#[test]
 fn test_dump_xlsx_batch_replays_into_fresh_workbook() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_source.xlsx");
