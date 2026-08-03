@@ -3693,6 +3693,78 @@ fn test_pptx_presentation_settings_lifecycle() {
 }
 
 #[test]
+fn test_pptx_theme_and_default_font_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_theme.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/theme",
+            "accent1=#123",
+            "headingFont=Heading & Body",
+            "bodyFont=Body Font",
+            "majorFont.ea=等线",
+            "minorFont.cs=Arial",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/theme"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""accent1": "112233""#))
+        .stdout(predicate::str::contains(
+            r#""headingFont": "Heading & Body""#,
+        ))
+        .stdout(predicate::str::contains(r#""headingFont.ea": "等线""#))
+        .stdout(predicate::str::contains(r#""bodyFont.cs": "Arial""#));
+
+    // C# also exposes dotted shared-theme props and the root defaultFont alias.
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/",
+            "theme.color.accent2=ABC",
+            "theme.font.major.eastAsia=宋体",
+            "defaultFont=Tahoma",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/theme"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""accent2": "AABBCC""#))
+        .stdout(predicate::str::contains(r#""headingFont": "Tahoma""#))
+        .stdout(predicate::str::contains(r#""bodyFont": "Tahoma""#))
+        .stdout(predicate::str::contains(r#""headingFont.ea": "宋体""#));
+    officecli()
+        .args(["--json", "get", &p, "/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#""theme.color.accent2": "AABBCC""#,
+        ))
+        .stdout(predicate::str::contains(
+            r#""theme.font.major.latin": "Tahoma""#,
+        ));
+    officecli()
+        .args(["raw", &p, "ppt/theme/theme1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#"<a:accent1><a:srgbClr val="112233""#,
+        ))
+        .stdout(predicate::str::contains(r#"typeface="Tahoma""#));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
 fn test_pptx_linebreak_add_get_remove_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_pptx_linebreak.pptx");

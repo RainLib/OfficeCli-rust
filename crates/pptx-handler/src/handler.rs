@@ -90,6 +90,9 @@ impl DocumentHandler for PptxHandler {
     }
 
     fn get(&self, path: &str, depth: usize) -> Result<DocumentNode, HandlerError> {
+        if path.eq_ignore_ascii_case("/theme") {
+            return crate::presentation::get_theme(&self.package.borrow());
+        }
         if matches!(path, "/presentation") {
             return crate::presentation::get(&self.package.borrow(), depth);
         }
@@ -97,6 +100,7 @@ impl DocumentHandler for PptxHandler {
             let mut root = crate::view::get_node(&self.package.borrow(), path, depth)?;
             let settings = crate::presentation::get(&self.package.borrow(), 0)?;
             root.format.extend(settings.format);
+            crate::presentation::populate_root_theme(&self.package.borrow(), &mut root)?;
             return Ok(root);
         }
         if path.contains("/br[") || path.contains("/linebreak[") {
@@ -130,7 +134,11 @@ impl DocumentHandler for PptxHandler {
             ));
         }
         // Find/replace and range edits carry their target in the property map.
-        if !properties.contains_key("find") && !properties.contains_key("range_paths") {
+        if !properties.contains_key("find")
+            && !properties.contains_key("range_paths")
+            && !matches!(path, "/" | "" | "/presentation")
+            && !path.eq_ignore_ascii_case("/theme")
+        {
             handler_common::ensure_scoped(path, "set")?;
         }
         if let Some(range_paths_str) = properties.get("range_paths") {
@@ -142,6 +150,8 @@ impl DocumentHandler for PptxHandler {
                 properties,
                 &segments,
             )
+        } else if path.eq_ignore_ascii_case("/theme") {
+            crate::presentation::set_theme(&mut self.package.borrow_mut(), properties)
         } else if matches!(path, "/" | "" | "/presentation") {
             crate::presentation::set(&mut self.package.borrow_mut(), properties)
         } else if path.to_ascii_lowercase().contains("/moderncomment[") {

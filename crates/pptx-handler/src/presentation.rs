@@ -12,6 +12,9 @@ const PRES_PROPS_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps";
 const PRES_PROPS_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml";
+const THEME_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+const SLIDE_MASTER_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
 
 pub fn get(package: &OxmlPackage, depth: usize) -> Result<DocumentNode, HandlerError> {
     let presentation = read(package, PRESENTATION)?;
@@ -95,9 +98,27 @@ pub fn set(
 ) -> Result<Vec<String>, HandlerError> {
     let mut presentation = read(package, PRESENTATION)?;
     let mut props_xml: Option<String> = None;
+    let mut theme_xml: Option<(String, String)> = None;
     let mut unsupported = Vec::new();
     for (key, value) in properties {
         match key.to_ascii_lowercase().as_str() {
+            "defaultfont" | "font" => {
+                if !set_theme_font(package, &mut theme_xml, "majorFont", "latin", value, false)? {
+                    unsupported.push(key.clone());
+                } else {
+                    set_theme_font(package, &mut theme_xml, "minorFont", "latin", value, false)?;
+                }
+            }
+            key if key.starts_with("theme.color.") => {
+                if !set_theme_color(package, &mut theme_xml, &key[12..], value)? {
+                    unsupported.push(key.to_string());
+                }
+            }
+            key if key.starts_with("theme.font.") => {
+                if !set_dotted_theme_font(package, &mut theme_xml, key, value)? {
+                    unsupported.push(key.to_string());
+                }
+            }
             "firstslidenum" | "firstslidenumber" => {
                 value.parse::<i32>().map_err(|_| {
                     HandlerError::InvalidArgument(format!(
@@ -198,7 +219,368 @@ pub fn set(
     if let Some(xml) = props_xml {
         write(package, PRES_PROPS, &xml)?;
     }
+    if let Some((path, xml)) = theme_xml {
+        write(package, &path, &xml)?;
+    }
     Ok(unsupported)
+}
+
+/// Read the C#-compatible singleton `/theme` node.
+pub fn get_theme(package: &OxmlPackage) -> Result<DocumentNode, HandlerError> {
+    let mut node = DocumentNode::new("/theme", "theme");
+    let Some(path) = theme_path(package)? else {
+        return Ok(node);
+    };
+    let xml = read(package, &path)?;
+    let document = roxmltree::Document::parse(&xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid theme XML: {error}")))?;
+    let Some(elements) = document
+        .descendants()
+        .find(|item| item.has_tag_name("themeElements"))
+    else {
+        return Ok(node);
+    };
+    if let Some(scheme) = elements
+        .children()
+        .find(|item| item.has_tag_name("clrScheme"))
+    {
+        if let Some(name) = scheme.attribute("name") {
+            node = node.with_format("name", Value::String(name.to_string()));
+        }
+        for (tag, key) in theme_color_slots() {
+            if let Some(slot) = scheme.children().find(|item| item.has_tag_name(tag)) {
+                if let Some(value) = slot
+                    .descendants()
+                    .find(|item| item.has_tag_name("srgbClr"))
+                    .and_then(|item| item.attribute("val"))
+                    .or_else(|| {
+                        slot.descendants()
+                            .find(|item| item.has_tag_name("sysClr"))
+                            .and_then(|item| item.attribute("lastClr").or(item.attribute("val")))
+                    })
+                {
+                    node = node.with_format(key, Value::String(value.to_ascii_uppercase()));
+                }
+            }
+        }
+    }
+    if let Some(font_scheme) = elements
+        .children()
+        .find(|item| item.has_tag_name("fontScheme"))
+    {
+        for (font_tag, short) in [("majorFont", "headingFont"), ("minorFont", "bodyFont")] {
+            if let Some(font) = font_scheme
+                .children()
+                .find(|item| item.has_tag_name(font_tag))
+            {
+                for (script, suffix) in [("latin", ""), ("ea", ".ea"), ("cs", ".cs")] {
+                    if let Some(typeface) = font
+                        .children()
+                        .find(|item| item.has_tag_name(script))
+                        .and_then(|item| item.attribute("typeface"))
+                        .filter(|value| !value.is_empty())
+                    {
+                        let key = format!("{short}{suffix}");
+                        node = node.with_format(&key, Value::String(typeface.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(node)
+}
+
+/// Merge the dotted `theme.*` readback C# exposes at the presentation root.
+pub fn populate_root_theme(
+    package: &OxmlPackage,
+    node: &mut DocumentNode,
+) -> Result<(), HandlerError> {
+    let Some(path) = theme_path(package)? else {
+        return Ok(());
+    };
+    let xml = read(package, &path)?;
+    let document = roxmltree::Document::parse(&xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid theme XML: {error}")))?;
+    if let Some(name) = document.root_element().attribute("name") {
+        node.format.insert(
+            "theme.name".to_string(),
+            Some(Value::String(name.to_string())),
+        );
+    }
+    let theme = get_theme(package)?;
+    for (tag, _) in theme_color_slots() {
+        let source = match tag {
+            "hlink" => "hyperlink",
+            "folHlink" => "followedhyperlink",
+            _ => tag,
+        };
+        if let Some(Some(value)) = theme.format.get(source) {
+            node.format
+                .insert(format!("theme.color.{tag}"), Some(value.clone()));
+        }
+    }
+    for (short, major_minor) in [("headingFont", "major"), ("bodyFont", "minor")] {
+        if let Some(Some(value)) = theme.format.get(short) {
+            node.format.insert(
+                format!("theme.font.{major_minor}.latin"),
+                Some(value.clone()),
+            );
+        }
+        if let Some(Some(value)) = theme.format.get(&format!("{short}.ea")) {
+            node.format.insert(
+                format!("theme.font.{major_minor}.eastAsia"),
+                Some(value.clone()),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Set properties using C#'s `/theme` surface (short color/font names and aliases).
+pub fn set_theme(
+    package: &mut OxmlPackage,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let mut theme_xml = None;
+    let mut unsupported = Vec::new();
+    for (key, value) in properties {
+        let key = key.to_ascii_lowercase();
+        let handled = match key.as_str() {
+            "accent1" | "accent2" | "accent3" | "accent4" | "accent5" | "accent6" | "dk1"
+            | "dk2" | "lt1" | "lt2" | "hyperlink" | "hlink" | "followedhyperlink" | "folhlink" => {
+                set_theme_color(package, &mut theme_xml, &key, value)?
+            }
+            "dark1" => set_theme_color(package, &mut theme_xml, "dk1", value)?,
+            "dark2" => set_theme_color(package, &mut theme_xml, "dk2", value)?,
+            "light1" => set_theme_color(package, &mut theme_xml, "lt1", value)?,
+            "light2" => set_theme_color(package, &mut theme_xml, "lt2", value)?,
+            "headingfont" | "majorfont" => {
+                set_theme_font(package, &mut theme_xml, "majorFont", "latin", value, true)?
+            }
+            "bodyfont" | "minorfont" => {
+                set_theme_font(package, &mut theme_xml, "minorFont", "latin", value, true)?
+            }
+            "headingfont.ea" | "majorfont.ea" => {
+                set_theme_font(package, &mut theme_xml, "majorFont", "ea", value, true)?
+            }
+            "bodyfont.ea" | "minorfont.ea" => {
+                set_theme_font(package, &mut theme_xml, "minorFont", "ea", value, true)?
+            }
+            "headingfont.cs" | "majorfont.cs" => {
+                set_theme_font(package, &mut theme_xml, "majorFont", "cs", value, true)?
+            }
+            "bodyfont.cs" | "minorfont.cs" => {
+                set_theme_font(package, &mut theme_xml, "minorFont", "cs", value, true)?
+            }
+            "name" => set_theme_name(package, &mut theme_xml, value)?,
+            _ => false,
+        };
+        if !handled {
+            unsupported.push(key);
+        }
+    }
+    if let Some((path, xml)) = theme_xml {
+        write(package, &path, &xml)?;
+    }
+    Ok(unsupported)
+}
+
+fn theme_color_slots() -> [(&'static str, &'static str); 12] {
+    [
+        ("dk1", "dk1"),
+        ("lt1", "lt1"),
+        ("dk2", "dk2"),
+        ("lt2", "lt2"),
+        ("accent1", "accent1"),
+        ("accent2", "accent2"),
+        ("accent3", "accent3"),
+        ("accent4", "accent4"),
+        ("accent5", "accent5"),
+        ("accent6", "accent6"),
+        ("hlink", "hyperlink"),
+        ("folHlink", "followedhyperlink"),
+    ]
+}
+
+fn theme_path(package: &OxmlPackage) -> Result<Option<String>, HandlerError> {
+    let rels = package
+        .part_rels(PRESENTATION)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    if let Some(theme) = rels.all().values().find(|rel| rel.type_uri == THEME_REL) {
+        return Ok(Some(
+            package.resolve_rel_target(PRESENTATION, &theme.target),
+        ));
+    }
+    for master in rels
+        .all()
+        .values()
+        .filter(|rel| rel.type_uri == SLIDE_MASTER_REL)
+    {
+        let master_path = package.resolve_rel_target(PRESENTATION, &master.target);
+        let master_rels = package
+            .part_rels(&master_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        if let Some(theme) = master_rels
+            .all()
+            .values()
+            .find(|rel| rel.type_uri == THEME_REL)
+        {
+            return Ok(Some(
+                package.resolve_rel_target(&master_path, &theme.target),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+fn load_theme<'a>(
+    package: &OxmlPackage,
+    state: &'a mut Option<(String, String)>,
+) -> Result<Option<&'a mut (String, String)>, HandlerError> {
+    if state.is_none() {
+        let Some(path) = theme_path(package)? else {
+            return Ok(None);
+        };
+        *state = Some((path.clone(), read(package, &path)?));
+    }
+    Ok(state.as_mut())
+}
+
+fn set_theme_color(
+    package: &OxmlPackage,
+    state: &mut Option<(String, String)>,
+    key: &str,
+    value: &str,
+) -> Result<bool, HandlerError> {
+    let lowercase_key = key.to_ascii_lowercase();
+    let key = match lowercase_key.as_str() {
+        "hlink" | "hyperlink" => "hlink",
+        "folhlink" | "followedhyperlink" => "folHlink",
+        key => key,
+    };
+    if !theme_color_slots().iter().any(|(tag, _)| *tag == key) {
+        return Ok(false);
+    }
+    let color = normalize_theme_color(value)?;
+    let Some((_, xml)) = load_theme(package, state)? else {
+        return Ok(false);
+    };
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid theme XML: {error}")))?;
+    let Some(slot) = document
+        .descendants()
+        .find(|item| item.has_tag_name("clrScheme"))
+        .and_then(|scheme| scheme.children().find(|item| item.has_tag_name(key)))
+    else {
+        return Ok(false);
+    };
+    let replacement = format!("<a:{key}><a:srgbClr val=\"{color}\"/></a:{key}>");
+    xml.replace_range(slot.range(), &replacement);
+    Ok(true)
+}
+
+fn set_theme_name(
+    package: &OxmlPackage,
+    state: &mut Option<(String, String)>,
+    value: &str,
+) -> Result<bool, HandlerError> {
+    let Some((_, xml)) = load_theme(package, state)? else {
+        return Ok(false);
+    };
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid theme XML: {error}")))?;
+    let Some(scheme) = document
+        .descendants()
+        .find(|item| item.has_tag_name("clrScheme"))
+    else {
+        return Ok(false);
+    };
+    *xml = upsert_attribute_at(xml, scheme.range().start, "name", &escape_xml_attr(value))?;
+    Ok(true)
+}
+
+fn set_dotted_theme_font(
+    package: &OxmlPackage,
+    state: &mut Option<(String, String)>,
+    key: &str,
+    value: &str,
+) -> Result<bool, HandlerError> {
+    let (font, script) = match key {
+        "theme.font.major.latin" => ("majorFont", "latin"),
+        "theme.font.major.eastasia" => ("majorFont", "ea"),
+        "theme.font.minor.latin" => ("minorFont", "latin"),
+        "theme.font.minor.eastasia" => ("minorFont", "ea"),
+        _ => return Ok(false),
+    };
+    set_theme_font(package, state, font, script, value, false)
+}
+
+fn set_theme_font(
+    package: &OxmlPackage,
+    state: &mut Option<(String, String)>,
+    font_tag: &str,
+    script_tag: &str,
+    value: &str,
+    normalize_clear: bool,
+) -> Result<bool, HandlerError> {
+    let value = if normalize_clear
+        && (value.is_empty()
+            || value.eq_ignore_ascii_case("none")
+            || value.eq_ignore_ascii_case("default"))
+    {
+        ""
+    } else {
+        value
+    };
+    let Some((_, xml)) = load_theme(package, state)? else {
+        return Ok(false);
+    };
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid theme XML: {error}")))?;
+    let Some(font) = document
+        .descendants()
+        .find(|item| item.has_tag_name("fontScheme"))
+        .and_then(|scheme| scheme.children().find(|item| item.has_tag_name(font_tag)))
+    else {
+        return Ok(false);
+    };
+    let escaped = escape_xml_attr(value);
+    if let Some(script) = font.children().find(|item| item.has_tag_name(script_tag)) {
+        *xml = upsert_attribute_at(xml, script.range().start, "typeface", &escaped)?;
+    } else {
+        let close = format!("</a:{font_tag}>");
+        let offset = xml[font.range()]
+            .rfind(&close)
+            .ok_or_else(|| HandlerError::OperationFailed(format!("invalid theme {font_tag}")))?
+            + font.range().start;
+        xml.insert_str(offset, &format!("<a:{script_tag} typeface=\"{escaped}\"/>"));
+    }
+    Ok(true)
+}
+
+fn normalize_theme_color(value: &str) -> Result<String, HandlerError> {
+    let value = value.strip_prefix('#').unwrap_or(value);
+    let normalized = match value.len() {
+        3 if value.chars().all(|char| char.is_ascii_hexdigit()) => value
+            .chars()
+            .flat_map(|char| [char, char])
+            .collect::<String>(),
+        6 if value.chars().all(|char| char.is_ascii_hexdigit()) => value.to_string(),
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "theme color must be a 3- or 6-digit hex value (got '{value}')"
+            )))
+        }
+    };
+    Ok(normalized.to_ascii_uppercase())
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn set_pres_prop(
