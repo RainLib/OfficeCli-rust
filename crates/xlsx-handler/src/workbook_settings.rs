@@ -74,6 +74,25 @@ pub fn populate_node(package: &OxmlPackage, node: &mut DocumentNode) -> Result<(
             }
         }
     }
+    if let Some(protection) = document
+        .descendants()
+        .find(|item| item.has_tag_name("workbookProtection"))
+    {
+        if truthy(protection.attribute("lockStructure").unwrap_or("0")) {
+            *node = std::mem::replace(node, DocumentNode::new("", ""))
+                .with_format("workbook.lockStructure", Value::Bool(true));
+        }
+        if truthy(protection.attribute("lockWindows").unwrap_or("0")) {
+            *node = std::mem::replace(node, DocumentNode::new("", ""))
+                .with_format("workbook.lockWindows", Value::Bool(true));
+        }
+        if let Some(hash) = protection.attribute("workbookPassword") {
+            *node = std::mem::replace(node, DocumentNode::new("", ""))
+                .with_format("workbook.passwordHash", Value::String(hash.to_string()));
+            *node = std::mem::replace(node, DocumentNode::new("", ""))
+                .with_format("workbook.password", Value::String("***".to_string()));
+        }
+    }
     Ok(())
 }
 
@@ -83,6 +102,10 @@ pub fn set(
 ) -> Result<Vec<String>, HandlerError> {
     let mut xml = read(package)?;
     let sheets = sheet_names(&xml)?;
+    let lock_structure_explicit = properties
+        .get("workbook.lockStructure")
+        .or_else(|| properties.get("lockStructure"))
+        .is_some_and(|value| truthy(value));
     let mut unsupported = Vec::new();
     for (key, value) in properties {
         match key.to_ascii_lowercase().as_str() {
@@ -189,6 +212,88 @@ pub fn set(
             }
             "firstsheet" | "workbook.firstsheet" => {
                 xml = set_view_attr(&xml, "firstSheet", sheet_index(value, &sheets)?)?
+            }
+            "workbook.protection" | "workbookprotection" => {
+                if value.eq_ignore_ascii_case("none") || !truthy(value) {
+                    xml = remove_child(&xml, "workbookProtection")?;
+                } else {
+                    xml = set_child_attr(
+                        &xml,
+                        "workbookProtection",
+                        "lockStructure",
+                        "1",
+                        Some("bookViews"),
+                    )?;
+                    xml = set_child_attr(
+                        &xml,
+                        "workbookProtection",
+                        "lockWindows",
+                        "1",
+                        Some("bookViews"),
+                    )?;
+                }
+            }
+            "workbook.lockstructure" | "lockstructure" => {
+                xml = set_protection_attr(&xml, "lockStructure", value)?;
+            }
+            "workbook.lockwindows" | "lockwindows" => {
+                xml = set_protection_attr(&xml, "lockWindows", value)?;
+            }
+            "workbook.passwordhash" => {
+                if value.is_empty() || value.eq_ignore_ascii_case("none") {
+                    xml = remove_protection_attr(&xml, "workbookPassword")?;
+                    if !lock_structure_explicit {
+                        xml = remove_protection_attr(&xml, "lockStructure")?;
+                    }
+                } else {
+                    if !value.chars().all(|item| item.is_ascii_hexdigit()) {
+                        return Err(HandlerError::InvalidArgument(
+                            "workbook.passwordHash must be hexadecimal".to_string(),
+                        ));
+                    }
+                    xml = set_child_attr(
+                        &xml,
+                        "workbookProtection",
+                        "workbookPassword",
+                        &value.to_ascii_uppercase(),
+                        Some("bookViews"),
+                    )?;
+                    if !has_protection_lock(&xml)? {
+                        xml = set_child_attr(
+                            &xml,
+                            "workbookProtection",
+                            "lockStructure",
+                            "1",
+                            Some("bookViews"),
+                        )?;
+                    }
+                }
+            }
+            "workbook.password" | "workbookpassword" => {
+                if value.is_empty() || value.eq_ignore_ascii_case("none") {
+                    xml = remove_protection_attr(&xml, "workbookPassword")?;
+                    if !lock_structure_explicit {
+                        xml = remove_protection_attr(&xml, "lockStructure")?;
+                    }
+                } else {
+                    let hash = legacy_password_hash(value);
+                    xml = set_child_attr(
+                        &xml,
+                        "workbookProtection",
+                        "workbookPassword",
+                        &hash,
+                        Some("bookViews"),
+                    )?;
+                    if !has_protection_lock(&xml)? {
+                        xml = set_child_attr(
+                            &xml,
+                            "workbookProtection",
+                            "lockStructure",
+                            "1",
+                            Some("bookViews"),
+                        )?;
+                    }
+                }
             }
             _ => unsupported.push(key.clone()),
         }
@@ -304,4 +409,92 @@ fn upsert_attr(xml: &str, start: usize, attr: &str, value: &str) -> Result<Strin
     let mut updated = xml.to_string();
     updated.replace_range(start..=end, &replacement);
     Ok(updated)
+}
+
+fn set_protection_attr(xml: &str, attr: &str, value: &str) -> Result<String, HandlerError> {
+    if truthy(value) {
+        set_child_attr(xml, "workbookProtection", attr, "1", Some("bookViews"))
+    } else {
+        remove_protection_attr(xml, attr)
+    }
+}
+
+fn remove_protection_attr(xml: &str, attr: &str) -> Result<String, HandlerError> {
+    let Some(start) = xml.find("<workbookProtection") else {
+        return Ok(xml.to_string());
+    };
+    let end = xml[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("unterminated workbookProtection".to_string())
+        })?;
+    let open = &xml[start..=end];
+    let needle = format!(" {attr}=\"");
+    let Some(offset) = open.find(&needle) else {
+        return Ok(xml.to_string());
+    };
+    let value_end = open[offset + needle.len()..]
+        .find('"')
+        .map(|item| offset + needle.len() + item + 1)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("invalid workbookProtection attribute".to_string())
+        })?;
+    let mut updated = xml.to_string();
+    updated.replace_range(start + offset..start + value_end, "");
+    cleanup_protection(&updated)
+}
+
+fn remove_child(xml: &str, tag: &str) -> Result<String, HandlerError> {
+    let Some(start) = xml.find(&format!("<{tag}")) else {
+        return Ok(xml.to_string());
+    };
+    let end = xml[start..]
+        .find('>')
+        .map(|offset| start + offset + 1)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("unterminated {tag}")))?;
+    let mut updated = xml.to_string();
+    updated.replace_range(start..end, "");
+    Ok(updated)
+}
+
+fn cleanup_protection(xml: &str) -> Result<String, HandlerError> {
+    let Some(start) = xml.find("<workbookProtection") else {
+        return Ok(xml.to_string());
+    };
+    let end = xml[start..]
+        .find('>')
+        .map(|offset| start + offset + 1)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("unterminated workbookProtection".to_string())
+        })?;
+    xml[start..end]
+        .contains('=')
+        .then(|| xml.to_string())
+        .ok_or_else(|| HandlerError::OperationFailed("invalid workbookProtection".to_string()))
+        .or_else(|_| remove_child(xml, "workbookProtection"))
+}
+
+fn has_protection_lock(xml: &str) -> Result<bool, HandlerError> {
+    Ok(roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+        .descendants()
+        .find(|node| node.has_tag_name("workbookProtection"))
+        .is_some_and(|node| {
+            truthy(node.attribute("lockStructure").unwrap_or("0"))
+                || truthy(node.attribute("lockWindows").unwrap_or("0"))
+        }))
+}
+
+fn legacy_password_hash(value: &str) -> String {
+    let mut hash: u16 = 0;
+    let units: Vec<u16> = value.encode_utf16().collect();
+    for item in units.iter().rev() {
+        hash = ((hash >> 14) & 1) | ((hash << 1) & 0x7FFF);
+        hash ^= *item;
+    }
+    hash = ((hash >> 14) & 1) | ((hash << 1) & 0x7FFF);
+    hash ^= units.len() as u16;
+    hash ^= 0xCE4B;
+    format!("{hash:04X}")
 }

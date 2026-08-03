@@ -3326,6 +3326,25 @@ fn test_xlsx_workbook_settings_root_lifecycle() {
         .stdout(predicate::str::contains(r#"calcMode="manual""#))
         .stdout(predicate::str::contains(r#"iterateCount="50""#))
         .stdout(predicate::str::contains(r#"refMode="R1C1""#));
+    officecli()
+        .args(["set", &p, "/", "workbook.password=secret"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""workbook.password": "***""#))
+        .stdout(predicate::str::contains("workbook.passwordHash"));
+    officecli()
+        .args(["set", &p, "/", "workbook.password=none"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/workbook.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("workbookProtection").not());
     officecli().args(["validate", &p]).assert().success();
 }
 
