@@ -18,11 +18,15 @@ pub fn add_element(
         "slide" => add_slide(package, parent),
         "shape" | "textbox" | "sp" => add_shape(package, parent, element_type, properties),
         "text" => add_text_to_shape(package, parent, properties),
+        "linebreak" | "br" | "line-break" => {
+            crate::linebreak::add_linebreak(package, parent, _position)
+        }
         "rectangle" | "rect" => add_rectangle(package, parent, properties),
         "ellipse" | "oval" | "circle" => add_ellipse(package, parent, properties),
         "line" | "lineShape" => add_line_shape(package, parent, properties),
         "connector" => add_connector(package, parent, properties),
         "group" | "grpSp" => add_group(package, parent, properties),
+        "diagram" | "flowchart" => add_diagram(package, parent, properties),
         "picture" | "image" | "img" => add_picture(package, parent, properties),
         "video" | "media" => add_video(package, parent, properties),
         "audio" => add_audio(package, parent, properties),
@@ -30,6 +34,9 @@ pub fn add_element(
         "chart" => add_chart_real(package, parent, properties),
         "model3d" | "3dmodel" => add_model3d_real(package, parent, properties),
         "comment" => add_comment(package, parent, properties),
+        "moderncomment" | "modernComment" | "modern-comment" => {
+            add_modern_comment(package, parent, properties)
+        }
         "note" | "notes" => add_note(package, parent, properties),
         "hyperlink" => add_hyperlink(package, parent, properties),
         "transition" => add_transition(package, parent, properties),
@@ -37,7 +44,7 @@ pub fn add_element(
         other => Err(HandlerError::UnsupportedType(format!(
             "PPTX add '{}' not supported. Supported types: slide, shape, textbox, text, \
              rectangle, ellipse, line, connector, group, picture/image, video, audio, \
-             table, chart, model3d, comment, note, hyperlink, transition, animation",
+             table, chart, model3d, comment, modernComment, note, hyperlink, linebreak, transition, animation, diagram",
             other
         ))),
     }
@@ -382,6 +389,29 @@ fn xml_escape_text(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+fn insert_before_close(xml: &str, tag: &str, addition: &str) -> Result<String, HandlerError> {
+    let close = format!("</{tag}>");
+    if let Some(offset) = xml.rfind(&close) {
+        let mut result = xml.to_string();
+        result.insert_str(offset, addition);
+        return Ok(result);
+    }
+    let start = xml
+        .find(&format!("<{tag}"))
+        .ok_or_else(|| HandlerError::OperationFailed(format!("missing <{tag}>")))?;
+    let end = xml[start..]
+        .find("/>")
+        .map(|offset| start + offset)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("missing closing <{tag}>")))?;
+    let mut result = String::with_capacity(xml.len() + addition.len() + close.len());
+    result.push_str(&xml[..end]);
+    result.push('>');
+    result.push_str(addition);
+    result.push_str(&close);
+    result.push_str(&xml[end + 2..]);
+    Ok(result)
+}
+
 // ─── New Element Types ─────────────────────────────────────────────────
 
 /// Extract position/size properties from a props map with sensible defaults.
@@ -680,6 +710,401 @@ fn add_group(
         slide_num,
         slide.shapes.len() + 1
     ))
+}
+
+/// Build an editable `p:grpSp` from Mermaid's common flowchart notation.
+/// This is intentionally offline: no browser, JavaScript runtime or raster
+/// fallback is required for the native diagram path.
+fn add_diagram(
+    package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let source = if let Some(source) = properties
+        .get("mermaid")
+        .or_else(|| properties.get("text"))
+        .or_else(|| properties.get("dsl"))
+    {
+        source.clone()
+    } else if let Some(path) = properties.get("src").or_else(|| properties.get("path")) {
+        std::fs::read_to_string(path).map_err(|e| {
+            HandlerError::InvalidArgument(format!("diagram source file '{}': {}", path, e))
+        })?
+    } else {
+        return Err(HandlerError::InvalidArgument(
+            "diagram requires mermaid/text/dsl or src/path".to_string(),
+        ));
+    };
+    if source
+        .lines()
+        .flat_map(|line| line.split(';'))
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("%%"))
+        .is_some_and(|line| line.eq_ignore_ascii_case("sequenceDiagram"))
+    {
+        return add_sequence_diagram(package, parent, &source);
+    }
+    let left_to_right = source.lines().flat_map(|line| line.split(';')).any(|line| {
+        let words: Vec<_> = line.split_whitespace().collect();
+        words.len() >= 2
+            && matches!(
+                words[0].to_ascii_lowercase().as_str(),
+                "flowchart" | "graph"
+            )
+            && matches!(words[1].to_ascii_lowercase().as_str(), "lr" | "rl")
+    });
+    let mut nodes: Vec<(String, String, &str, &str, &str)> = Vec::new();
+    let mut node_positions: HashMap<String, usize> = HashMap::new();
+    let mut edges = Vec::new();
+    for statement in source.lines().flat_map(|line| line.split(';')) {
+        let statement = statement.trim();
+        let lower = statement.to_ascii_lowercase();
+        if statement.is_empty()
+            || statement.starts_with("%%")
+            || lower.starts_with("flowchart")
+            || lower.starts_with("graph")
+            || lower.starts_with("subgraph")
+            || matches!(lower.as_str(), "end")
+            || lower.starts_with("style")
+            || lower.starts_with("class")
+            || lower.starts_with("click")
+        {
+            continue;
+        }
+        let parts: Vec<_> = statement.split("-->").collect();
+        if parts.len() == 1 {
+            let _ = pptx_diagram_node(parts[0], &mut nodes, &mut node_positions);
+            continue;
+        }
+        let mut previous = pptx_diagram_node(parts[0], &mut nodes, &mut node_positions);
+        for part in &parts[1..] {
+            let next = pptx_diagram_node(part, &mut nodes, &mut node_positions);
+            if let (Some(from), Some(to)) = (&previous, &next) {
+                edges.push((from.clone(), to.clone()));
+            }
+            previous = next;
+        }
+    }
+    if nodes.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "diagram has no nodes; use e.g. 'flowchart TD; A[Start] --> B[End]'".to_string(),
+        ));
+    }
+    let slide_num = parse_slide_num(parent)?;
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
+    let slide_xml = package
+        .read_part_xml(&slide_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let base_id = find_max_id(&slide_xml) + 1;
+    let node_w = 1_440_000i64;
+    let node_h = 576_000i64;
+    let gap = 864_000i64;
+    let margin = 288_000i64;
+    let mut children = String::new();
+    let mut positions: HashMap<String, (i64, i64)> = HashMap::new();
+    for (index, (id, label, geometry, fill, line)) in nodes.iter().enumerate() {
+        let (x, y) = if left_to_right {
+            (margin + index as i64 * (node_w + gap), margin)
+        } else {
+            (margin, margin + index as i64 * (node_h + gap))
+        };
+        positions.insert(id.clone(), (x, y));
+        children.push_str(&pptx_diagram_shape_xml(
+            base_id + index + 1,
+            label,
+            geometry,
+            fill,
+            line,
+            x,
+            y,
+            node_w,
+            node_h,
+        ));
+    }
+    let edge_base = base_id + nodes.len() + 1;
+    for (index, (from, to)) in edges.iter().enumerate() {
+        let (sx, sy) = positions[from];
+        let (tx, ty) = positions[to];
+        let (x, y, w, h) = if left_to_right {
+            (sx + node_w, sy + node_h / 2, tx - sx - node_w, ty - sy)
+        } else {
+            (sx + node_w / 2, sy + node_h, tx - sx, ty - sy - node_h)
+        };
+        children.push_str(&pptx_diagram_edge_xml(
+            edge_base + index,
+            x,
+            y,
+            w.max(12_700),
+            h.max(12_700),
+            false,
+        ));
+    }
+    let width = if left_to_right {
+        margin * 2 + nodes.len() as i64 * node_w + nodes.len().saturating_sub(1) as i64 * gap
+    } else {
+        margin * 2 + node_w
+    };
+    let height = if left_to_right {
+        margin * 2 + node_h
+    } else {
+        margin * 2 + nodes.len() as i64 * node_h + nodes.len().saturating_sub(1) as i64 * gap
+    };
+    let group_count = slide_xml.matches("<p:grpSp>").count() + 1;
+    let group_xml = format!(
+        r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="{base_id}" name="Diagram {group_count}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/><a:chOff x="0" y="0"/><a:chExt cx="{width}" cy="{height}"/></a:xfrm></p:grpSpPr>{children}</p:grpSp>"#
+    );
+    package
+        .write_part_xml(
+            &slide_path,
+            &insert_shape_in_sp_tree(&slide_xml, &group_xml),
+        )
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!("/slide[{}]/group[{}]", slide_num, group_count))
+}
+
+fn add_sequence_diagram(
+    package: &mut OxmlPackage,
+    parent: &str,
+    source: &str,
+) -> Result<String, HandlerError> {
+    let mut participants: Vec<(String, String)> = Vec::new();
+    let mut participant_index: HashMap<String, usize> = HashMap::new();
+    let mut messages: Vec<(String, String, String, bool)> = Vec::new();
+    let mut see = |id: &str, label: Option<&str>| {
+        if let Some(index) = participant_index.get(id).copied() {
+            if let Some(label) = label {
+                participants[index].1 = label.trim().to_string();
+            }
+        } else {
+            participant_index.insert(id.to_string(), participants.len());
+            participants.push((id.to_string(), label.unwrap_or(id).trim().to_string()));
+        }
+    };
+    for statement in source.lines().flat_map(|line| line.split(';')) {
+        let statement = statement.trim();
+        if statement.is_empty()
+            || statement.starts_with("%%")
+            || statement.eq_ignore_ascii_case("sequenceDiagram")
+        {
+            continue;
+        }
+        let lower = statement.to_ascii_lowercase();
+        if lower.starts_with("participant ") || lower.starts_with("actor ") {
+            let declaration = statement
+                .split_once(char::is_whitespace)
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or("");
+            let (id, label) = declaration
+                .split_once(" as ")
+                .unwrap_or((declaration, declaration));
+            if !id.is_empty() {
+                see(id.trim(), Some(label));
+            }
+            continue;
+        }
+        let Some((left, label)) = statement.split_once(':') else {
+            continue;
+        };
+        if let Some((offset, operator)) = ["-->>", "->>", "-->", "->", "--x", "-x"]
+            .iter()
+            .find_map(|operator| left.find(operator).map(|offset| (offset, *operator)))
+        {
+            let from = left[..offset].trim();
+            let to = left[offset + operator.len()..]
+                .trim()
+                .trim_start_matches(['+', '-']);
+            if !from.is_empty() && !to.is_empty() {
+                see(from, None);
+                see(to, None);
+                messages.push((
+                    from.to_string(),
+                    to.to_string(),
+                    label.trim().to_string(),
+                    operator.starts_with("--"),
+                ));
+            }
+        }
+    }
+    if participants.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "sequence diagram has no participants".to_string(),
+        ));
+    }
+    let slide_num = parse_slide_num(parent)?;
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
+    let slide_xml = package
+        .read_part_xml(&slide_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let base_id = find_max_id(&slide_xml) + 1;
+    let margin = 288_000i64;
+    let box_w = 864_000i64;
+    let box_h = 396_000i64;
+    let gap = 504_000i64;
+    let body_top = margin + box_h + 324_000;
+    let row = 414_000i64;
+    let bottom = body_top + messages.len().max(1) as i64 * row + 216_000;
+    let mut children = String::new();
+    let mut centers = HashMap::new();
+    for (index, (id, label)) in participants.iter().enumerate() {
+        let x = margin + index as i64 * (box_w + gap);
+        centers.insert(id.clone(), x + box_w / 2);
+        children.push_str(&pptx_diagram_shape_xml(
+            base_id + index + 1,
+            label,
+            "rect",
+            "DAE8FC",
+            "6C8EBF",
+            x,
+            margin,
+            box_w,
+            box_h,
+        ));
+    }
+    let mut next_id = base_id + participants.len() + 1;
+    for (id, _) in &participants {
+        let x = centers[id];
+        children.push_str(&pptx_diagram_edge_xml(
+            next_id,
+            x,
+            margin + box_h,
+            12_700,
+            bottom - margin - box_h,
+            true,
+        ));
+        next_id += 1;
+    }
+    for (index, (from, to, label, dashed)) in messages.iter().enumerate() {
+        let y = body_top + index as i64 * row;
+        let x1 = centers[from];
+        let x2 = centers[to];
+        children.push_str(&pptx_diagram_edge_xml(
+            next_id,
+            x1,
+            y,
+            (x2 - x1).unsigned_abs().max(12_700) as i64,
+            12_700,
+            *dashed,
+        ));
+        next_id += 1;
+        if !label.is_empty() {
+            children.push_str(&pptx_diagram_shape_xml(
+                next_id,
+                label,
+                "rect",
+                "FFFFFF",
+                "FFFFFF",
+                (x1 + x2) / 2 - 216_000,
+                y - 180_000,
+                432_000,
+                144_000,
+            ));
+            next_id += 1;
+        }
+    }
+    let width = margin * 2
+        + participants.len() as i64 * box_w
+        + participants.len().saturating_sub(1) as i64 * gap;
+    let height = bottom + margin;
+    let group_count = slide_xml.matches("<p:grpSp>").count() + 1;
+    let group_xml = format!(
+        r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="{base_id}" name="Sequence diagram {group_count}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/><a:chOff x="0" y="0"/><a:chExt cx="{width}" cy="{height}"/></a:xfrm></p:grpSpPr>{children}</p:grpSp>"#
+    );
+    package
+        .write_part_xml(
+            &slide_path,
+            &insert_shape_in_sp_tree(&slide_xml, &group_xml),
+        )
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!("/slide[{}]/group[{}]", slide_num, group_count))
+}
+
+fn pptx_diagram_node(
+    token: &str,
+    nodes: &mut Vec<(String, String, &'static str, &'static str, &'static str)>,
+    positions: &mut HashMap<String, usize>,
+) -> Option<String> {
+    let token = token.trim().trim_matches('|').trim();
+    let id_end = token
+        .find(|character: char| !character.is_alphanumeric() && character != '_')
+        .unwrap_or(token.len());
+    let id = token[..id_end].trim();
+    if id.is_empty() {
+        return None;
+    }
+    let rest = token[id_end..].trim();
+    let (label, geometry, fill, line) = if let Some(label) = rest
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+    {
+        (label, "hexagon", "FFF2CC", "D6B656")
+    } else if let Some(label) = rest
+        .strip_prefix("((")
+        .and_then(|value| value.strip_suffix("))"))
+    {
+        (label, "ellipse", "F8CECC", "B85450")
+    } else if let Some(label) = rest
+        .strip_prefix("{")
+        .and_then(|value| value.strip_suffix("}"))
+    {
+        (label, "diamond", "FFF2CC", "D6B656")
+    } else if let Some(label) = rest
+        .strip_prefix("(")
+        .and_then(|value| value.strip_suffix(")"))
+    {
+        (label, "roundRect", "D5E8D4", "82B366")
+    } else if let Some(label) = rest
+        .strip_prefix("[")
+        .and_then(|value| value.strip_suffix("]"))
+    {
+        (label, "rect", "DAE8FC", "6C8EBF")
+    } else {
+        (id, "rect", "DAE8FC", "6C8EBF")
+    };
+    let id = id.to_string();
+    let label = label.trim().trim_matches('"').to_string();
+    if let Some(index) = positions.get(&id).copied() {
+        nodes[index].1 = label;
+    } else {
+        positions.insert(id.clone(), nodes.len());
+        nodes.push((id.clone(), label, geometry, fill, line));
+    }
+    Some(id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pptx_diagram_shape_xml(
+    id: usize,
+    text: &str,
+    geometry: &str,
+    fill: &str,
+    line: &str,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+) -> String {
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Diagram node {id}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="{geometry}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="{fill}"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="{line}"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="1800"/><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        text = xml_escape_text(text)
+    )
+}
+
+fn pptx_diagram_edge_xml(
+    id: usize,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+    dashed: bool,
+) -> String {
+    let dash = if dashed {
+        "<a:prstDash val=\"dash\"/>"
+    } else {
+        ""
+    };
+    format!(
+        r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="{id}" name="Diagram edge {id}"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr val="4D4D4D"/></a:solidFill>{dash}<a:tailEnd type="triangle"/></a:ln></p:spPr></p:cxnSp>"#
+    )
 }
 
 /// Add a picture (image) shape. Requires embedding binary data via a relationship.
@@ -1662,56 +2087,1487 @@ fn minimal_glb_v2() -> Vec<u8> {
     v
 }
 
-/// Add a slide comment (creates comments.xml if needed).
+/// Add a legacy slide comment.  A comment part is only meaningful when it is
+/// connected to both the slide and the presentation-level author list.
 fn add_comment(
     package: &mut OxmlPackage,
     parent: &str,
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let comments_path = format!("ppt/comments/comment{}.xml", slide_num);
-
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
     let author = properties
         .get("author")
-        .or_else(|| properties.get("initials"))
-        .map(|s| s.as_str())
-        .unwrap_or("officecli");
+        .map(String::as_str)
+        .unwrap_or("OfficeCli");
+    let initials = properties
+        .get("initials")
+        .cloned()
+        .unwrap_or_else(|| derive_comment_initials(author));
     let text = properties.get("text").map(|s| s.as_str()).unwrap_or("");
     let escaped = xml_escape_text(text);
+    let date = properties
+        .get("date")
+        .map(String::as_str)
+        .unwrap_or("2024-01-01T00:00:00Z");
+    let x = properties
+        .get("x")
+        .map(|v| unit_to_emu(v))
+        .unwrap_or_else(|| "0".to_string());
+    let y = properties
+        .get("y")
+        .map(|v| unit_to_emu(v))
+        .unwrap_or_else(|| "0".to_string());
 
-    // Try to read existing comments; if not present, create new
-    let existing = package.read_part_xml(&comments_path).unwrap_or_default();
-    let next_id = find_max_id(&existing) + 1;
+    let (author_id, next_index) = ensure_comment_author(package, author, &initials)?;
+    let (comments_path, comments_xml) = resolve_or_create_comments_part(package, &slide_path)?;
+    let comment = format!(
+        r#"<p:cm authorId="{author_id}" dt="{}" idx="{next_index}"><p:pos x="{x}" y="{y}"/><p:text>{escaped}</p:text></p:cm>"#,
+        xml_escape_text(date),
+    );
 
-    let comment_xml = if existing.is_empty() {
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:cmLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:cm author="{author}" dt="2024-01-01T00:00:00Z" idx="{next_id}">
-    <p:text><a:t>{escaped}</a:t></p:text>
-  </p:cm>
-</p:cmLst>"#
-        )
-    } else {
-        // Insert into existing
-        let new_cm = format!(
-            r#"<p:cm author="{author}" dt="2024-01-01T00:00:00Z" idx="{next_id}">
-    <p:text><a:t>{escaped}</a:t></p:text>
-  </p:cm>"#
-        );
-        if let Some(pos) = existing.find("</p:cmLst>") {
-            let mut result = existing.clone();
-            result.insert_str(pos, &new_cm);
-            result
-        } else {
-            existing.clone()
-        }
-    };
+    let updated = insert_before_close(&comments_xml, "p:cmLst", &comment)?;
 
     package
-        .write_part_xml(&comments_path, &comment_xml)
+        .write_part_xml(&comments_path, &updated)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
-    Ok(format!("/slide[{}]/comment[{}]", slide_num, next_id))
+    let count = roxmltree::Document::parse(&updated)
+        .ok()
+        .map(|document| {
+            document
+                .descendants()
+                .filter(|node| node.has_tag_name("cm"))
+                .count()
+        })
+        .unwrap_or(1);
+    Ok(format!("/slide[{}]/comment[{}]", slide_num, count))
+}
+
+const PPT_COMMENTS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const PPT_COMMENT_AUTHORS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/commentAuthors";
+
+fn add_modern_comment(
+    package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let slide = parse_slide_num(parent)?;
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide)?;
+    let author = properties
+        .get("author")
+        .map(String::as_str)
+        .unwrap_or("OfficeCli");
+    let initials = properties
+        .get("initials")
+        .cloned()
+        .unwrap_or_else(|| derive_comment_initials(author));
+    let text = properties.get("text").cloned().unwrap_or_default();
+    let created = modern_comment_created(properties)?;
+    let author_id = ensure_modern_author(package, author, &initials)?;
+    let (part, xml) = ensure_modern_comment_part(package, &slide_path)?;
+    let id = format!("{{{}}}", uuid::Uuid::new_v4().to_string().to_uppercase());
+    if let Some(parent) = properties.get("parent").filter(|value| !value.is_empty()) {
+        let prefix = format!("/slide[{slide}]/modernComment[");
+        let index = parent
+            .strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!("invalid modern comment parent: {parent}"))
+            })?;
+        let document = roxmltree::Document::parse(&xml)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        let top = document
+            .descendants()
+            .filter(|node| node.has_tag_name("cm"))
+            .nth(index - 1)
+            .ok_or_else(|| HandlerError::PathNotFound(parent.clone()))?;
+        let reply = format!(
+            r#"<p188:reply id="{id}" authorId="{author_id}" created="{}">{}</p188:reply>"#,
+            xml_escape_text(&created),
+            modern_text_body_xml(&text),
+        );
+        let replacement =
+            if let Some(list) = top.children().find(|node| node.has_tag_name("replyLst")) {
+                let mut value = xml.clone();
+                value.insert_str(list.range().end - "</p188:replyLst>".len(), &reply);
+                value
+            } else {
+                let mut value = xml.clone();
+                value.insert_str(
+                    top.range().end - "</p188:cm>".len(),
+                    &format!("<p188:replyLst>{reply}</p188:replyLst>"),
+                );
+                value
+            };
+        package
+            .write_part_xml(&part, &replacement)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+        let replies = top
+            .children()
+            .find(|node| node.has_tag_name("replyLst"))
+            .map(|node| {
+                node.children()
+                    .filter(|child| child.has_tag_name("reply"))
+                    .count()
+            })
+            .unwrap_or(0);
+        return Ok(format!("{parent}/reply[{}]", replies + 1));
+    }
+    let status = if properties
+        .get("resolved")
+        .is_some_and(|value| value == "true" || value == "1")
+    {
+        " status=\"resolved\""
+    } else {
+        ""
+    };
+    let comment = format!(
+        r#"<p188:cm id="{id}" authorId="{author_id}" created="{}"{status}><p188:pos x="0" y="0"/>{}</p188:cm>"#,
+        xml_escape_text(&created),
+        modern_text_body_xml(&text),
+    );
+    let updated = insert_before_close(&xml, "p188:cmLst", &comment)?;
+    let index = roxmltree::Document::parse(&updated)
+        .ok()
+        .map(|d| d.descendants().filter(|n| n.has_tag_name("cm")).count())
+        .unwrap_or(1);
+    package
+        .write_part_xml(&part, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!("/slide[{slide}]/modernComment[{index}]"))
+}
+
+fn ensure_modern_author(
+    package: &mut OxmlPackage,
+    name: &str,
+    initials: &str,
+) -> Result<String, HandlerError> {
+    let existing_path = modern_authors_part_path(package)?;
+    let path = existing_path
+        .clone()
+        .unwrap_or_else(|| "ppt/authors.xml".into());
+    ensure_content_type_override(package, &path, "application/vnd.ms-powerpoint.authors+xml")?;
+    if existing_path.is_none() {
+        ensure_ppt_relationship(
+            package,
+            "ppt/_rels/presentation.xml.rels",
+            PPT_MODERN_AUTHORS_REL_TYPE,
+            "authors.xml",
+        )?;
+    }
+    let xml = package.read_part_xml(&path).unwrap_or_else(|_| {
+        "<p188:authorLst xmlns:p188=\"http://schemas.microsoft.com/office/powerpoint/2018/8/main\"/>"
+            .into()
+    });
+    let doc = roxmltree::Document::parse(&xml)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    if let Some(node) = doc.descendants().find(|n| {
+        n.has_tag_name("author")
+            && n.attribute("name") == Some(name)
+            && n.attribute("initials") == Some(initials)
+    }) {
+        return Ok(node.attribute("id").unwrap_or_default().to_string());
+    }
+    let id = format!("{{{}}}", uuid::Uuid::new_v4().to_string().to_uppercase());
+    let item = format!(
+        r#"<p188:author id="{id}" name="{}" initials="{}"/>"#,
+        xml_escape_text(name),
+        xml_escape_text(initials)
+    );
+    let updated = insert_before_close(&xml, "p188:authorLst", &item)?;
+    package
+        .write_part_xml(&path, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(id)
+}
+
+const PPT_MODERN_AUTHORS_REL_TYPE: &str =
+    "http://schemas.microsoft.com/office/2018/10/relationships/authors";
+
+fn modern_authors_part_path(package: &OxmlPackage) -> Result<Option<String>, HandlerError> {
+    let rels = package
+        .part_rels("ppt/presentation.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut rels: Vec<_> = rels
+        .all()
+        .values()
+        .filter(|rel| rel.type_uri == PPT_MODERN_AUTHORS_REL_TYPE)
+        .collect();
+    rels.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(rels
+        .first()
+        .map(|rel| package.resolve_rel_target("ppt/presentation.xml", &rel.target)))
+}
+
+fn ensure_modern_comment_part(
+    package: &mut OxmlPackage,
+    slide: &str,
+) -> Result<(String, String), HandlerError> {
+    const REL: &str = "http://schemas.microsoft.com/office/2018/10/relationships/comment";
+    if let Ok(rels) = package.part_rels(slide) {
+        if let Some(rel) = rels.all().values().find(|rel| rel.type_uri == REL) {
+            let path = package.resolve_rel_target(slide, &rel.target);
+            return Ok((
+                path.clone(),
+                package
+                    .read_part_xml(&path)
+                    .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+            ));
+        }
+    }
+    let path = next_modern_comment_part_path(package);
+    ensure_content_type_override(package, &path, "application/vnd.ms-powerpoint.comments+xml")?;
+    ensure_ppt_relationship(
+        package,
+        &crate::navigation::relationships_part_path(slide),
+        REL,
+        &format!(
+            "../comments/{}",
+            path.rsplit('/').next().unwrap_or("modernComment1.xml")
+        ),
+    )?;
+    Ok((path, "<p188:cmLst xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:p188=\"http://schemas.microsoft.com/office/powerpoint/2018/8/main\"/>".into()))
+}
+
+fn next_modern_comment_part_path(package: &OxmlPackage) -> String {
+    for index in 1.. {
+        let path = format!("ppt/comments/modernComment{index}.xml");
+        if !package.has_part(&path) {
+            return path;
+        }
+    }
+    unreachable!("unbounded modern comment part index")
+}
+
+fn modern_comment_created(properties: &HashMap<String, String>) -> Result<String, HandlerError> {
+    use time::format_description::well_known::Rfc3339;
+    let created = match properties.get("created") {
+        Some(value) => time::OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
+            HandlerError::InvalidArgument(format!("invalid created '{value}' (expected ISO 8601)"))
+        })?,
+        None => time::OffsetDateTime::now_utc(),
+    };
+    created
+        .to_offset(time::UtcOffset::UTC)
+        .format(&Rfc3339)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))
+}
+
+fn modern_text_body_xml(text: &str) -> String {
+    if text.is_empty() {
+        return "<p188:txBody><a:bodyPr/><a:p><a:endParaRPr lang=\"en-US\"/></a:p></p188:txBody>"
+            .to_string();
+    }
+    format!(
+        "<p188:txBody><a:bodyPr/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>{}</a:t></a:r></a:p></p188:txBody>",
+        xml_escape_text(text)
+    )
+}
+
+const PPT_MODERN_COMMENT_REL_TYPE: &str =
+    "http://schemas.microsoft.com/office/2018/10/relationships/comment";
+
+#[derive(Debug, Clone, Copy)]
+enum ModernCommentPath {
+    Top {
+        slide: usize,
+        comment: usize,
+    },
+    Reply {
+        slide: usize,
+        comment: usize,
+        reply: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ModernCommentRecord {
+    part_path: String,
+    xml: String,
+    range: std::ops::Range<usize>,
+    parent_reply_list_range: Option<std::ops::Range<usize>>,
+    reply_count: usize,
+    author_id: String,
+    created: String,
+    resolved: bool,
+}
+
+fn parse_modern_comment_path(path: &str) -> Result<ModernCommentPath, HandlerError> {
+    let segments = crate::navigation::parse_path(path);
+    let valid_index = |index: Option<usize>| index.filter(|index| *index > 0);
+    match segments.as_slice() {
+        [slide, comment]
+            if slide.name.eq_ignore_ascii_case("slide")
+                && comment.name.eq_ignore_ascii_case("moderncomment") =>
+        {
+            match (valid_index(slide.index), valid_index(comment.index)) {
+                (Some(slide), Some(comment)) => Ok(ModernCommentPath::Top { slide, comment }),
+                _ => Err(HandlerError::InvalidPath(format!(
+                    "modern comment paths are 1-based: {path}"
+                ))),
+            }
+        }
+        [slide, comment, reply]
+            if slide.name.eq_ignore_ascii_case("slide")
+                && comment.name.eq_ignore_ascii_case("moderncomment")
+                && reply.name.eq_ignore_ascii_case("reply") =>
+        {
+            match (
+                valid_index(slide.index),
+                valid_index(comment.index),
+                valid_index(reply.index),
+            ) {
+                (Some(slide), Some(comment), Some(reply)) => Ok(ModernCommentPath::Reply {
+                    slide,
+                    comment,
+                    reply,
+                }),
+                _ => Err(HandlerError::InvalidPath(format!(
+                    "modern comment paths are 1-based: {path}"
+                ))),
+            }
+        }
+        _ => Err(HandlerError::InvalidPath(format!(
+            "expected /slide[N]/modernComment[M][/reply[R]], got: {path}"
+        ))),
+    }
+}
+
+fn modern_comment_parts_for_slide(
+    package: &OxmlPackage,
+    slide_index: usize,
+) -> Result<Vec<(String, String)>, HandlerError> {
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_index)?;
+    let rels_path = crate::navigation::relationships_part_path(&slide_path);
+    let xml = match package.read_part_xml(&rels_path) {
+        Ok(xml) => xml,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let document = roxmltree::Document::parse(&xml)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name("Relationship")
+                && node.attribute("Type") == Some(PPT_MODERN_COMMENT_REL_TYPE)
+        })
+        .filter_map(|node| node.attribute("Target"))
+        .map(|target| {
+            let path = package.resolve_rel_target(&slide_path, target);
+            let xml = package
+                .read_part_xml(&path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            Ok((path, xml))
+        })
+        .collect()
+}
+
+fn read_modern_text_body(node: roxmltree::Node<'_, '_>) -> String {
+    let Some(body) = node.children().find(|child| child.has_tag_name("txBody")) else {
+        return String::new();
+    };
+    body.children()
+        .filter(|child| child.has_tag_name("p"))
+        .map(|paragraph| {
+            paragraph
+                .descendants()
+                .filter(|child| child.has_tag_name("t"))
+                .filter_map(|child| child.text())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn modern_authors(
+    package: &OxmlPackage,
+) -> Result<std::collections::HashMap<String, (String, String)>, HandlerError> {
+    let Some(path) = modern_authors_part_path(package)? else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let xml = match package.read_part_xml(&path) {
+        Ok(xml) => xml,
+        Err(_) => return Ok(std::collections::HashMap::new()),
+    };
+    let document = roxmltree::Document::parse(&xml)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    Ok(document
+        .descendants()
+        .filter(|node| node.has_tag_name("author"))
+        .filter_map(|node| {
+            Some((
+                node.attribute("id")?.to_string(),
+                (
+                    node.attribute("name").unwrap_or_default().to_string(),
+                    node.attribute("initials").unwrap_or_default().to_string(),
+                ),
+            ))
+        })
+        .collect())
+}
+
+fn modern_comment_node(
+    slide_index: usize,
+    comment_index: usize,
+    comment: roxmltree::Node<'_, '_>,
+    authors: &std::collections::HashMap<String, (String, String)>,
+) -> handler_common::DocumentNode {
+    let text = read_modern_text_body(comment);
+    let mut node = handler_common::DocumentNode::new(
+        &format!("/slide[{slide_index}]/modernComment[{comment_index}]"),
+        "modernComment",
+    )
+    .with_text(&text)
+    .with_format("text", serde_json::Value::String(text));
+    let author_id = comment.attribute("authorId").unwrap_or_default();
+    if let Some((author, initials)) = authors.get(author_id) {
+        node.format.insert(
+            "author".to_string(),
+            Some(serde_json::Value::String(author.clone())),
+        );
+        node.format.insert(
+            "initials".to_string(),
+            Some(serde_json::Value::String(initials.clone())),
+        );
+    }
+    if let Some(created) = comment.attribute("created") {
+        node.format.insert(
+            "created".to_string(),
+            Some(serde_json::Value::String(created.to_string())),
+        );
+    }
+    node.format.insert(
+        "resolved".to_string(),
+        Some(serde_json::Value::Bool(
+            comment.attribute("status") == Some("resolved"),
+        )),
+    );
+    node.format.insert("parent".to_string(), None);
+    if let Some(id) = comment.attribute("id") {
+        node.format.insert(
+            "id".to_string(),
+            Some(serde_json::Value::String(id.to_string())),
+        );
+    }
+    let mut children = Vec::new();
+    if let Some(replies) = comment
+        .children()
+        .find(|child| child.has_tag_name("replyLst"))
+    {
+        for (offset, reply) in replies
+            .children()
+            .filter(|child| child.has_tag_name("reply"))
+            .enumerate()
+        {
+            let reply_index = offset + 1;
+            let reply_text = read_modern_text_body(reply);
+            let mut reply_node = handler_common::DocumentNode::new(
+                &format!(
+                    "/slide[{slide_index}]/modernComment[{comment_index}]/reply[{reply_index}]"
+                ),
+                "modernComment",
+            )
+            .with_text(&reply_text)
+            .with_format("text", serde_json::Value::String(reply_text));
+            if let Some((author, initials)) =
+                authors.get(reply.attribute("authorId").unwrap_or_default())
+            {
+                reply_node.format.insert(
+                    "author".to_string(),
+                    Some(serde_json::Value::String(author.clone())),
+                );
+                reply_node.format.insert(
+                    "initials".to_string(),
+                    Some(serde_json::Value::String(initials.clone())),
+                );
+            }
+            if let Some(created) = reply.attribute("created") {
+                reply_node.format.insert(
+                    "created".to_string(),
+                    Some(serde_json::Value::String(created.to_string())),
+                );
+            }
+            reply_node
+                .format
+                .insert("resolved".to_string(), Some(serde_json::Value::Bool(false)));
+            reply_node.format.insert(
+                "parent".to_string(),
+                Some(serde_json::Value::String(format!(
+                    "/slide[{slide_index}]/modernComment[{comment_index}]"
+                ))),
+            );
+            if let Some(id) = reply.attribute("id") {
+                reply_node.format.insert(
+                    "id".to_string(),
+                    Some(serde_json::Value::String(id.to_string())),
+                );
+            }
+            children.push(reply_node);
+        }
+    }
+    node.child_count = children.len();
+    node.children = children;
+    node
+}
+
+pub(crate) fn list_modern_comment_nodes(
+    package: &OxmlPackage,
+    slide_filter: Option<usize>,
+) -> Result<Vec<handler_common::DocumentNode>, HandlerError> {
+    let presentation = crate::navigation::build_presentation(package)?;
+    let authors = modern_authors(package)?;
+    let mut nodes = Vec::new();
+    for slide in presentation.slides {
+        if slide_filter.is_some_and(|filter| filter != slide.index) {
+            continue;
+        }
+        let mut index = 0;
+        for (_, xml) in modern_comment_parts_for_slide(package, slide.index)? {
+            let document = roxmltree::Document::parse(&xml)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            for comment in document
+                .descendants()
+                .filter(|node| node.has_tag_name("cm"))
+            {
+                index += 1;
+                nodes.push(modern_comment_node(slide.index, index, comment, &authors));
+            }
+        }
+    }
+    Ok(nodes)
+}
+
+pub(crate) fn get_modern_comment_node(
+    package: &OxmlPackage,
+    path: &str,
+) -> Result<handler_common::DocumentNode, HandlerError> {
+    let target = parse_modern_comment_path(path)?;
+    let (slide, comment, reply) = match target {
+        ModernCommentPath::Top { slide, comment } => (slide, comment, None),
+        ModernCommentPath::Reply {
+            slide,
+            comment,
+            reply,
+        } => (slide, comment, Some(reply)),
+    };
+    let node = list_modern_comment_nodes(package, Some(slide)).and_then(|nodes| {
+        nodes
+            .into_iter()
+            .nth(comment - 1)
+            .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))
+    })?;
+    match reply {
+        None => Ok(node),
+        Some(reply) => node
+            .children
+            .into_iter()
+            .nth(reply - 1)
+            .ok_or_else(|| HandlerError::PathNotFound(path.to_string())),
+    }
+}
+
+fn modern_comment_record(
+    package: &OxmlPackage,
+    target: ModernCommentPath,
+) -> Result<ModernCommentRecord, HandlerError> {
+    let (slide, target_comment, target_reply) = match target {
+        ModernCommentPath::Top { slide, comment } => (slide, comment, None),
+        ModernCommentPath::Reply {
+            slide,
+            comment,
+            reply,
+        } => (slide, comment, Some(reply)),
+    };
+    let mut comment_index = 0;
+    for (part_path, xml) in modern_comment_parts_for_slide(package, slide)? {
+        let document = roxmltree::Document::parse(&xml)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        for comment in document
+            .descendants()
+            .filter(|node| node.has_tag_name("cm"))
+        {
+            comment_index += 1;
+            if comment_index != target_comment {
+                continue;
+            }
+            let make_record = |node: roxmltree::Node<'_, '_>,
+                               parent_reply_list_range: Option<std::ops::Range<usize>>,
+                               reply_count: usize,
+                               resolved: bool| {
+                ModernCommentRecord {
+                    part_path: part_path.clone(),
+                    xml: xml.clone(),
+                    range: node.range(),
+                    parent_reply_list_range,
+                    reply_count,
+                    author_id: node.attribute("authorId").unwrap_or_default().to_string(),
+                    created: node.attribute("created").unwrap_or_default().to_string(),
+                    resolved,
+                }
+            };
+            if let Some(reply_index) = target_reply {
+                let reply_list = comment
+                    .children()
+                    .find(|node| node.has_tag_name("replyLst"))
+                    .ok_or_else(|| {
+                        HandlerError::PathNotFound(format!(
+                            "/slide[{slide}]/modernComment[{target_comment}]/reply[{reply_index}]"
+                        ))
+                    })?;
+                let replies: Vec<_> = reply_list
+                    .children()
+                    .filter(|node| node.has_tag_name("reply"))
+                    .collect();
+                let reply = replies.get(reply_index - 1).copied().ok_or_else(|| {
+                    HandlerError::PathNotFound(format!(
+                        "/slide[{slide}]/modernComment[{target_comment}]/reply[{reply_index}]"
+                    ))
+                })?;
+                return Ok(make_record(
+                    reply,
+                    Some(reply_list.range()),
+                    replies.len(),
+                    false,
+                ));
+            }
+            return Ok(make_record(
+                comment,
+                None,
+                0,
+                comment.attribute("status") == Some("resolved"),
+            ));
+        }
+    }
+    Err(HandlerError::PathNotFound(match target {
+        ModernCommentPath::Top { slide, comment } => {
+            format!("/slide[{slide}]/modernComment[{comment}]")
+        }
+        ModernCommentPath::Reply {
+            slide,
+            comment,
+            reply,
+        } => format!("/slide[{slide}]/modernComment[{comment}]/reply[{reply}]"),
+    }))
+}
+
+fn set_xml_attribute(opening: &mut String, name: &str, value: Option<&str>) {
+    let needle = format!("{name}=");
+    if let Some(start) = opening.find(&needle) {
+        let quote_start = start + needle.len();
+        let quote = opening
+            .as_bytes()
+            .get(quote_start)
+            .copied()
+            .unwrap_or(b'\"');
+        let value_start = quote_start + 1;
+        if let Some(end) = opening[value_start..]
+            .find(quote as char)
+            .map(|offset| value_start + offset + 1)
+        {
+            match value {
+                Some(value) => opening.replace_range(value_start..end - 1, &xml_escape_text(value)),
+                None => {
+                    let remove_start = opening[..start].rfind(char::is_whitespace).unwrap_or(start);
+                    opening.replace_range(remove_start..end, "");
+                }
+            }
+        }
+    } else if let Some(value) = value {
+        let end = opening
+            .strip_suffix(">")
+            .map(|value| value.len())
+            .unwrap_or(opening.len());
+        let insert_at = opening[..end]
+            .strip_suffix('/')
+            .map(|value| value.len())
+            .unwrap_or(end);
+        opening.insert_str(
+            insert_at,
+            &format!(" {name}=\"{}\"", xml_escape_text(value)),
+        );
+    }
+}
+
+fn update_modern_element_attributes(
+    xml: &mut String,
+    start: usize,
+    attributes: &[(&str, Option<&str>)],
+) -> Result<(), HandlerError> {
+    let end = xml[start..]
+        .find('>')
+        .map(|offset| start + offset + 1)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("unterminated modern comment element".to_string())
+        })?;
+    let mut opening = xml[start..end].to_string();
+    for (name, value) in attributes {
+        set_xml_attribute(&mut opening, name, *value);
+    }
+    xml.replace_range(start..end, &opening);
+    Ok(())
+}
+
+fn replace_modern_text_body(
+    xml: &mut String,
+    element_start: usize,
+    text: &str,
+) -> Result<(), HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let element = document
+        .descendants()
+        .find(|node| node.range().start == element_start)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("modern comment element disappeared".to_string())
+        })?;
+    let replacement = modern_text_body_xml(text);
+    if let Some(body) = element.children().find(|node| node.has_tag_name("txBody")) {
+        xml.replace_range(body.range(), &replacement);
+        return Ok(());
+    }
+    let owned = xml[element.range()].to_string();
+    let closing = owned.rfind("</").ok_or_else(|| {
+        HandlerError::OperationFailed("modern comment element missing closing tag".to_string())
+    })?;
+    xml.insert_str(element.range().start + closing, &replacement);
+    Ok(())
+}
+
+fn modern_author_reference_count(package: &OxmlPackage, author_id: &str) -> usize {
+    let paths: Vec<String> = package
+        .list_parts()
+        .into_iter()
+        .filter(|path| path.starts_with("ppt/comments/"))
+        .cloned()
+        .collect();
+    paths
+        .into_iter()
+        .map(|path| {
+            let Ok(xml) = package.read_part_xml(&path) else {
+                return 0;
+            };
+            let Ok(document) = roxmltree::Document::parse(&xml) else {
+                return 0;
+            };
+            document
+                .descendants()
+                .filter(|node| {
+                    (node.has_tag_name("cm") || node.has_tag_name("reply"))
+                        && node.attribute("authorId") == Some(author_id)
+                })
+                .count()
+        })
+        .sum()
+}
+
+fn update_modern_author(
+    package: &mut OxmlPackage,
+    author_id: &str,
+    author: &str,
+    initials: &str,
+) -> Result<bool, HandlerError> {
+    let Some(path) = modern_authors_part_path(package)? else {
+        return Ok(false);
+    };
+    let xml = match package.read_part_xml(&path) {
+        Ok(xml) => xml,
+        Err(_) => return Ok(false),
+    };
+    let range = {
+        let document = roxmltree::Document::parse(&xml)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let Some(existing) = document
+            .descendants()
+            .find(|node| node.has_tag_name("author") && node.attribute("id") == Some(author_id))
+        else {
+            return Ok(false);
+        };
+        existing.range()
+    };
+    let replacement = format!(
+        r#"<p188:author id="{}" name="{}" initials="{}"/>"#,
+        xml_escape_text(author_id),
+        xml_escape_text(author),
+        xml_escape_text(initials),
+    );
+    let mut updated = xml;
+    updated.replace_range(range, &replacement);
+    package
+        .write_part_xml(&path, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(true)
+}
+
+pub(crate) fn set_modern_comment(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let target = parse_modern_comment_path(path)?;
+    let record = modern_comment_record(package, target)?;
+    let authors = modern_authors(package)?;
+    let (old_author, old_initials) = authors
+        .get(&record.author_id)
+        .cloned()
+        .unwrap_or_else(|| ("OfficeCli".to_string(), "OC".to_string()));
+    let author = properties
+        .get("author")
+        .cloned()
+        .unwrap_or_else(|| old_author.clone());
+    let initials = properties.get("initials").cloned().unwrap_or_else(|| {
+        if properties.contains_key("author") {
+            derive_comment_initials(&author)
+        } else {
+            old_initials.clone()
+        }
+    });
+    let mut author_id = record.author_id.clone();
+    if author != old_author || initials != old_initials {
+        if !author_id.is_empty()
+            && modern_author_reference_count(package, &author_id) <= 1
+            && update_modern_author(package, &author_id, &author, &initials)?
+        {
+            // C# keeps an exclusive author id stable when changing its display fields.
+        } else {
+            author_id = ensure_modern_author(package, &author, &initials)?;
+        }
+    }
+    let created = match properties.get("created") {
+        Some(_) => modern_comment_created(properties)?,
+        None => record.created.clone(),
+    };
+    let resolved = match target {
+        ModernCommentPath::Top { .. } => Some(
+            properties
+                .get("resolved")
+                .map(|value| value == "true" || value == "1")
+                .unwrap_or(record.resolved),
+        ),
+        ModernCommentPath::Reply { .. } => None,
+    };
+    let mut updated = record.xml;
+    let status = resolved.and_then(|value| value.then_some("resolved"));
+    update_modern_element_attributes(
+        &mut updated,
+        record.range.start,
+        &[
+            ("authorId", Some(author_id.as_str())),
+            ("created", Some(created.as_str())),
+            ("status", status),
+        ],
+    )?;
+    if let Some(text) = properties.get("text") {
+        replace_modern_text_body(&mut updated, record.range.start, text)?;
+    }
+    package
+        .write_part_xml(&record.part_path, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(properties
+        .keys()
+        .filter(|key| match key.as_str() {
+            "text" | "author" | "initials" | "created" => false,
+            "resolved" => matches!(target, ModernCommentPath::Reply { .. }),
+            _ => true,
+        })
+        .cloned()
+        .collect())
+}
+
+fn remove_modern_comment_relationship(
+    package: &mut OxmlPackage,
+    slide_path: &str,
+    part_path: &str,
+) -> Result<(), HandlerError> {
+    let rels_path = crate::navigation::relationships_part_path(slide_path);
+    let xml = package
+        .read_part_xml(&rels_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let range = {
+        let document = roxmltree::Document::parse(&xml)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let Some(rel) = document.descendants().find(|rel| {
+            rel.has_tag_name("Relationship")
+                && rel.attribute("Type") == Some(PPT_MODERN_COMMENT_REL_TYPE)
+                && package
+                    .resolve_rel_target(slide_path, rel.attribute("Target").unwrap_or_default())
+                    == part_path
+        }) else {
+            return Ok(());
+        };
+        rel.range()
+    };
+    let mut updated = xml;
+    updated.replace_range(range, "");
+    package
+        .write_part_xml(&rels_path, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
+}
+
+fn remove_content_type_override(
+    package: &mut OxmlPackage,
+    part_path: &str,
+) -> Result<(), HandlerError> {
+    let xml = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let part_name = format!("/{}", part_path.trim_start_matches('/'));
+    let range = {
+        let document = roxmltree::Document::parse(&xml)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let Some(override_node) = document.descendants().find(|node| {
+            node.has_tag_name("Override") && node.attribute("PartName") == Some(part_name.as_str())
+        }) else {
+            return Ok(());
+        };
+        override_node.range()
+    };
+    let mut updated = xml;
+    updated.replace_range(range, "");
+    package
+        .write_part_xml("[Content_Types].xml", &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
+}
+
+pub(crate) fn remove_modern_comment(
+    package: &mut OxmlPackage,
+    path: &str,
+) -> Result<Option<String>, HandlerError> {
+    let target = parse_modern_comment_path(path)?;
+    let record = modern_comment_record(package, target)?;
+    let mut updated = record.xml.clone();
+    if matches!(target, ModernCommentPath::Reply { .. }) && record.reply_count == 1 {
+        updated.replace_range(
+            record
+                .parent_reply_list_range
+                .expect("reply record has a parent list"),
+            "",
+        );
+    } else {
+        updated.replace_range(record.range, "");
+    }
+    let remaining = roxmltree::Document::parse(&updated)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+        .descendants()
+        .any(|node| node.has_tag_name("cm"));
+    if remaining {
+        package
+            .write_part_xml(&record.part_path, &updated)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    } else {
+        let slide = match target {
+            ModernCommentPath::Top { slide, .. } | ModernCommentPath::Reply { slide, .. } => slide,
+        };
+        let slide_path = crate::navigation::resolve_slide_part_path(package, slide)?;
+        remove_modern_comment_relationship(package, &slide_path, &record.part_path)?;
+        package
+            .remove_part(&record.part_path)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        remove_content_type_override(package, &record.part_path)?;
+    }
+    Ok(Some(format!("removed modern comment at {path}")))
+}
+
+fn ensure_comment_author(
+    package: &mut OxmlPackage,
+    author: &str,
+    initials: &str,
+) -> Result<(usize, usize), HandlerError> {
+    const AUTHORS_PATH: &str = "ppt/commentAuthors.xml";
+    ensure_content_type_override(
+        package,
+        AUTHORS_PATH,
+        "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml",
+    )?;
+    let presentation_rels = "ppt/_rels/presentation.xml.rels";
+    ensure_ppt_relationship(
+        package,
+        presentation_rels,
+        PPT_COMMENT_AUTHORS_REL_TYPE,
+        "commentAuthors.xml",
+    )?;
+    let xml = package.read_part_xml(AUTHORS_PATH).unwrap_or_else(|_| {
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:cmAuthorLst xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"/>".to_string()
+    });
+    let document = roxmltree::Document::parse(&xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid comment authors part: {error}"))
+    })?;
+    let authors: Vec<_> = document
+        .descendants()
+        .filter(|node| node.has_tag_name("cmAuthor"))
+        .collect();
+    if let Some(existing) = authors.iter().find(|node| {
+        node.attribute("name") == Some(author) && node.attribute("initials") == Some(initials)
+    }) {
+        let id = existing
+            .attribute("id")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let last_index = existing
+            .attribute("lastIdx")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+            + 1;
+        let range = existing.range();
+        let original = &xml[range.clone()];
+        let replacement = if let Some(old) = existing.attribute("lastIdx") {
+            original.replacen(
+                &format!("lastIdx=\"{old}\""),
+                &format!("lastIdx=\"{last_index}\""),
+                1,
+            )
+        } else {
+            original.replacen("/>", &format!(" lastIdx=\"{last_index}\"/>"), 1)
+        };
+        let mut updated = xml;
+        updated.replace_range(range, &replacement);
+        package
+            .write_part_xml(AUTHORS_PATH, &updated)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+        return Ok((id, last_index));
+    }
+    let id = authors
+        .iter()
+        .filter_map(|node| {
+            node.attribute("id")
+                .and_then(|value| value.parse::<usize>().ok())
+        })
+        .max()
+        .map_or(0, |max| max + 1);
+    let new_author = format!(
+        r#"<p:cmAuthor id="{id}" name="{}" initials="{}" lastIdx="1" clrIdx="0"/>"#,
+        xml_escape_text(author),
+        xml_escape_text(initials)
+    );
+    let updated = insert_before_close(&xml, "p:cmAuthorLst", &new_author)?;
+    package
+        .write_part_xml(AUTHORS_PATH, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok((id, 1))
+}
+
+fn resolve_or_create_comments_part(
+    package: &mut OxmlPackage,
+    slide_path: &str,
+) -> Result<(String, String), HandlerError> {
+    let slide_rels = crate::navigation::relationships_part_path(slide_path);
+    if let Ok(rels) = package.part_rels(slide_path) {
+        if let Some(rel) = rels
+            .all()
+            .values()
+            .find(|rel| rel.type_uri == PPT_COMMENTS_REL_TYPE)
+        {
+            let path = package.resolve_rel_target(slide_path, &rel.target);
+            let xml = package
+                .read_part_xml(&path)
+                .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+            return Ok((path, xml));
+        }
+    }
+    let mut index = 1;
+    let comments_path = loop {
+        let path = format!("ppt/comments/comment{index}.xml");
+        if !package.has_part(&path) {
+            break path;
+        }
+        index += 1;
+    };
+    ensure_content_type_override(
+        package,
+        &comments_path,
+        "application/vnd.openxmlformats-officedocument.presentationml.comments+xml",
+    )?;
+    let target = format!(
+        "../comments/{}",
+        comments_path.rsplit('/').next().unwrap_or_default()
+    );
+    ensure_ppt_relationship(package, &slide_rels, PPT_COMMENTS_REL_TYPE, &target)?;
+    Ok((comments_path, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:cmLst xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"/>".to_string()))
+}
+
+fn ensure_ppt_relationship(
+    package: &mut OxmlPackage,
+    rels_path: &str,
+    relationship_type: &str,
+    target: &str,
+) -> Result<(), HandlerError> {
+    let xml = package.read_part_xml(rels_path).unwrap_or_else(|_| {
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"/>".to_string()
+    });
+    if xml.contains(&format!("Type=\"{relationship_type}\"")) {
+        return Ok(());
+    }
+    let id = next_ppt_rel_id(package, rels_path);
+    let relationship =
+        format!(r#"<Relationship Id="{id}" Type="{relationship_type}" Target="{target}"/>"#);
+    inject_ppt_relationship(package, rels_path, &relationship)
+}
+
+fn ensure_content_type_override(
+    package: &mut OxmlPackage,
+    part_path: &str,
+    content_type: &str,
+) -> Result<(), HandlerError> {
+    let xml = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let part_name = format!("/{}", part_path.trim_start_matches('/'));
+    if xml.contains(&format!("PartName=\"{part_name}\"")) {
+        return Ok(());
+    }
+    let close = xml.find("</Types>").ok_or_else(|| {
+        HandlerError::OperationFailed("invalid [Content_Types].xml: missing </Types>".to_string())
+    })?;
+    let mut updated = xml;
+    updated.insert_str(
+        close,
+        &format!(r#"<Override PartName="{part_name}" ContentType="{content_type}"/>"#),
+    );
+    package
+        .write_part_xml("[Content_Types].xml", &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))
+}
+
+fn derive_comment_initials(name: &str) -> String {
+    let initials: String = name
+        .split_whitespace()
+        .filter_map(|word| word.chars().find(|ch| ch.is_alphanumeric()))
+        .take(3)
+        .flat_map(char::to_uppercase)
+        .collect();
+    if initials.is_empty() {
+        "?".to_string()
+    } else {
+        initials
+    }
+}
+
+/// Resolve a legacy slide comment into the common document-node representation.
+pub(crate) fn get_comment_node(
+    package: &OxmlPackage,
+    path: &str,
+) -> Result<handler_common::DocumentNode, HandlerError> {
+    let (slide_index, comment_index) = parse_comment_path(path)?;
+    let comments = list_slide_comments(package, slide_index)?;
+    comments
+        .into_iter()
+        .nth(comment_index - 1)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))
+}
+
+pub(crate) fn list_comment_nodes(
+    package: &OxmlPackage,
+    slide_filter: Option<usize>,
+) -> Result<Vec<handler_common::DocumentNode>, HandlerError> {
+    let presentation = crate::navigation::build_presentation(package)?;
+    let mut nodes = Vec::new();
+    for slide in presentation.slides {
+        if slide_filter.is_some_and(|index| index != slide.index) {
+            continue;
+        }
+        nodes.extend(list_slide_comments(package, slide.index)?);
+    }
+    Ok(nodes)
+}
+
+fn list_slide_comments(
+    package: &OxmlPackage,
+    slide_index: usize,
+) -> Result<Vec<handler_common::DocumentNode>, HandlerError> {
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_index)?;
+    let rels = package
+        .part_rels(&slide_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let Some(rel) = rels
+        .all()
+        .values()
+        .find(|rel| rel.type_uri == PPT_COMMENTS_REL_TYPE)
+    else {
+        return Ok(Vec::new());
+    };
+    let comments_path = package.resolve_rel_target(&slide_path, &rel.target);
+    let comments_xml = package
+        .read_part_xml(&comments_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let document = roxmltree::Document::parse(&comments_xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid slide comments part: {error}"))
+    })?;
+    let authors = comment_authors(package)?;
+    Ok(document
+        .descendants()
+        .filter(|node| node.has_tag_name("cm"))
+        .enumerate()
+        .map(|(offset, comment)| {
+            let index = offset + 1;
+            let text = comment
+                .children()
+                .find(|node| node.has_tag_name("text"))
+                .and_then(|node| node.text())
+                .unwrap_or_default()
+                .to_string();
+            let mut node = handler_common::DocumentNode::new(
+                &format!("/slide[{slide_index}]/comment[{index}]"),
+                "comment",
+            )
+            .with_text(&text)
+            .with_format("text", serde_json::Value::String(text));
+            if let Some(author_id) = comment.attribute("authorId") {
+                if let Some((name, initials)) = authors.get(author_id) {
+                    node.format.insert(
+                        "author".to_string(),
+                        Some(serde_json::Value::String(name.clone())),
+                    );
+                    node.format.insert(
+                        "initials".to_string(),
+                        Some(serde_json::Value::String(initials.clone())),
+                    );
+                }
+            }
+            for attribute in ["idx", "dt"] {
+                if let Some(value) = comment.attribute(attribute) {
+                    let key = if attribute == "idx" { "index" } else { "date" };
+                    let value = value
+                        .parse::<u64>()
+                        .map(serde_json::Value::from)
+                        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+                    node.format.insert(key.to_string(), Some(value));
+                }
+            }
+            if let Some(position) = comment.children().find(|node| node.has_tag_name("pos")) {
+                for axis in ["x", "y"] {
+                    if let Some(value) = position.attribute(axis) {
+                        node.format.insert(
+                            axis.to_string(),
+                            Some(serde_json::Value::String(format_emu(value))),
+                        );
+                    }
+                }
+            }
+            node
+        })
+        .collect())
+}
+
+fn comment_authors(
+    package: &OxmlPackage,
+) -> Result<std::collections::HashMap<String, (String, String)>, HandlerError> {
+    let xml = match package.read_part_xml("ppt/commentAuthors.xml") {
+        Ok(xml) => xml,
+        Err(_) => return Ok(std::collections::HashMap::new()),
+    };
+    let document = roxmltree::Document::parse(&xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid comment authors part: {error}"))
+    })?;
+    Ok(document
+        .descendants()
+        .filter(|node| node.has_tag_name("cmAuthor"))
+        .filter_map(|node| {
+            Some((
+                node.attribute("id")?.to_string(),
+                (
+                    node.attribute("name").unwrap_or_default().to_string(),
+                    node.attribute("initials").unwrap_or_default().to_string(),
+                ),
+            ))
+        })
+        .collect())
+}
+
+fn parse_comment_path(path: &str) -> Result<(usize, usize), HandlerError> {
+    let segments: Vec<_> = crate::navigation::parse_path(path);
+    if segments.len() != 2 || segments[0].name != "slide" || segments[1].name != "comment" {
+        return Err(HandlerError::InvalidPath(format!(
+            "expected /slide[N]/comment[M], got: {path}"
+        )));
+    }
+    let slide = segments[0]
+        .index
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let comment = segments[1]
+        .index
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    if slide == 0 || comment == 0 {
+        return Err(HandlerError::InvalidPath(
+            "comment paths are 1-based".to_string(),
+        ));
+    }
+    Ok((slide, comment))
+}
+
+fn format_emu(value: &str) -> String {
+    value
+        .parse::<f64>()
+        .map(|emu| format!("{}cm", emu / 360_000.0))
+        .unwrap_or_else(|_| value.to_string())
+}
+
+pub(crate) fn set_comment(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let (slide_index, comment_index) = parse_comment_path(path)?;
+    let (comments_path, xml, range, author_id, index, old_date, old_x, old_y, old_text) =
+        comment_record(package, slide_index, comment_index)?;
+    let authors = comment_authors(package)?;
+    let (old_author, old_initials) = authors
+        .get(&author_id.to_string())
+        .cloned()
+        .unwrap_or_else(|| ("OfficeCli".to_string(), "OC".to_string()));
+    let author = properties
+        .get("author")
+        .cloned()
+        .unwrap_or_else(|| old_author.clone());
+    let initials = properties.get("initials").cloned().unwrap_or_else(|| {
+        if properties.contains_key("author") {
+            derive_comment_initials(&author)
+        } else {
+            old_initials.clone()
+        }
+    });
+    let author_id = if author == old_author && initials == old_initials {
+        author_id
+    } else {
+        ensure_comment_author(package, &author, &initials)?.0
+    };
+    let text = properties
+        .get("text")
+        .or_else(|| properties.get("comment"))
+        .cloned()
+        .unwrap_or(old_text);
+    let date = properties.get("date").cloned().unwrap_or(old_date);
+    let x = properties
+        .get("x")
+        .map(|value| unit_to_emu(value))
+        .unwrap_or(old_x);
+    let y = properties
+        .get("y")
+        .map(|value| unit_to_emu(value))
+        .unwrap_or(old_y);
+    let replacement = format!(
+        r#"<p:cm authorId="{author_id}" dt="{}" idx="{index}"><p:pos x="{x}" y="{y}"/><p:text>{}</p:text></p:cm>"#,
+        xml_escape_text(&date),
+        xml_escape_text(&text),
+    );
+    let mut updated = xml;
+    updated.replace_range(range, &replacement);
+    package
+        .write_part_xml(&comments_path, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(properties
+        .keys()
+        .filter(|key| {
+            !matches!(
+                key.as_str(),
+                "text" | "comment" | "author" | "initials" | "date" | "x" | "y"
+            )
+        })
+        .cloned()
+        .collect())
+}
+
+pub(crate) fn remove_comment(
+    package: &mut OxmlPackage,
+    path: &str,
+) -> Result<Option<String>, HandlerError> {
+    let (slide_index, comment_index) = parse_comment_path(path)?;
+    let (comments_path, xml, range, _, _, _, _, _, _) =
+        comment_record(package, slide_index, comment_index)?;
+    let mut updated = xml;
+    updated.replace_range(range, "");
+    package
+        .write_part_xml(&comments_path, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(Some(format!(
+        "removed comment {comment_index} from slide {slide_index}"
+    )))
+}
+
+#[allow(clippy::type_complexity)]
+fn comment_record(
+    package: &OxmlPackage,
+    slide_index: usize,
+    comment_index: usize,
+) -> Result<
+    (
+        String,
+        String,
+        std::ops::Range<usize>,
+        usize,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ),
+    HandlerError,
+> {
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_index)?;
+    let rels = package
+        .part_rels(&slide_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let rel = rels
+        .all()
+        .values()
+        .find(|rel| rel.type_uri == PPT_COMMENTS_REL_TYPE)
+        .ok_or_else(|| {
+            HandlerError::PathNotFound(format!("/slide[{slide_index}]/comment[{comment_index}]"))
+        })?;
+    let comments_path = package.resolve_rel_target(&slide_path, &rel.target);
+    let xml = package
+        .read_part_xml(&comments_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let (range, author_id, index, date, x, y, text) = {
+        let document = roxmltree::Document::parse(&xml).map_err(|error| {
+            HandlerError::OperationFailed(format!("invalid slide comments part: {error}"))
+        })?;
+        let comment = document
+            .descendants()
+            .filter(|node| node.has_tag_name("cm"))
+            .nth(comment_index - 1)
+            .ok_or_else(|| {
+                HandlerError::PathNotFound(format!(
+                    "/slide[{slide_index}]/comment[{comment_index}]"
+                ))
+            })?;
+        let position = comment.children().find(|node| node.has_tag_name("pos"));
+        (
+            comment.range(),
+            comment
+                .attribute("authorId")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            comment.attribute("idx").unwrap_or("0").to_string(),
+            comment.attribute("dt").unwrap_or_default().to_string(),
+            position
+                .and_then(|node| node.attribute("x"))
+                .unwrap_or("0")
+                .to_string(),
+            position
+                .and_then(|node| node.attribute("y"))
+                .unwrap_or("0")
+                .to_string(),
+            comment
+                .children()
+                .find(|node| node.has_tag_name("text"))
+                .and_then(|node| node.text())
+                .unwrap_or_default()
+                .to_string(),
+        )
+    };
+    Ok((
+        comments_path,
+        xml,
+        range,
+        author_id,
+        index,
+        date,
+        x,
+        y,
+        text,
+    ))
 }
 
 /// Add a speaker note.
@@ -1721,9 +3577,45 @@ fn add_note(
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     let slide_num = parse_slide_num(parent)?;
-    let notes_path = format!("ppt/notesSlides/notesSlide{}.xml", slide_num);
-    let text = properties.get("text").map(|s| s.as_str()).unwrap_or("");
-    let escaped = xml_escape_text(text);
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_num)?;
+    let notes_master_path = ensure_notes_master(package)?;
+    let notes_path = ensure_notes_part(package, &slide_path, &notes_master_path)?;
+    let existing_text = if package.has_part(&notes_path) {
+        package
+            .read_part_xml(&notes_path)
+            .ok()
+            .and_then(|xml| notes_text(&xml).ok())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let text = properties
+        .get("text")
+        .map(String::as_str)
+        .unwrap_or(&existing_text);
+    let direction = properties
+        .get("direction")
+        .or_else(|| properties.get("dir"))
+        .or_else(|| properties.get("rtl"))
+        .map(String::as_str);
+    let lang = properties
+        .get("lang")
+        .map(String::as_str)
+        .unwrap_or("en-US");
+    let body_xml = notes_text_body_xml(text, direction, lang);
+
+    if package.has_part(&notes_path) {
+        let xml = package
+            .read_part_xml(&notes_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let range = notes_body_range(&xml)?;
+        let mut updated = xml;
+        updated.replace_range(range, &body_xml);
+        package
+            .write_part_xml(&notes_path, &updated)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        return Ok(format!("/slide[{}]/notes", slide_num));
+    }
 
     let notes_xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1734,19 +3626,24 @@ fn add_note(
       <p:grpSpPr/>
       <p:sp>
         <p:nvSpPr>
-          <p:cNvPr id="2" name="Notes Placeholder"/>
+          <p:cNvPr id="2" name="Slide Image Placeholder"/>
+          <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+          <p:nvPr><p:ph type="sldImg" idx="0"/></p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="3" name="Notes Placeholder"/>
           <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
           <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
         </p:nvSpPr>
         <p:spPr/>
-        <p:txBody>
-          <a:bodyPr/>
-          <a:lstStyle/>
-          <a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>{escaped}</a:t></a:r></a:p>
-        </p:txBody>
+        {body_xml}
       </p:sp>
     </p:spTree>
-  </p:cSld>
+  </p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
 </p:notes>"#
     );
 
@@ -1754,6 +3651,630 @@ fn add_note(
         .write_part_xml(&notes_path, &notes_xml)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
     Ok(format!("/slide[{}]/notes", slide_num))
+}
+
+fn notes_text_body_xml(text: &str, direction: Option<&str>, lang: &str) -> String {
+    let rtl = direction.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "rtl" | "true" | "1" | "yes"
+        )
+    });
+    let body_pr = if rtl {
+        "<a:bodyPr rtlCol=\"1\"/>"
+    } else {
+        "<a:bodyPr/>"
+    };
+    let paragraph_pr = if rtl { "<a:pPr rtl=\"1\"/>" } else { "" };
+    let paragraphs = text
+        .split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                format!(
+                    "<a:p>{paragraph_pr}<a:endParaRPr lang=\"{}\"/></a:p>",
+                    xml_escape_text(lang)
+                )
+            } else {
+                format!(
+                    "<a:p>{paragraph_pr}<a:r><a:rPr lang=\"{}\" dirty=\"0\"/><a:t>{}</a:t></a:r></a:p>",
+                    xml_escape_text(lang),
+                    xml_escape_text(line)
+                )
+            }
+        })
+        .collect::<String>();
+    format!("<p:txBody>{body_pr}<a:lstStyle/>{paragraphs}</p:txBody>")
+}
+
+fn notes_body_range(xml: &str) -> Result<std::ops::Range<usize>, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid notes slide: {error}")))?;
+    let shape = document
+        .descendants()
+        .filter(|node| node.has_tag_name("sp"))
+        .find(|shape| {
+            shape.descendants().any(|node| {
+                node.has_tag_name("ph")
+                    && (node.attribute("idx") == Some("1")
+                        || node.attribute("type") == Some("body"))
+            })
+        })
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("notes slide has no body placeholder".to_string())
+        })?;
+    shape
+        .children()
+        .find(|node| node.has_tag_name("txBody"))
+        .map(|node| node.range())
+        .ok_or_else(|| HandlerError::OperationFailed("notes body has no text body".to_string()))
+}
+
+const PPT_NOTES_SLIDE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
+const PPT_NOTES_MASTER_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster";
+const PPT_SLIDE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
+const PPT_SLIDE_MASTER_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
+const PPT_THEME_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+
+fn ensure_notes_master(package: &mut OxmlPackage) -> Result<String, HandlerError> {
+    let existing_master = package
+        .part_rels("ppt/presentation.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+        .all()
+        .values()
+        .find(|rel| rel.type_uri == PPT_NOTES_MASTER_REL_TYPE)
+        .map(|rel| package.resolve_rel_target("ppt/presentation.xml", &rel.target));
+    let master_path = existing_master.unwrap_or_else(|| {
+        let mut index = 1;
+        loop {
+            let candidate = format!("ppt/notesMasters/notesMaster{index}.xml");
+            if !package.has_part(&candidate) {
+                break candidate;
+            }
+            index += 1;
+        }
+    });
+    ensure_content_type_override(
+        package,
+        &master_path,
+        "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml",
+    )?;
+    ensure_ppt_relationship(
+        package,
+        "ppt/_rels/presentation.xml.rels",
+        PPT_NOTES_MASTER_REL_TYPE,
+        &format!(
+            "notesMasters/{}",
+            master_path.rsplit('/').next().unwrap_or("notesMaster1.xml")
+        ),
+    )?;
+    if !package.has_part(&master_path) {
+        package
+            .write_part_xml(&master_path, &build_notes_master_xml(package)?)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+        ensure_notes_master_theme(package, &master_path)?;
+    }
+    let rels = package
+        .read_part_xml("ppt/_rels/presentation.xml.rels")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let rel_id = relationship_id_by_type(&rels, PPT_NOTES_MASTER_REL_TYPE).ok_or_else(|| {
+        HandlerError::OperationFailed(
+            "notes master relationship missing after creation".to_string(),
+        )
+    })?;
+    let presentation = package
+        .read_part_xml("ppt/presentation.xml")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let has_master_id = roxmltree::Document::parse(&presentation)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+        .descendants()
+        .any(|node| node.has_tag_name("notesMasterId"));
+    if !has_master_id {
+        let entry = format!(
+            "<p:notesMasterIdLst><p:notesMasterId r:id=\"{rel_id}\"/></p:notesMasterIdLst>"
+        );
+        let insert = presentation
+            .find("<p:sldIdLst")
+            .or_else(|| presentation.find("</p:presentation>"))
+            .ok_or_else(|| HandlerError::OperationFailed("invalid presentation.xml".to_string()))?;
+        let mut updated = presentation;
+        updated.insert_str(insert, &entry);
+        package
+            .write_part_xml("ppt/presentation.xml", &updated)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    }
+    Ok(master_path)
+}
+
+fn build_notes_master_xml(package: &OxmlPackage) -> Result<String, HandlerError> {
+    let (page_width, page_height, slide_width, slide_height) = notes_master_sizes(package)?;
+    let scale_x = |value: i64| value * page_width / 6_858_000;
+    let scale_y = |value: i64| value * page_height / 9_144_000;
+    let header_rect = (scale_x(0), scale_y(0), scale_x(2_971_800), scale_y(458_788));
+    let date_rect = (
+        scale_x(3_884_613),
+        scale_y(0),
+        scale_x(2_971_800),
+        scale_y(458_788),
+    );
+    let image_x = scale_x(1_143_000);
+    let image_y = scale_y(685_800);
+    let image_width = scale_x(4_572_000);
+    let image_height = if slide_width > 0 {
+        image_width * slide_height / slide_width
+    } else {
+        scale_y(3_429_000)
+    };
+    let footer_rect = (
+        scale_x(0),
+        scale_y(8_685_213),
+        scale_x(2_971_800),
+        scale_y(458_787),
+    );
+    let number_rect = (
+        scale_x(3_884_613),
+        scale_y(8_685_213),
+        scale_x(2_971_800),
+        scale_y(458_787),
+    );
+    let body_x = scale_x(685_800);
+    let body_width = scale_x(5_486_400);
+    let nominal_body_height = scale_y(4_114_800);
+    let quarter_inch = scale_y(228_600).max(1);
+    let footer_y = footer_rect.1;
+    let body_y = (((image_y + image_height) / quarter_inch) + 1) * quarter_inch;
+    let body_y = body_y.min((footer_y - quarter_inch).max(image_y));
+    let body_height = nominal_body_height
+        .min((footer_y - body_y).max(quarter_inch))
+        .max(quarter_inch);
+    let mut notes_style = String::from("<p:notesStyle>");
+    for level in 1..=9 {
+        notes_style.push_str(&format!(
+            "<a:lvl{level}pPr marL=\"{}\" algn=\"l\" defTabSz=\"914400\"><a:defRPr sz=\"1200\"/></a:lvl{level}pPr>",
+            (level - 1) * 457_200
+        ));
+    }
+    notes_style.push_str("</p:notesStyle>");
+    let header = notes_master_placeholder(2, "Header Placeholder 1", "hdr", None, header_rect);
+    let date = notes_master_placeholder(3, "Date Placeholder 2", "dt", Some(1), date_rect);
+    let image = notes_master_placeholder(
+        4,
+        "Slide Image Placeholder 3",
+        "sldImg",
+        Some(2),
+        (image_x, image_y, image_width, image_height),
+    );
+    let body = notes_master_placeholder(
+        5,
+        "Notes Placeholder 4",
+        "body",
+        Some(3),
+        (body_x, body_y, body_width, body_height),
+    );
+    let footer = notes_master_placeholder(6, "Footer Placeholder 5", "ftr", Some(4), footer_rect);
+    let number = notes_master_placeholder(
+        7,
+        "Slide Number Placeholder 6",
+        "sldNum",
+        Some(5),
+        number_rect,
+    );
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notesMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name=""><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>{header}{date}{image}{body}{footer}{number}</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>{notes_style}</p:notesMaster>"#
+    ))
+}
+
+fn notes_master_sizes(package: &OxmlPackage) -> Result<(i64, i64, i64, i64), HandlerError> {
+    let xml = package
+        .read_part_xml("ppt/presentation.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let document = roxmltree::Document::parse(&xml)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let dimensions = |name: &str, default_width: i64, default_height: i64| {
+        document
+            .descendants()
+            .find(|node| node.has_tag_name(name))
+            .map(|node| {
+                (
+                    node.attribute("cx")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(default_width),
+                    node.attribute("cy")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(default_height),
+                )
+            })
+            .unwrap_or((default_width, default_height))
+    };
+    let (notes_width, notes_height) = dimensions("notesSz", 6_858_000, 9_144_000);
+    let (slide_width, slide_height) = dimensions("sldSz", 12_192_000, 6_858_000);
+    Ok((notes_width, notes_height, slide_width, slide_height))
+}
+
+fn notes_master_placeholder(
+    id: usize,
+    name: &str,
+    placeholder_type: &str,
+    index: Option<usize>,
+    rect: (i64, i64, i64, i64),
+) -> String {
+    let (x, y, width, height) = rect;
+    let index = index
+        .map(|index| format!(" idx=\"{index}\""))
+        .unwrap_or_default();
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{name}"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="{placeholder_type}"{index}/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>"#
+    )
+}
+
+fn ensure_notes_master_theme(
+    package: &mut OxmlPackage,
+    master_path: &str,
+) -> Result<(), HandlerError> {
+    let master_rels_path = crate::navigation::relationships_part_path(master_path);
+    if package
+        .part_rels(master_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+        .all()
+        .values()
+        .any(|rel| rel.type_uri == PPT_THEME_REL_TYPE)
+    {
+        return Ok(());
+    }
+    // A notes master owns its theme.  Cloning an existing presentation/master
+    // theme preserves the deck palette, but blank/minimal decks do not have a
+    // source to clone.  In that case create a schema-complete Office baseline:
+    // the +mn-lt/+mn-ea/+mn-cs and tx1 references in notesStyle otherwise have
+    // no relationship through which PowerPoint can resolve them.
+    let source = match find_presentation_theme_source(package)? {
+        Some(source_path) => package
+            .read_part_bytes(&source_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+            .clone(),
+        None => default_notes_theme_xml().as_bytes().to_vec(),
+    };
+    let mut index = 1;
+    let target_path = loop {
+        let candidate = format!("ppt/theme/theme{index}.xml");
+        if !package.has_part(&candidate) {
+            break candidate;
+        }
+        index += 1;
+    };
+    package
+        .write_part(&target_path, source)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    ensure_content_type_override(
+        package,
+        &target_path,
+        "application/vnd.openxmlformats-officedocument.theme+xml",
+    )?;
+    ensure_ppt_relationship(
+        package,
+        &master_rels_path,
+        PPT_THEME_REL_TYPE,
+        &format!(
+            "../theme/{}",
+            target_path.rsplit('/').next().unwrap_or("theme1.xml")
+        ),
+    )
+}
+
+fn default_notes_theme_xml() -> &'static str {
+    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350" cap="flat"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700" cap="flat"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050" cap="flat"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#
+}
+
+fn find_presentation_theme_source(package: &OxmlPackage) -> Result<Option<String>, HandlerError> {
+    let presentation_path = "ppt/presentation.xml";
+    let presentation_rels = package
+        .part_rels(presentation_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    if let Some(theme) = presentation_rels
+        .all()
+        .values()
+        .find(|rel| rel.type_uri == PPT_THEME_REL_TYPE)
+    {
+        return Ok(Some(
+            package.resolve_rel_target(presentation_path, &theme.target),
+        ));
+    }
+    for master in presentation_rels
+        .all()
+        .values()
+        .filter(|rel| rel.type_uri == PPT_SLIDE_MASTER_REL_TYPE)
+    {
+        let master_path = package.resolve_rel_target(presentation_path, &master.target);
+        let master_rels = package
+            .part_rels(&master_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        if let Some(theme) = master_rels
+            .all()
+            .values()
+            .find(|rel| rel.type_uri == PPT_THEME_REL_TYPE)
+        {
+            return Ok(Some(
+                package.resolve_rel_target(&master_path, &theme.target),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+fn ensure_notes_part(
+    package: &mut OxmlPackage,
+    slide_path: &str,
+    master_path: &str,
+) -> Result<String, HandlerError> {
+    if let Ok(rels) = package.part_rels(slide_path) {
+        if let Some(rel) = rels
+            .all()
+            .values()
+            .find(|rel| rel.type_uri == PPT_NOTES_SLIDE_REL_TYPE)
+        {
+            return Ok(package.resolve_rel_target(slide_path, &rel.target));
+        }
+    }
+    let mut index = 1;
+    let notes_path = loop {
+        let candidate = format!("ppt/notesSlides/notesSlide{index}.xml");
+        if !package.has_part(&candidate) {
+            break candidate;
+        }
+        index += 1;
+    };
+    ensure_content_type_override(
+        package,
+        &notes_path,
+        "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml",
+    )?;
+    ensure_ppt_relationship(
+        package,
+        &crate::navigation::relationships_part_path(slide_path),
+        PPT_NOTES_SLIDE_REL_TYPE,
+        &format!(
+            "../notesSlides/{}",
+            notes_path.rsplit('/').next().unwrap_or_default()
+        ),
+    )?;
+    let notes_rels = crate::navigation::relationships_part_path(&notes_path);
+    ensure_ppt_relationship(
+        package,
+        &notes_rels,
+        PPT_NOTES_MASTER_REL_TYPE,
+        &format!(
+            "../notesMasters/{}",
+            master_path.rsplit('/').next().unwrap_or_default()
+        ),
+    )?;
+    ensure_ppt_relationship(
+        package,
+        &notes_rels,
+        PPT_SLIDE_REL_TYPE,
+        &format!(
+            "../slides/{}",
+            slide_path.rsplit('/').next().unwrap_or_default()
+        ),
+    )?;
+    Ok(notes_path)
+}
+
+fn relationship_id_by_type(xml: &str, relationship_type: &str) -> Option<String> {
+    let document = roxmltree::Document::parse(xml).ok()?;
+    document
+        .descendants()
+        .find(|node| {
+            node.has_tag_name("Relationship") && node.attribute("Type") == Some(relationship_type)
+        })
+        .and_then(|node| node.attribute("Id"))
+        .map(str::to_string)
+}
+
+pub(crate) fn get_notes_node(
+    package: &OxmlPackage,
+    path: &str,
+) -> Result<handler_common::DocumentNode, HandlerError> {
+    let slide_index = parse_notes_path(path)?;
+    let (_, xml) = notes_part_xml(package, slide_index)?;
+    let text = notes_text(&xml)?;
+    let mut node = handler_common::DocumentNode::new(path, "notes")
+        .with_text(&text)
+        .with_format("text", serde_json::Value::String(text));
+    for (key, value) in notes_format(&xml)? {
+        node.format
+            .insert(key, Some(serde_json::Value::String(value)));
+    }
+    Ok(node)
+}
+
+pub(crate) fn list_notes_nodes(
+    package: &OxmlPackage,
+) -> Result<Vec<handler_common::DocumentNode>, HandlerError> {
+    let presentation = crate::navigation::build_presentation(package)?;
+    let nodes = presentation
+        .slides
+        .into_iter()
+        .filter_map(|slide| {
+            let path = format!("/slide[{}]/notes", slide.index);
+            get_notes_node(package, &path).ok()
+        })
+        .collect();
+    Ok(nodes)
+}
+
+pub(crate) fn set_notes(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let slide_index = parse_notes_path(path)?;
+    let unsupported: Vec<_> = properties
+        .keys()
+        .filter(|key| !matches!(key.as_str(), "text" | "direction" | "dir" | "rtl" | "lang"))
+        .cloned()
+        .collect();
+    let (_, existing_xml) = notes_part_xml(package, slide_index)?;
+    let existing_text = notes_text(&existing_xml)?;
+    let existing_format = notes_format(&existing_xml)?;
+    let text = properties.get("text").cloned().unwrap_or(existing_text);
+    let mut add_props = HashMap::from([("text".to_string(), text)]);
+    if let Some(direction) = properties
+        .get("direction")
+        .or_else(|| properties.get("dir"))
+        .or_else(|| properties.get("rtl"))
+    {
+        add_props.insert("direction".to_string(), direction.clone());
+    } else if let Some(direction) = existing_format.get("direction") {
+        add_props.insert("direction".to_string(), direction.clone());
+    }
+    if let Some(lang) = properties.get("lang") {
+        add_props.insert("lang".to_string(), lang.clone());
+    } else if let Some(lang) = existing_format.get("lang") {
+        add_props.insert("lang".to_string(), lang.clone());
+    }
+    add_note(package, &format!("/slide[{slide_index}]"), &add_props)?;
+    Ok(unsupported)
+}
+
+pub(crate) fn remove_notes(
+    package: &mut OxmlPackage,
+    path: &str,
+) -> Result<Option<String>, HandlerError> {
+    let slide_index = parse_notes_path(path)?;
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_index)?;
+    let rels_path = crate::navigation::relationships_part_path(&slide_path);
+    let rels_xml = package
+        .read_part_xml(&rels_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let (rel_range, target) = {
+        let document = roxmltree::Document::parse(&rels_xml)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        let rel = document
+            .descendants()
+            .find(|node| {
+                node.has_tag_name("Relationship")
+                    && node.attribute("Type") == Some(PPT_NOTES_SLIDE_REL_TYPE)
+            })
+            .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+        (
+            rel.range(),
+            rel.attribute("Target").unwrap_or_default().to_string(),
+        )
+    };
+    let notes_path = package.resolve_rel_target(&slide_path, &target);
+    let mut updated_rels = rels_xml;
+    updated_rels.replace_range(rel_range, "");
+    package
+        .write_part_xml(&rels_path, &updated_rels)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    package
+        .remove_part(&notes_path)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    remove_content_type_override(package, &notes_path)?;
+    let notes_rels = crate::navigation::relationships_part_path(&notes_path);
+    let _ = package.remove_part(&notes_rels);
+    Ok(Some(format!("removed notes from slide {slide_index}")))
+}
+
+fn parse_notes_path(path: &str) -> Result<usize, HandlerError> {
+    let path = path.strip_suffix("/notes").ok_or_else(|| {
+        HandlerError::InvalidPath(format!("expected /slide[N]/notes, got: {path}"))
+    })?;
+    parse_slide_num(path)
+}
+
+fn notes_part_xml(
+    package: &OxmlPackage,
+    slide_index: usize,
+) -> Result<(String, String), HandlerError> {
+    let slide_path = crate::navigation::resolve_slide_part_path(package, slide_index)?;
+    let rels = package
+        .part_rels(&slide_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let rel = rels
+        .all()
+        .values()
+        .find(|rel| rel.type_uri == PPT_NOTES_SLIDE_REL_TYPE)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("/slide[{slide_index}]/notes")))?;
+    let notes_path = package.resolve_rel_target(&slide_path, &rel.target);
+    let xml = package
+        .read_part_xml(&notes_path)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    Ok((notes_path, xml))
+}
+
+fn notes_text(xml: &str) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid notes slide: {e}")))?;
+    let shape = document
+        .descendants()
+        .filter(|node| node.has_tag_name("sp"))
+        .find(|shape| {
+            shape.descendants().any(|node| {
+                node.has_tag_name("ph")
+                    && (node.attribute("idx") == Some("1")
+                        || node.attribute("type") == Some("body"))
+            })
+        })
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("notes slide has no body placeholder".to_string())
+        })?;
+    Ok(shape
+        .descendants()
+        .filter(|node| node.has_tag_name("p"))
+        .map(|paragraph| {
+            paragraph
+                .descendants()
+                .filter(|node| node.has_tag_name("t"))
+                .filter_map(|node| node.text())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn notes_format(xml: &str) -> Result<std::collections::HashMap<String, String>, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|e| HandlerError::OperationFailed(format!("invalid notes slide: {e}")))?;
+    let Some(shape) = document
+        .descendants()
+        .filter(|node| node.has_tag_name("sp"))
+        .find(|shape| {
+            shape.descendants().any(|node| {
+                node.has_tag_name("ph")
+                    && (node.attribute("idx") == Some("1")
+                        || node.attribute("type") == Some("body"))
+            })
+        })
+    else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let mut format = std::collections::HashMap::new();
+    if shape
+        .descendants()
+        .any(|node| node.has_tag_name("pPr") && matches!(node.attribute("rtl"), Some("1" | "true")))
+    {
+        format.insert("direction".to_string(), "rtl".to_string());
+    }
+    if let Some(lang) = shape
+        .descendants()
+        .find(|node| node.has_tag_name("rPr"))
+        .and_then(|node| node.attribute("lang"))
+        .or_else(|| {
+            shape
+                .descendants()
+                .find(|node| node.has_tag_name("endParaRPr"))
+                .and_then(|node| node.attribute("lang"))
+        })
+    {
+        format.insert("lang".to_string(), lang.to_string());
+    }
+    Ok(format)
 }
 
 /// Add a hyperlink to a shape's text.
@@ -2724,6 +5245,380 @@ fn build_timing_xml(
 #[cfg(test)]
 mod transition_tests {
     use super::*;
+
+    #[test]
+    fn add_comment_wires_author_part_slide_relationship_and_content_types() {
+        let mut package = OxmlPackage::create("comment-test.pptx");
+        package.add_part(
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>"#,
+        );
+        package.add_part("ppt/presentation.xml", br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#);
+        package.add_part("ppt/_rels/presentation.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide7.xml"/></Relationships>"#);
+        package.add_part("ppt/slides/slide7.xml", br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+
+        let props = HashMap::from([
+            ("author".to_string(), "Jane Doe".to_string()),
+            ("text".to_string(), "Review this".to_string()),
+            ("x".to_string(), "2cm".to_string()),
+        ]);
+        assert_eq!(
+            add_comment(&mut package, "/slide[1]", &props).unwrap(),
+            "/slide[1]/comment[1]"
+        );
+        assert_eq!(
+            add_comment(&mut package, "/slide[1]", &props).unwrap(),
+            "/slide[1]/comment[2]"
+        );
+
+        let node = get_comment_node(&package, "/slide[1]/comment[2]").unwrap();
+        assert_eq!(node.text.as_deref(), Some("Review this"));
+        assert_eq!(
+            node.format["author"],
+            Some(serde_json::Value::String("Jane Doe".into()))
+        );
+        assert_eq!(list_comment_nodes(&package, None).unwrap().len(), 2);
+        let update = HashMap::from([
+            ("text".to_string(), "Updated".to_string()),
+            ("y".to_string(), "1cm".to_string()),
+        ]);
+        assert!(set_comment(&mut package, "/slide[1]/comment[2]", &update)
+            .unwrap()
+            .is_empty());
+        let updated = get_comment_node(&package, "/slide[1]/comment[2]").unwrap();
+        assert_eq!(updated.text.as_deref(), Some("Updated"));
+        assert_eq!(
+            updated.format["y"],
+            Some(serde_json::Value::String("1cm".into()))
+        );
+        assert!(remove_comment(&mut package, "/slide[1]/comment[1]")
+            .unwrap()
+            .is_some());
+        assert_eq!(list_comment_nodes(&package, None).unwrap().len(), 1);
+
+        let authors = package.read_part_xml("ppt/commentAuthors.xml").unwrap();
+        assert!(authors.contains("name=\"Jane Doe\""));
+        assert!(authors.contains("initials=\"JD\""));
+        assert!(authors.contains("lastIdx=\"2\""));
+        let comments = package.read_part_xml("ppt/comments/comment1.xml").unwrap();
+        assert!(comments.contains("authorId=\"0\""));
+        assert!(comments.contains("idx=\"2\""));
+        assert!(comments.contains("<p:pos x=\"720000\" y=\"360000\"/>"));
+        let slide_rels = package
+            .read_part_xml("ppt/slides/_rels/slide7.xml.rels")
+            .unwrap();
+        assert!(slide_rels.contains(PPT_COMMENTS_REL_TYPE));
+        let presentation_rels = package
+            .read_part_xml("ppt/_rels/presentation.xml.rels")
+            .unwrap();
+        assert!(presentation_rels.contains(PPT_COMMENT_AUTHORS_REL_TYPE));
+        let types = package.read_part_xml("[Content_Types].xml").unwrap();
+        assert!(types.contains("/ppt/comments/comment1.xml"));
+        assert!(types.contains("/ppt/commentAuthors.xml"));
+    }
+
+    #[test]
+    fn add_note_wires_slide_master_backlink_and_content_types() {
+        let mut package = OxmlPackage::create("notes-test.pptx");
+        package.add_part("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>"#);
+        package.add_part("ppt/presentation.xml", br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#);
+        package.add_part("ppt/_rels/presentation.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide7.xml"/></Relationships>"#);
+        package.add_part("ppt/slides/slide7.xml", br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+
+        assert_eq!(
+            add_note(
+                &mut package,
+                "/slide[1]",
+                &HashMap::from([("text".to_string(), "Speaker cue".to_string())])
+            )
+            .unwrap(),
+            "/slide[1]/notes"
+        );
+        assert_eq!(
+            get_notes_node(&package, "/slide[1]/notes")
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("Speaker cue")
+        );
+        assert_eq!(list_notes_nodes(&package).unwrap().len(), 1);
+        assert!(set_notes(
+            &mut package,
+            "/slide[1]/notes",
+            &HashMap::from([
+                ("text".to_string(), "Updated cue\nSecond line".to_string()),
+                ("direction".to_string(), "rtl".to_string()),
+                ("lang".to_string(), "ar-SA".to_string()),
+            ]),
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            get_notes_node(&package, "/slide[1]/notes")
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("Updated cue\nSecond line")
+        );
+        let notes = get_notes_node(&package, "/slide[1]/notes").unwrap();
+        assert_eq!(
+            notes.format["direction"],
+            Some(serde_json::Value::String("rtl".into()))
+        );
+        assert_eq!(
+            notes.format["lang"],
+            Some(serde_json::Value::String("ar-SA".into()))
+        );
+        assert!(package
+            .read_part_xml("ppt/notesSlides/notesSlide1.xml")
+            .unwrap()
+            .contains("<a:pPr rtl=\"1\"/>"));
+        assert!(package
+            .read_part_xml("ppt/notesSlides/notesSlide1.xml")
+            .unwrap()
+            .contains("Second line"));
+        assert!(package
+            .read_part_xml("ppt/notesMasters/notesMaster1.xml")
+            .is_ok());
+        let slide_rels = package
+            .read_part_xml("ppt/slides/_rels/slide7.xml.rels")
+            .unwrap();
+        assert!(slide_rels.contains(PPT_NOTES_SLIDE_REL_TYPE));
+        let notes_rels = package
+            .read_part_xml("ppt/notesSlides/_rels/notesSlide1.xml.rels")
+            .unwrap();
+        assert!(notes_rels.contains(PPT_NOTES_MASTER_REL_TYPE));
+        assert!(notes_rels.contains(PPT_SLIDE_REL_TYPE));
+        let presentation = package.read_part_xml("ppt/presentation.xml").unwrap();
+        assert!(presentation.contains("notesMasterIdLst"));
+        let types = package.read_part_xml("[Content_Types].xml").unwrap();
+        assert!(types.contains("/ppt/notesSlides/notesSlide1.xml"));
+        assert!(types.contains("/ppt/notesMasters/notesMaster1.xml"));
+        assert!(types.contains("/ppt/theme/theme1.xml"));
+        assert!(package
+            .read_part_xml("ppt/theme/theme1.xml")
+            .unwrap()
+            .contains("<a:themeElements>"));
+        assert!(package
+            .read_part_xml("ppt/notesMasters/_rels/notesMaster1.xml.rels")
+            .unwrap()
+            .contains(PPT_THEME_REL_TYPE));
+        assert!(remove_notes(&mut package, "/slide[1]/notes")
+            .unwrap()
+            .is_some());
+        assert!(get_notes_node(&package, "/slide[1]/notes").is_err());
+        assert!(!package
+            .read_part_xml("[Content_Types].xml")
+            .unwrap()
+            .contains("/ppt/notesSlides/notesSlide1.xml"));
+    }
+
+    #[test]
+    fn add_note_reuses_existing_related_notes_master() {
+        let mut package = OxmlPackage::create("existing-notes-master.pptx");
+        package.add_part("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>"#);
+        package.add_part("ppt/presentation.xml", br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#);
+        package.add_part("ppt/_rels/presentation.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" Target="notesMasters/notesMaster7.xml"/></Relationships>"#);
+        package.add_part("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+        package.add_part("ppt/notesMasters/notesMaster7.xml", br#"<p:notesMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:notesMaster>"#);
+
+        add_note(
+            &mut package,
+            "/slide[1]",
+            &HashMap::from([("text".to_string(), "Use existing master".to_string())]),
+        )
+        .unwrap();
+
+        assert!(!package.has_part("ppt/notesMasters/notesMaster1.xml"));
+        assert!(package.has_part("ppt/notesMasters/notesMaster7.xml"));
+        assert!(package
+            .read_part_xml("ppt/notesSlides/_rels/notesSlide1.xml.rels")
+            .unwrap()
+            .contains("../notesMasters/notesMaster7.xml"));
+    }
+
+    #[test]
+    fn add_note_clones_slide_master_theme_for_new_notes_master() {
+        let mut package = OxmlPackage::create("notes-theme.pptx");
+        package.add_part("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>"#);
+        package.add_part("ppt/presentation.xml", br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldMasterIdLst/><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#);
+        package.add_part("ppt/_rels/presentation.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/></Relationships>"#);
+        package.add_part("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+        package.add_part("ppt/slideMasters/slideMaster1.xml", br#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"#);
+        package.add_part("ppt/slideMasters/_rels/slideMaster1.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#);
+        package.add_part("ppt/theme/theme1.xml", br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Source Theme"/>"#);
+
+        add_note(&mut package, "/slide[1]", &HashMap::new()).unwrap();
+
+        assert!(package.has_part("ppt/theme/theme2.xml"));
+        assert_eq!(
+            package.read_part_xml("ppt/theme/theme2.xml").unwrap(),
+            package.read_part_xml("ppt/theme/theme1.xml").unwrap()
+        );
+        let master_rels = package
+            .read_part_xml("ppt/notesMasters/_rels/notesMaster1.xml.rels")
+            .unwrap();
+        assert!(master_rels.contains(PPT_THEME_REL_TYPE));
+        assert!(master_rels.contains("../theme/theme2.xml"));
+        assert!(package
+            .read_part_xml("[Content_Types].xml")
+            .unwrap()
+            .contains("/ppt/theme/theme2.xml"));
+    }
+
+    #[test]
+    fn new_notes_master_scales_placeholders_to_presentation_sizes() {
+        let mut package = OxmlPackage::create("scaled-notes-master.pptx");
+        package.add_part("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>"#);
+        package.add_part("ppt/presentation.xml", br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/><p:notesSz cx="13716000" cy="9144000"/></p:presentation>"#);
+        package.add_part("ppt/_rels/presentation.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#);
+        package.add_part("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+
+        add_note(&mut package, "/slide[1]", &HashMap::new()).unwrap();
+
+        let master = package
+            .read_part_xml("ppt/notesMasters/notesMaster1.xml")
+            .unwrap();
+        assert!(master.contains("<a:ext cx=\"5943600\" cy=\"458788\"/>"));
+        assert!(master
+            .contains("<a:off x=\"2286000\" y=\"685800\"/><a:ext cx=\"9144000\" cy=\"6858000\"/>"));
+    }
+
+    #[test]
+    fn add_modern_comment_wires_authors_and_slide_part() {
+        let mut package = OxmlPackage::create("modern-comment-test.pptx");
+        package.add_part("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>"#);
+        package.add_part("ppt/presentation.xml", br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#);
+        package.add_part("ppt/_rels/presentation.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#);
+        package.add_part("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+        let result = add_modern_comment(
+            &mut package,
+            "/slide[1]",
+            &HashMap::from([
+                ("author".into(), "Ada Lovelace".into()),
+                ("text".into(), "Thread start".into()),
+                ("resolved".into(), "true".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(result, "/slide[1]/modernComment[1]");
+        assert_eq!(
+            add_modern_comment(
+                &mut package,
+                "/slide[1]",
+                &HashMap::from([
+                    ("text".into(), "Reply".into()),
+                    ("parent".into(), "/slide[1]/modernComment[1]".into())
+                ])
+            )
+            .unwrap(),
+            "/slide[1]/modernComment[1]/reply[1]"
+        );
+        assert!(package
+            .read_part_xml("ppt/authors.xml")
+            .unwrap()
+            .contains("Ada Lovelace"));
+        let comments = package
+            .read_part_xml("ppt/comments/modernComment1.xml")
+            .unwrap();
+        assert!(comments.contains("Thread start"));
+        assert!(comments.contains("status=\"resolved\""));
+        assert!(comments.contains("<p188:reply"));
+        assert!(package
+            .read_part_xml("ppt/slides/_rels/slide1.xml.rels")
+            .unwrap()
+            .contains("2018/10/relationships/comment"));
+
+        let top = get_modern_comment_node(&package, "/slide[1]/modernComment[1]").unwrap();
+        assert_eq!(top.text.as_deref(), Some("Thread start"));
+        assert_eq!(top.child_count, 1);
+        assert_eq!(top.format["resolved"], Some(serde_json::Value::Bool(true)));
+        assert_eq!(
+            get_modern_comment_node(&package, "/slide[1]/modernComment[1]/reply[1]")
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("Reply")
+        );
+        assert_eq!(list_modern_comment_nodes(&package, None).unwrap().len(), 1);
+
+        assert!(set_modern_comment(
+            &mut package,
+            "/slide[1]/modernComment[1]",
+            &HashMap::from([
+                ("text".to_string(), "Edited thread".to_string()),
+                ("resolved".to_string(), "false".to_string()),
+                (
+                    "created".to_string(),
+                    "2026-01-02T03:04:05+08:00".to_string()
+                ),
+            ]),
+        )
+        .unwrap()
+        .is_empty());
+        let edited = get_modern_comment_node(&package, "/slide[1]/modernComment[1]").unwrap();
+        assert_eq!(edited.text.as_deref(), Some("Edited thread"));
+        assert_eq!(
+            edited.format["resolved"],
+            Some(serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            edited.format["created"],
+            Some(serde_json::Value::String("2026-01-01T19:04:05Z".into()))
+        );
+
+        assert!(
+            remove_modern_comment(&mut package, "/slide[1]/modernComment[1]/reply[1]")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            get_modern_comment_node(&package, "/slide[1]/modernComment[1]")
+                .unwrap()
+                .child_count,
+            0
+        );
+        assert!(
+            remove_modern_comment(&mut package, "/slide[1]/modernComment[1]")
+                .unwrap()
+                .is_some()
+        );
+        assert!(!package.has_part("ppt/comments/modernComment1.xml"));
+        assert!(!package
+            .read_part_xml("ppt/slides/_rels/slide1.xml.rels")
+            .unwrap()
+            .contains("2018/10/relationships/comment"));
+        assert!(!package
+            .read_part_xml("[Content_Types].xml")
+            .unwrap()
+            .contains("/ppt/comments/modernComment1.xml"));
+    }
+
+    #[test]
+    fn add_modern_comment_reuses_related_authors_part() {
+        let mut package = OxmlPackage::create("existing-modern-authors.pptx");
+        package.add_part("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>"#);
+        package.add_part("ppt/presentation.xml", br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#);
+        package.add_part("ppt/_rels/presentation.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId8" Type="http://schemas.microsoft.com/office/2018/10/relationships/authors" Target="custom/authors2.xml"/></Relationships>"#);
+        package.add_part("ppt/slides/slide1.xml", br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+        package.add_part("ppt/custom/authors2.xml", br#"<p188:authorLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main"/>"#);
+
+        add_modern_comment(
+            &mut package,
+            "/slide[1]",
+            &HashMap::from([
+                ("author".to_string(), "Related Author".to_string()),
+                ("text".to_string(), "uses existing part".to_string()),
+            ]),
+        )
+        .unwrap();
+
+        assert!(!package.has_part("ppt/authors.xml"));
+        assert!(package
+            .read_part_xml("ppt/custom/authors2.xml")
+            .unwrap()
+            .contains("Related Author"));
+    }
 
     #[test]
     fn basic_fade_emits_bare_transition() {

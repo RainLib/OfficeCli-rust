@@ -1,0 +1,17 @@
+{
+  "$schema": "../_schema.json",
+  "format": "pptx",
+  "element": "linebreak",
+  "elementAliases": ["br", "line-break"],
+  "parent": "paragraph",
+  "operations": { "add": true, "set": false, "get": true, "query": false, "remove": true },
+  "paths": {
+    "positional": [
+      "/slide[N]/shape[M]/paragraph[K]/br[B]",
+      "/slide[N]/group[G]/.../shape[M]/paragraph[K]/br[B]",
+      "/slide[N]/placeholder[X]/paragraph[K]/br[B]"
+    ]
+  },
+  "note": "Soft line break (<a:br/>) within a text paragraph, not a new paragraph. Add to a shape, nested group shape, or materialized slide placeholder; omitting /paragraph[K] targets the last paragraph. Placeholder X is a 1-based placeholder ordinal or a type/alias such as title, body/content, subtitle, date, footer, slidenum, object, picture, or centerTitle. Unlike the C# implementation, a placeholder inherited only from the layout is not materialized by this command.",
+  "properties": {}
+}

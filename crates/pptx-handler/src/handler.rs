@@ -90,6 +90,19 @@ impl DocumentHandler for PptxHandler {
     }
 
     fn get(&self, path: &str, depth: usize) -> Result<DocumentNode, HandlerError> {
+        if path.contains("/br[") || path.contains("/linebreak[") {
+            return crate::linebreak::get_linebreak(&self.package.borrow(), path);
+        }
+        let normalized_path = path.to_ascii_lowercase();
+        if normalized_path.contains("/moderncomment[") {
+            return crate::add::get_modern_comment_node(&self.package.borrow(), path);
+        }
+        if normalized_path.contains("/comment[") {
+            return crate::add::get_comment_node(&self.package.borrow(), path);
+        }
+        if path.ends_with("/notes") {
+            return crate::add::get_notes_node(&self.package.borrow(), path);
+        }
         crate::view::get_node(&self.package.borrow(), path, depth)
     }
 
@@ -120,6 +133,12 @@ impl DocumentHandler for PptxHandler {
                 properties,
                 &segments,
             )
+        } else if path.to_ascii_lowercase().contains("/moderncomment[") {
+            crate::add::set_modern_comment(&mut self.package.borrow_mut(), path, properties)
+        } else if path.to_ascii_lowercase().contains("/comment[") {
+            crate::add::set_comment(&mut self.package.borrow_mut(), path, properties)
+        } else if path.ends_with("/notes") {
+            crate::add::set_notes(&mut self.package.borrow_mut(), path, properties)
         } else {
             crate::view::set_shape_text(&mut self.package.borrow_mut(), path, properties)
         }
@@ -154,6 +173,19 @@ impl DocumentHandler for PptxHandler {
             ));
         }
         handler_common::ensure_scoped(path, "remove")?;
+        if path.contains("/br[") || path.contains("/linebreak[") {
+            return crate::linebreak::remove_linebreak(&mut self.package.borrow_mut(), path);
+        }
+        let normalized_path = path.to_ascii_lowercase();
+        if normalized_path.contains("/moderncomment[") {
+            return crate::add::remove_modern_comment(&mut self.package.borrow_mut(), path);
+        }
+        if normalized_path.contains("/comment[") {
+            return crate::add::remove_comment(&mut self.package.borrow_mut(), path);
+        }
+        if path.ends_with("/notes") {
+            return crate::add::remove_notes(&mut self.package.borrow_mut(), path);
+        }
         crate::mutations::remove_element(&mut self.package.borrow_mut(), path)
     }
 

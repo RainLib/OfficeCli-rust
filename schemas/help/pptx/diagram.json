@@ -1,0 +1,16 @@
+{
+  "$schema": "../_schema.json",
+  "format": "pptx",
+  "element": "diagram",
+  "elementAliases": ["flowchart"],
+  "parent": "slide",
+  "operations": {"add": true, "set": false, "get": false, "query": false, "remove": false},
+  "paths": {"positional": ["/slide[N]"]},
+  "note": "Expands Mermaid source into one editable PowerPoint group (p:grpSp), returning /slide[N]/group[K]. Native offline support covers flowchart/graph TD/TB/LR/RL and common rectangle/rounded/ellipse/diamond/hexagon nodes with directed links, plus sequenceDiagram participants, lifelines, solid/dashed messages and labels. Advanced directives, browser image rendering and C#'s full crossing-reduction/router remain pending.",
+  "properties": {
+    "mermaid": {"type": "string", "aliases": ["text", "dsl"], "add": true, "examples": ["--properties 'mermaid=flowchart TD; A[Start] --> B{Ready?} --> C[Done]'" ]},
+    "src": {"type": "string", "aliases": ["path"], "add": true},
+    "width": {"type": "length", "description": "Reserved for C# compatibility; native PPTX flowchart currently uses its natural group size.", "add": false},
+    "height": {"type": "length", "description": "Reserved for C# compatibility; native PPTX flowchart currently uses its natural group size.", "add": false}
+  }
+}

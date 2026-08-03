@@ -2,6 +2,7 @@
   "$schema": "../_schema.json",
   "format": "pptx",
   "element": "notes",
+  "elementAliases": ["note"],
   "parent": "slide",
   "operations": {
     "add": true,

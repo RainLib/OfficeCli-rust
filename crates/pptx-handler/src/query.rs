@@ -12,8 +12,14 @@ pub fn query_elements(
 
     let mut results = Vec::new();
     let element_type = selector.element_type.as_deref().unwrap_or("*");
+    let normalized_type = element_type.to_ascii_lowercase();
 
-    match element_type {
+    match normalized_type.as_str() {
+        "comment" => return crate::add::list_comment_nodes(package, None),
+        "moderncomment" | "modern-comment" => {
+            return crate::add::list_modern_comment_nodes(package, None)
+        }
+        "notes" | "note" => return crate::add::list_notes_nodes(package),
         "slide" | "*" => {
             for slide in &pres.slides {
                 let path = format!("/slide[{}]", slide.index);

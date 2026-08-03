@@ -93,6 +93,10 @@ fn get_formats() -> Vec<FormatInfo> {
                 "morph",
                 "animation",
                 "transition",
+                "linebreak",
+                "comment",
+                "modernComment",
+                "notes",
             ],
             verbs: &["add", "set", "get", "query", "remove"],
         },
@@ -265,6 +269,12 @@ fn get_elements(format: &str) -> Vec<ElementInfo> {
         ],
         "pptx" | "ppt" | "powerpoint" => vec![
             ElementInfo {
+                name: "linebreak",
+                description: "A soft line break (<a:br/>) within a shape paragraph",
+                supported_verbs: &["add", "get", "remove"],
+                properties: &[],
+            },
+            ElementInfo {
                 name: "slide",
                 description: "A presentation slide",
                 supported_verbs: &["add", "get", "query", "remove"],
@@ -329,6 +339,26 @@ fn get_elements(format: &str) -> Vec<ElementInfo> {
                 description: "A slide transition effect",
                 supported_verbs: &["get", "query"],
                 properties: &["type", "duration", "morph"],
+            },
+            ElementInfo {
+                name: "comment",
+                description: "A legacy slide comment annotation",
+                supported_verbs: &["add", "set", "get", "query", "remove"],
+                properties: &["text", "author", "initials", "date", "x", "y"],
+            },
+            ElementInfo {
+                name: "modernComment",
+                description: "An Office 2018+ threaded slide comment",
+                supported_verbs: &["add", "set", "get", "query", "remove"],
+                properties: &[
+                    "text", "author", "initials", "created", "resolved", "parent",
+                ],
+            },
+            ElementInfo {
+                name: "notes",
+                description: "Speaker notes for a slide",
+                supported_verbs: &["add", "set", "get", "query", "remove"],
+                properties: &["text", "direction", "lang"],
             },
         ],
         _ => vec![],
@@ -502,7 +532,19 @@ pub fn handle_help(cmd: HelpCommand, json: bool) -> Result<String, handler_commo
 
     let elements = get_elements(format_name);
     let element = match element_name {
-        Some(ref name) => elements.iter().find(|e| e.name == name),
+        Some(ref name) => {
+            // `add --type-name note` is a supported concise alias for the
+            // `/slide[N]/notes` resource. Keep help discoverable through the
+            // same spelling rather than making a valid command look missing.
+            let canonical_name = if format_name == "pptx" && name.eq_ignore_ascii_case("note") {
+                "notes"
+            } else {
+                name
+            };
+            elements
+                .iter()
+                .find(|element| element.name.eq_ignore_ascii_case(canonical_name))
+        }
         None => None,
     };
 
