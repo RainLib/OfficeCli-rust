@@ -65,7 +65,8 @@ pub fn handle_dump(
                 "/styles" => ("word/styles.xml", "/w:styles"),
                 "/settings" => ("word/settings.xml", "/w:settings"),
                 "/numbering" => ("word/numbering.xml", "/w:numbering"),
-                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /body/p[N], /body/tbl[N], /styles, /settings, and /numbering; use --dom for other subtrees".to_string())),
+                "/comments" => ("/comments", "/w:comments"),
+                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /body/p[N], /body/tbl[N], /styles, /settings, /numbering, and /comments; use --dom for other subtrees".to_string())),
             };
             let replay_part = if logical_path == "/" {
                 "/document"

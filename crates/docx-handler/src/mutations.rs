@@ -5978,6 +5978,12 @@ fn ensure_comments_part(package: &mut OxmlPackage) -> Result<String, HandlerErro
     })
 }
 
+/// Ensure the comments package lifecycle exists before a whole-part raw
+/// replacement emitted by `dump /comments`.
+pub(crate) fn prepare_comments_raw_replace(package: &mut OxmlPackage) -> Result<(), HandlerError> {
+    ensure_comments_part(package).map(|_| ())
+}
+
 fn ensure_docx_comments_relationship(package: &mut OxmlPackage) -> Result<(), HandlerError> {
     let rels = package
         .read_part_xml(DOCX_DOCUMENT_RELS_PART)

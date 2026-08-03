@@ -3748,6 +3748,53 @@ fn test_dump_docx_paragraph_subtree_replays_into_fresh_document() {
 }
 
 #[test]
+fn test_dump_docx_comments_replays_into_fresh_document() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_comments_source.docx");
+    let target = tmp.path().join("dump_comments_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &source_path,
+            "/body/p[1]",
+            "--type",
+            "comment",
+            "--prop",
+            "text=Comment replay",
+            "--prop",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/comments"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &target_path, "/comments"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Comment replay"));
+}
+
+#[test]
 fn test_dump_xlsx_batch_replays_into_fresh_workbook() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_source.xlsx");

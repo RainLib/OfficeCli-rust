@@ -1015,6 +1015,15 @@ impl DocumentHandler for WordHandler {
             ));
         }
         let mut package = self.package.borrow_mut();
+        if part_path.eq_ignore_ascii_case("/comments") && action.eq_ignore_ascii_case("replace") {
+            let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {
+                HandlerError::InvalidArgument("/comments replace requires XML".to_string())
+            })?;
+            mutations::prepare_comments_raw_replace(&mut package)?;
+            return package
+                .write_part_xml("word/comments.xml", replacement)
+                .map_err(|error| HandlerError::SaveError(error.to_string()));
+        }
         if part_path.eq_ignore_ascii_case("/commentsExtended") {
             if !action.eq_ignore_ascii_case("replace") {
                 return Err(HandlerError::InvalidArgument(format!(
