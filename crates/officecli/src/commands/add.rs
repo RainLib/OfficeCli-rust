@@ -10,10 +10,14 @@ pub struct AddCommand {
 
     /// Parent path where to add
     #[arg(long)]
-    pub parent: String,
+    pub parent: Option<String>,
+
+    /// Parent path where to add (C#-compatible positional form).
+    #[arg(index = 2)]
+    pub parent_path: Option<String>,
 
     /// Element type to add
-    #[arg(long)]
+    #[arg(long, alias = "type")]
     pub type_name: Option<String>,
 
     /// Copy from an existing element path instead of creating a new element.
@@ -37,7 +41,7 @@ pub struct AddCommand {
     pub before: Option<String>,
 
     /// Properties (key=value pairs)
-    #[arg(long, num_args = 1..)]
+    #[arg(long, alias = "prop", num_args = 1..)]
     pub properties: Vec<String>,
 
     /// Wrap an existing element: bookmarkStart goes before, bookmarkEnd goes after the target
@@ -55,6 +59,7 @@ pub struct AddCommand {
 }
 
 pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, HandlerError> {
+    let parent = resolve_parent(&cmd)?;
     let handler = crate::open_handler(&cmd.file, true)?;
 
     let position = resolve_position(&cmd)?;
@@ -78,11 +83,11 @@ pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, Handl
     }
 
     let (new_path, message) = if let Some(source) = cmd.from.as_deref() {
-        let path = handler.copy_from(source, &cmd.parent, position)?;
+        let path = handler.copy_from(source, &parent, position)?;
         (path.clone(), format!("Copied to {}", path))
     } else {
         let path = handler.add(
-            &cmd.parent,
+            &parent,
             cmd.type_name.as_deref().expect("validated above"),
             position,
             &properties,
@@ -111,6 +116,19 @@ pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, Handl
             }
             Ok(crate::commands::json_text_envelope(&message, extensions))
         }
+    }
+}
+
+fn resolve_parent(cmd: &AddCommand) -> Result<String, HandlerError> {
+    match (&cmd.parent, &cmd.parent_path) {
+        (Some(_), Some(_)) => Err(HandlerError::InvalidArgument(
+            "Use either positional parent or --parent, not both.".to_string(),
+        )),
+        (Some(parent), None) | (None, Some(parent)) => Ok(parent.clone()),
+        (None, None) => Err(HandlerError::InvalidArgument(
+            "Parent path is required. Use `officecli add <file> <parent> ...` or --parent <path>."
+                .to_string(),
+        )),
     }
 }
 

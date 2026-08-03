@@ -436,6 +436,49 @@ fn test_add_and_get_paragraph() {
 }
 
 #[test]
+fn test_add_accepts_csharp_parent_type_and_prop_syntax() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_add_csharp_syntax.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body",
+            "--type",
+            "paragraph",
+            "--prop",
+            "text=C# command spelling",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created: /body/p[2]"));
+    officecli()
+        .args(["get", &p, "/body/p[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("C# command spelling"));
+
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body",
+            "--parent",
+            "/body",
+            "--type",
+            "paragraph",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "either positional parent or --parent",
+        ));
+}
+
+#[test]
 fn test_add_accepts_csharp_position_flags() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_add_csharp_positions.docx");
