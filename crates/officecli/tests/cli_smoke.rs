@@ -3182,11 +3182,30 @@ fn test_xlsx_modern_formula_ooxml_round_trip() {
         .assert()
         .success();
     officecli()
+        .args(["set", &p, "/Sheet1/B1", "formula=SEQUENCE(3)"])
+        .assert()
+        .success();
+    officecli()
         .args(["raw", &p, "xl/worksheets/sheet1.xml"])
         .assert()
         .success()
         .stdout(predicate::str::contains("_xlfn.SEQUENCE(2)"))
-        .stdout(predicate::str::contains("t=\"array\" ref=\"A1\""));
+        .stdout(predicate::str::contains("cm=\"1\""))
+        .stdout(predicate::str::contains("t=\"array\" ref=\"A1\""))
+        .stdout(predicate::str::contains(
+            r#"<c r="B1" cm="1"><f t="array" ref="B1">_xlfn.SEQUENCE(3)</f>"#,
+        ));
+    officecli()
+        .args(["raw", &p, "xl/metadata.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("name=\"XLDAPR\""))
+        .stdout(predicate::str::contains("xda:dynamicArrayProperties"));
+    officecli()
+        .args(["raw", &p, "xl/_rels/workbook.xml.rels"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("relationships/sheetMetadata"));
     officecli()
         .args(["--json", "get", &p, "/Sheet1/A1"])
         .assert()
@@ -3234,6 +3253,20 @@ fn test_xlsx_in_cell_rich_value_image_lifecycle() {
             "--type-name",
             "cell",
             "--properties",
+            "ref=A1",
+            "formula=SEQUENCE(2)",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/Sheet1",
+            "--type-name",
+            "cell",
+            "--properties",
             "ref=C3",
             &format!("image={}", image.display()),
         ])
@@ -3251,6 +3284,7 @@ fn test_xlsx_in_cell_rich_value_image_lifecycle() {
         .assert()
         .success()
         .stdout(predicate::str::contains("XLRICHVALUE"))
+        .stdout(predicate::str::contains("XLDAPR"))
         .stdout(predicate::str::contains("rvb"));
     officecli()
         .args(["raw", &p, "xl/richData/rdrichvalue.xml"])

@@ -510,7 +510,7 @@ fn append_value_metadata(
     Ok(existing + 1)
 }
 
-fn ensure_workbook_relationship(
+pub(crate) fn ensure_workbook_relationship(
     package: &mut OxmlPackage,
     rels_path: &str,
     part: &str,
@@ -550,7 +550,7 @@ fn ensure_default_content_type(
     write_xml(package, "[Content_Types].xml", &updated)
 }
 
-fn ensure_override(
+pub(crate) fn ensure_override(
     package: &mut OxmlPackage,
     part: &str,
     content_type: &str,
@@ -624,7 +624,11 @@ fn count_elements(xml: &str, local_name: &str) -> usize {
         .count()
 }
 
-fn insert_before_close(xml: &str, tag: &str, addition: &str) -> Result<String, HandlerError> {
+pub(crate) fn insert_before_close(
+    xml: &str,
+    tag: &str,
+    addition: &str,
+) -> Result<String, HandlerError> {
     let close = format!("</{tag}>");
     if let Some(offset) = xml.rfind(&close) {
         let mut out = String::with_capacity(xml.len() + addition.len());
@@ -669,7 +673,7 @@ fn set_root_count(xml: String, tag: &str, value: usize) -> Result<String, Handle
     set_named_count(xml, tag, "", value)
 }
 
-fn set_named_count(
+pub(crate) fn set_named_count(
     mut xml: String,
     tag: &str,
     required: &str,
@@ -700,7 +704,7 @@ fn set_named_count(
     Ok(xml)
 }
 
-fn insert_before_named_close(
+pub(crate) fn insert_before_named_close(
     xml: &str,
     tag: &str,
     required: &str,

@@ -1,5 +1,6 @@
 /// Add operations for xlsx documents: add cells, rows, sheets.
 use crate::dom_types::*;
+use crate::dynamic_array;
 use crate::formula;
 use crate::helpers;
 use crate::rich_value_image;
@@ -66,6 +67,11 @@ fn add_cell(
         .map(|value| formula::qualify_for_ooxml(value))
         .transpose()
         .map_err(HandlerError::InvalidArgument)?;
+    let dynamic_cm = formula
+        .as_deref()
+        .filter(|formula| formula::is_dynamic_array_formula(formula))
+        .map(|_| dynamic_array::ensure_metadata(package))
+        .transpose()?;
     let image_vm = properties
         .get("image")
         .filter(|source| !source.is_empty() && !source.eq_ignore_ascii_case("none"))
@@ -132,6 +138,9 @@ fn add_cell(
         )
     } else if let Some(f) = &formula {
         let mut cell = format!("<c r=\"{}\"", ref_str);
+        if let Some(cm) = dynamic_cm {
+            cell.push_str(&format!(" cm=\"{cm}\""));
+        }
         if !t_attr.is_empty() {
             cell.push_str(&format!(" {}", t_attr));
         }

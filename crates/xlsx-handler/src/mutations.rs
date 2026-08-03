@@ -1,5 +1,6 @@
 /// Mutation operations for xlsx documents: set cell values, formulas, remove, move, copy.
 use crate::dom_types::*;
+use crate::dynamic_array;
 use crate::formula;
 use crate::helpers;
 use crate::navigation;
@@ -697,7 +698,11 @@ pub fn set_cell_properties(
             "formula" => {
                 let qualified =
                     formula::qualify_for_ooxml(value).map_err(HandlerError::InvalidArgument)?;
-                modified_xml = set_cell_formula(&modified_xml, &cell_ref_str, &qualified, &p)?;
+                let dynamic_cm = formula::is_dynamic_array_formula(&qualified)
+                    .then(|| dynamic_array::ensure_metadata(package))
+                    .transpose()?;
+                modified_xml =
+                    set_cell_formula(&modified_xml, &cell_ref_str, &qualified, dynamic_cm, &p)?;
             }
             "image" => {}
             "alt" | "altText" | "alttext" | "description" | "image.alt" => {
@@ -877,6 +882,7 @@ fn set_cell_formula(
     xml: &str,
     cell_ref: &str,
     formula: &str,
+    dynamic_cm: Option<usize>,
     p: &str,
 ) -> Result<String, HandlerError> {
     let cell_pattern = format!("<{}c r=\"{}\"", p, cell_ref);
@@ -885,6 +891,7 @@ fn set_cell_formula(
 
         let cell_xml = &xml[cell_start..cell_end];
         let existing_style = extract_existing_style(cell_xml);
+        let cell_attributes = with_dynamic_cm(&existing_style, dynamic_cm);
         let existing_type = extract_existing_type(cell_xml);
         let existing_value = extract_existing_value(cell_xml, p);
 
@@ -894,7 +901,7 @@ fn set_cell_formula(
             &existing_type,
             &existing_value,
             Some(formula),
-            &existing_style,
+            &cell_attributes,
             p,
         );
 
@@ -904,7 +911,8 @@ fn set_cell_formula(
         Ok(result)
     } else {
         // Insert new cell with formula (type defaults to calculated)
-        insert_new_cell(xml, cell_ref, "", "", Some(formula), "", p)
+        let cell_attributes = with_dynamic_cm("", dynamic_cm);
+        insert_new_cell(xml, cell_ref, "", "", Some(formula), &cell_attributes, p)
     }
 }
 
@@ -1024,6 +1032,14 @@ fn build_cell_xml(
 
     cell.push_str(&format!("</{}c>", p));
     cell
+}
+
+fn with_dynamic_cm(style_attr: &str, dynamic_cm: Option<usize>) -> String {
+    match dynamic_cm {
+        Some(cm) if style_attr.is_empty() => format!("cm=\"{cm}\""),
+        Some(cm) => format!("{style_attr} cm=\"{cm}\""),
+        None => style_attr.to_string(),
+    }
 }
 
 fn escape_xml_formula(value: &str) -> String {
