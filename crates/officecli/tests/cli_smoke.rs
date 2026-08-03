@@ -597,6 +597,59 @@ fn test_docx_table_before_anchor_inserts_at_requested_position() {
         .args(["get", &p, "/body/tbl[1]"])
         .assert()
         .success();
+
+    officecli()
+        .args(["add", &p, "/body/tbl[1]", "--type", "row"])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/tbl[1]",
+            "--type",
+            "row",
+            "--before",
+            "/body/tbl[1]/tr[2]",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created: /body/tbl[1]/tr[2]"));
+
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/tbl[1]/tr[2]",
+            "--type",
+            "cell",
+            "--prop",
+            "text=tail",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/tbl[1]/tr[2]",
+            "--type",
+            "cell",
+            "--before",
+            "/body/tbl[1]/tr[2]/tc[2]",
+            "--prop",
+            "text=head",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created: /body/tbl[1]/tr[2]/tc[2]",
+        ));
+    officecli()
+        .args(["get", &p, "/body/tbl[1]/tr[2]/tc[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("head"));
 }
 
 #[test]

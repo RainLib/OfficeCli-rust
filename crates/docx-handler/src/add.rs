@@ -1598,17 +1598,46 @@ fn resolve_insert_index(
             // Find anchor element's position in parent's children
             let parent_node = navigate_to_element(dom, parent_path)?;
             let anchor_node = navigate_to_element(dom, anchor)?;
+            let anchor_segment = parse_path(anchor)?.last().cloned().ok_or_else(|| {
+                HandlerError::InvalidPath(format!("empty anchor path: {}", anchor))
+            })?;
 
-            // Find the anchor's real child index
-            let anchor_real_idx = parent_node
-                .children
-                .iter()
-                .position(|c| {
-                    c.element_type == anchor_node.element_type
-                        && c.attributes == anchor_node.attributes
-                        && c.text_content == anchor_node.text_content
-                })
-                .unwrap_or(parent_node.children.len() - 1);
+            // An indexed DOM path identifies a sibling by ordinal, not by its
+            // serialized contents. Matching contents made `tr[2]` and `tc[2]`
+            // resolve to the first of two identical empty siblings.
+            let anchor_real_idx = if let Some(index) = anchor_segment.index {
+                let same_type: Vec<usize> = parent_node
+                    .children
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, child)| child.element_type == anchor_node.element_type)
+                    .map(|(index, _)| index)
+                    .collect();
+                same_type
+                    .get(index.saturating_sub(1))
+                    .copied()
+                    .ok_or_else(|| {
+                        HandlerError::PathNotFound(format!(
+                            "anchor is not a child of {}: {}",
+                            parent_path, anchor
+                        ))
+                    })?
+            } else {
+                parent_node
+                    .children
+                    .iter()
+                    .position(|child| {
+                        child.element_type == anchor_node.element_type
+                            && child.attributes == anchor_node.attributes
+                            && child.text_content == anchor_node.text_content
+                    })
+                    .ok_or_else(|| {
+                        HandlerError::PathNotFound(format!(
+                            "anchor is not a child of {}: {}",
+                            parent_path, anchor
+                        ))
+                    })?
+            };
 
             match position {
                 InsertPosition::AfterElement(_) => Ok(Some(anchor_real_idx + 1)),
@@ -3116,39 +3145,36 @@ fn add_table_row(
         row.children.insert(0, tr_pr);
     }
 
-    // Now get mutable access
-    let table = navigate_to_element_mut(dom, parent)?;
-
-    let existing_rows: Vec<usize> = table
+    let (real_idx, row_idx) = {
+        let table = navigate_to_element(dom, parent)?;
+        let existing_rows: Vec<usize> = table
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.element_type == WordElementType::TableRow)
+            .map(|(i, _)| i)
+            .collect();
+        let real_idx = match &position {
+            InsertPosition::AtIndex(index) => existing_rows
+                .get(*index)
+                .copied()
+                .unwrap_or(table.children.len()),
+            InsertPosition::Append => table.children.len(),
+            InsertPosition::AfterElement(_) | InsertPosition::BeforeElement(_) => {
+                resolve_insert_index(dom, parent, &position)?.unwrap_or(table.children.len())
+            }
+        };
+        let row_idx = table.children[..real_idx]
+            .iter()
+            .filter(|child| child.element_type == WordElementType::TableRow)
+            .count()
+            + 1;
+        (real_idx, row_idx)
+    };
+    navigate_to_element_mut(dom, parent)?
         .children
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.element_type == WordElementType::TableRow)
-        .map(|(i, _)| i)
-        .collect();
-
-    let insert_idx = resolve_insert_index_simple(&position, existing_rows.len());
-
-    match insert_idx {
-        Some(idx) => {
-            let real_idx = if idx < existing_rows.len() {
-                existing_rows[idx]
-            } else {
-                table.children.len()
-            };
-            table.children.insert(real_idx, row);
-        }
-        None => {
-            table.children.push(row);
-        }
-    }
-
-    let row_count = table
-        .children
-        .iter()
-        .filter(|c| c.element_type == WordElementType::TableRow)
-        .count();
-    Ok(format!("{}/tr[{}]", parent, row_count))
+        .insert(real_idx, row);
+    Ok(format!("{}/tr[{}]", parent, row_idx))
 }
 
 /// Add a cell to a table row.
@@ -3179,38 +3205,36 @@ fn add_table_cell(
         cell.children.insert(0, tc_pr);
     }
 
-    let row = navigate_to_element_mut(dom, parent)?;
-
-    let existing_cells: Vec<usize> = row
+    let (real_idx, cell_idx) = {
+        let row = navigate_to_element(dom, parent)?;
+        let existing_cells: Vec<usize> = row
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.element_type == WordElementType::TableCell)
+            .map(|(i, _)| i)
+            .collect();
+        let real_idx = match &position {
+            InsertPosition::AtIndex(index) => existing_cells
+                .get(*index)
+                .copied()
+                .unwrap_or(row.children.len()),
+            InsertPosition::Append => row.children.len(),
+            InsertPosition::AfterElement(_) | InsertPosition::BeforeElement(_) => {
+                resolve_insert_index(dom, parent, &position)?.unwrap_or(row.children.len())
+            }
+        };
+        let cell_idx = row.children[..real_idx]
+            .iter()
+            .filter(|child| child.element_type == WordElementType::TableCell)
+            .count()
+            + 1;
+        (real_idx, cell_idx)
+    };
+    navigate_to_element_mut(dom, parent)?
         .children
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.element_type == WordElementType::TableCell)
-        .map(|(i, _)| i)
-        .collect();
-
-    let insert_idx = resolve_insert_index_simple(&position, existing_cells.len());
-
-    match insert_idx {
-        Some(idx) => {
-            let real_idx = if idx < existing_cells.len() {
-                existing_cells[idx]
-            } else {
-                row.children.len()
-            };
-            row.children.insert(real_idx, cell);
-        }
-        None => {
-            row.children.push(cell);
-        }
-    }
-
-    let cell_count = row
-        .children
-        .iter()
-        .filter(|c| c.element_type == WordElementType::TableCell)
-        .count();
-    Ok(format!("{}/tc[{}]", parent, cell_count))
+        .insert(real_idx, cell);
+    Ok(format!("{}/tc[{}]", parent, cell_idx))
 }
 
 /// Simple insertion index resolution (for existing add functions).
