@@ -3530,6 +3530,18 @@ fn test_raw_docx() {
         .stdout(predicate::str::contains("w:body"));
 }
 
+#[test]
+fn test_raw_accepts_csharp_default_part_and_row_options() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("raw_csharp.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["raw", &p, "--start", "1", "--end", "1"])
+        .assert()
+        .success();
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Extract-text — pull plain text
 // ═══════════════════════════════════════════════════════════════════════
