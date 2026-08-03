@@ -2471,6 +2471,38 @@ fn test_docx_add_markdown_expands_editable_blocks() {
 }
 
 #[test]
+fn test_new_docx_declares_markdown_heading_styles() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("markdown_styles.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "markdown",
+            "--properties",
+            "markdown=# Title\n## Subtitle",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "validate", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"data\": []"));
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let styles = package.read_part_xml("word/styles.xml").unwrap();
+    assert!(styles.contains(r#"w:styleId="Heading1""#));
+    assert!(styles.contains(r#"w:styleId="Heading9""#));
+}
+
+#[test]
 fn test_docx_add_markdown_emits_inline_format_runs() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_markdown_inline.docx");
