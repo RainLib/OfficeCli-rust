@@ -127,13 +127,48 @@ pub fn read_image_info(package: &OxmlPackage, vm: usize) -> Option<ImageInfo> {
         .children()
         .find(|node| node.has_tag_name("Relationship") && node.attribute("Id") == Some(rel_id))?
         .attribute("Target")?;
-    let image_part = format!("xl/richData/{}", target).replace("richData/../", "");
+    let image_part = resolve_relationship_target(RICH_VALUE_REL_PART, target)?;
     let data = package.read_part_bytes(&image_part).ok()?;
+    let content_type = content_type_for_part(package, &image_part)?;
+    if !content_type
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+    {
+        return None;
+    }
     Some(ImageInfo {
-        content_type: content_type_for_part(package, &image_part)?,
+        content_type,
         byte_size: data.len(),
         alt,
     })
+}
+
+/// OOXML relationship targets are URI-like paths relative to the relationship
+/// owner's part.  Do not assume Excel's usual `../media/*` spelling: packages
+/// produced by other tools can use `./`, multiple parent segments, or an
+/// absolute package target.  Escaping the package root is treated as invalid.
+fn resolve_relationship_target(owner_part: &str, target: &str) -> Option<String> {
+    let target = target.split('#').next()?;
+    if target.is_empty() || target.contains("://") {
+        return None;
+    }
+    let mut components: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        owner_part
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.split('/').collect())?
+    };
+    for component in target.trim_start_matches('/').split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value => components.push(value),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 /// Content type belongs to the OOXML package, not the filesystem extension.
@@ -718,7 +753,7 @@ fn count_children_in_named_block(
 
 #[cfg(test)]
 mod tests {
-    use super::content_type_from_manifest;
+    use super::{content_type_from_manifest, resolve_relationship_target};
 
     #[test]
     fn content_type_uses_part_override_before_extension_default() {
@@ -734,6 +769,26 @@ mod tests {
         assert_eq!(
             content_type_from_manifest(manifest, "/xl/media/image2.BIN"),
             Some("application/octet-stream".to_string())
+        );
+    }
+
+    #[test]
+    fn relationship_targets_resolve_like_package_parts() {
+        assert_eq!(
+            resolve_relationship_target("xl/richData/richValueRel.xml", "../media/image1.png"),
+            Some("xl/media/image1.png".to_string())
+        );
+        assert_eq!(
+            resolve_relationship_target("xl/richData/richValueRel.xml", "./../media/image1.png"),
+            Some("xl/media/image1.png".to_string())
+        );
+        assert_eq!(
+            resolve_relationship_target("xl/richData/richValueRel.xml", "/xl/media/image1.png"),
+            Some("xl/media/image1.png".to_string())
+        );
+        assert_eq!(
+            resolve_relationship_target("xl/richData/richValueRel.xml", "../../../image1.png"),
+            None
         );
     }
 }
