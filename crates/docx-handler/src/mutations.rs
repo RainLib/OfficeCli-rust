@@ -180,6 +180,52 @@ pub fn remove_numbering_level(package: &mut OxmlPackage, path: &str) -> Result<(
         .map_err(|error| HandlerError::SaveError(error.to_string()))
 }
 
+/// Remove a numbering instance and clear every direct paragraph binding to it.
+/// A `w:num` is referenced by `w:numPr/w:numId` throughout the main document,
+/// headers, footers, footnotes and endnotes; leaving those bindings behind
+/// creates an OOXML-valid but semantically dangling list reference.
+pub fn remove_numbering_num(package: &mut OxmlPackage, path: &str) -> Result<(), HandlerError> {
+    let id = path
+        .strip_prefix("/numbering/num[@id=")
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    parse_numbering_id(id)?;
+    let xml = package
+        .read_part_xml(DOCX_NUMBERING_PART)
+        .map_err(|_| HandlerError::PathNotFound("numbering definition not found".to_string()))?;
+    let (start, end) = numbering_num_bounds(&xml, id)?;
+    let mut updated = xml;
+    updated.replace_range(start..end, "");
+    package
+        .write_part_xml(DOCX_NUMBERING_PART, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+
+    let word_parts: Vec<String> = package
+        .list_parts()
+        .into_iter()
+        .filter(|part| is_numbering_reference_part(part))
+        .cloned()
+        .collect();
+    for part in word_parts {
+        let source = package
+            .read_part_xml(&part)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let cleaned = remove_num_properties_for_id(&source, id)?;
+        if cleaned != source {
+            package
+                .write_part_xml(&part, &cleaned)
+                .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn is_numbering_num_path(path: &str) -> bool {
+    path.strip_prefix("/numbering/num[@id=")
+        .and_then(|value| value.strip_suffix(']'))
+        .is_some_and(|id| parse_numbering_id(id).is_ok())
+}
+
 /// Update a numbering instance's template reference without permitting a
 /// dangling `w:abstractNumId` pointer.
 pub fn set_numbering_definition(
@@ -539,6 +585,56 @@ fn numbering_abstract_bounds(xml: &str, id: &str) -> Result<(usize, usize), Hand
         .map(|offset| start + offset + "</w:abstractNum>".len())
         .ok_or_else(|| HandlerError::OperationFailed("invalid abstractNum".to_string()))?;
     Ok((start, end))
+}
+
+fn numbering_num_bounds(xml: &str, id: &str) -> Result<(usize, usize), HandlerError> {
+    let marker = format!("<w:num w:numId=\"{}\"", id);
+    let start = xml
+        .find(&marker)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("num {} not found", id)))?;
+    let end = xml[start..]
+        .find("</w:num>")
+        .map(|offset| start + offset + "</w:num>".len())
+        .ok_or_else(|| HandlerError::OperationFailed("invalid num element".to_string()))?;
+    Ok((start, end))
+}
+
+fn is_numbering_reference_part(part: &str) -> bool {
+    part == "word/document.xml"
+        || matches!(part, "word/footnotes.xml" | "word/endnotes.xml")
+        || (part.starts_with("word/header") && part.ends_with(".xml"))
+        || (part.starts_with("word/footer") && part.ends_with(".xml"))
+}
+
+fn remove_num_properties_for_id(xml: &str, num_id: &str) -> Result<String, HandlerError> {
+    let mut result = xml.to_string();
+    let id_attribute = format!("w:val=\"{}\"", num_id);
+    let mut cursor = 0;
+    while let Some(relative_start) = result[cursor..].find("<w:numPr") {
+        let start = cursor + relative_start;
+        let open_end = result[start..]
+            .find('>')
+            .map(|offset| start + offset + 1)
+            .ok_or_else(|| HandlerError::OperationFailed("invalid numPr element".to_string()))?;
+        if result[..open_end].ends_with("/>") {
+            cursor = open_end;
+            continue;
+        }
+        let end = result[open_end..]
+            .find("</w:numPr>")
+            .map(|offset| open_end + offset + "</w:numPr>".len())
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("unterminated numPr element".to_string())
+            })?;
+        let block = &result[start..end];
+        if block.contains("<w:numId") && block.contains(&id_attribute) {
+            result.replace_range(start..end, "");
+            cursor = start;
+        } else {
+            cursor = end;
+        }
+    }
+    Ok(result)
 }
 
 fn numbering_level_bounds(

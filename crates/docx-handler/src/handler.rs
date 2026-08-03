@@ -820,6 +820,10 @@ impl DocumentHandler for WordHandler {
             mutations::remove_numbering_level(&mut self.package.borrow_mut(), path)?;
             return Ok(Some(path.to_string()));
         }
+        if mutations::is_numbering_num_path(path) {
+            mutations::remove_numbering_num(&mut self.package.borrow_mut(), path)?;
+            return Ok(Some(path.to_string()));
+        }
         if mutations::is_drawing_shape_path(path) {
             mutations::remove_drawing_shape(&mut self.package.borrow_mut(), path)?;
             return Ok(Some(path.to_string()));

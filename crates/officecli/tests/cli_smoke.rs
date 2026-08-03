@@ -926,6 +926,82 @@ fn test_docx_num_start_overrides_round_trip() {
 }
 
 #[test]
+fn test_docx_removing_num_clears_direct_paragraph_bindings() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_num_remove_cleanup.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "abstractNum",
+            "--properties",
+            "id=3",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "num",
+            "--properties",
+            "id=9",
+            "--properties",
+            "abstractNumId=3",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=numbered item",
+            "--properties",
+            "numId=9",
+            "--properties",
+            "numLevel=0",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<w:numId w:val=\"9\""));
+    officecli()
+        .args(["remove", &p, "/numbering/num[@id=9]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/numbering/num[@id=9]", "--json"])
+        .assert()
+        .failure();
+    officecli()
+        .args(["raw", &p, "word/document.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<w:numPr").not());
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_docx_revision_run_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_revision_lifecycle.docx");

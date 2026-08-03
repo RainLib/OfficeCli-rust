@@ -4,9 +4,9 @@
   "element": "num",
   "parent": "numbering",
   "addParent": "/numbering",
-  "operations": { "add": true, "set": true, "get": true, "query": true, "remove": false },
+  "operations": { "add": true, "set": true, "get": true, "query": true, "remove": true },
   "paths": { "stable": ["/numbering/num[@id=N]"], "positional": ["/numbering/num[N]"] },
-  "note": "Numbering instance referencing an existing abstractNum. New instances restart level 0 by default; pass continue=true to retain Word's continuation behavior.",
+  "note": "Numbering instance referencing an existing abstractNum. New instances restart level 0 by default; pass continue=true to retain Word's continuation behavior. Remove clears all direct paragraph bindings to this numId across the document, headers, footers, footnotes and endnotes.",
   "properties": {
     "id": { "type": "int", "add": true, "get": true, "enforcement": "strict" },
     "abstractNumId": { "type": "int", "add": true, "set": true, "get": true, "enforcement": "strict" },
