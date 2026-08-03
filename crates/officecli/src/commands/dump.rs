@@ -82,6 +82,20 @@ pub fn handle_dump(
             }
             return Ok(output);
         }
+        if extension.eq_ignore_ascii_case("xlsx") {
+            let sheet_path = path.as_deref().unwrap_or("/");
+            let handler = crate::open_handler(&cmd.file, false)?;
+            let xml = handler.raw(sheet_path, handler_common::RawOptions::default())?;
+            let output = serde_json::to_string(&vec![
+                serde_json::json!({"command":"meta","dumpVersion":2}),
+                serde_json::json!({"command":"raw-set","part":sheet_path,"xpath":"/worksheet","action":"replace","xml":oxml::xml_util::strip_prolog(&xml)}),
+            ]).map_err(HandlerError::JsonError)?;
+            if let Some(path) = cmd.out.filter(|path| path != "-") {
+                std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
+                return Ok(path);
+            }
+            return Ok(output);
+        }
         if extension.eq_ignore_ascii_case("pptx") && path.as_deref().unwrap_or("/") == "/" {
             let handler = crate::open_handler(&cmd.file, false)?;
             let root = handler.get("/", 1)?;
