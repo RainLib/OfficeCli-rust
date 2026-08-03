@@ -361,6 +361,25 @@ pub fn set_numbering_level(
     if let Some(value) = properties.get("isLgl") {
         set_level_empty_element(&mut block, "isLgl", is_truthy_string(value))?;
     }
+    set_level_indentation(
+        &mut block,
+        properties
+            .get("indent")
+            .map(|value| parse_numbering_id(value))
+            .transpose()?,
+        properties
+            .get("hanging")
+            .map(|value| parse_numbering_id(value))
+            .transpose()?,
+    )?;
+    if let Some(value) = properties
+        .get("direction")
+        .or_else(|| properties.get("dir"))
+        .or_else(|| properties.get("bidi"))
+    {
+        set_level_direction(&mut block, parse_level_direction(value)?)?;
+    }
+    set_level_run_properties(&mut block, properties)?;
     let mut updated = xml;
     updated.replace_range(start..end, &block);
     package
@@ -381,6 +400,16 @@ pub fn set_numbering_level(
                     | "justification"
                     | "jc"
                     | "isLgl"
+                    | "indent"
+                    | "hanging"
+                    | "direction"
+                    | "dir"
+                    | "bidi"
+                    | "font"
+                    | "size"
+                    | "color"
+                    | "bold"
+                    | "italic"
             )
         })
         .cloned()
@@ -544,6 +573,269 @@ fn normalize_level_justification(value: &str) -> Result<&'static str, HandlerErr
             value
         ))),
     }
+}
+
+fn set_level_indentation(
+    block: &mut String,
+    indent: Option<i32>,
+    hanging: Option<i32>,
+) -> Result<(), HandlerError> {
+    if indent.is_none() && hanging.is_none() {
+        return Ok(());
+    }
+    let (ppr_open_end, ppr_end) = ensure_level_container(block, "pPr")?;
+    let ppr = &block[ppr_open_end..ppr_end];
+    if let Some(relative_start) = ppr.find("<w:ind") {
+        let start = ppr_open_end + relative_start;
+        if let Some(value) = indent {
+            upsert_element_attribute(block, start, "w:left", &value.to_string())?;
+        }
+        if let Some(value) = hanging {
+            upsert_element_attribute(block, start, "w:hanging", &value.to_string())?;
+        }
+    } else {
+        let mut element = "<w:ind".to_string();
+        if let Some(value) = indent {
+            element.push_str(&format!(" w:left=\"{}\"", value));
+        }
+        if let Some(value) = hanging {
+            element.push_str(&format!(" w:hanging=\"{}\"", value));
+        }
+        element.push_str("/>");
+        block.insert_str(ppr_end, &element);
+    }
+    Ok(())
+}
+
+fn set_level_direction(block: &mut String, rtl: bool) -> Result<(), HandlerError> {
+    let Some((ppr_open_end, ppr_end)) = level_container_bounds(block, "pPr") else {
+        if !rtl {
+            return Ok(());
+        }
+        let (ppr_open_end, _) = ensure_level_container(block, "pPr")?;
+        block.insert_str(ppr_open_end, "<w:bidi/>");
+        return Ok(());
+    };
+    let ppr = &block[ppr_open_end..ppr_end];
+    if let Some(relative_start) = ppr.find("<w:bidi") {
+        let start = ppr_open_end + relative_start;
+        let open_end = block[start..]
+            .find('>')
+            .map(|offset| start + offset + 1)
+            .ok_or_else(|| HandlerError::OperationFailed("invalid bidi element".to_string()))?;
+        let end = if block[..open_end].ends_with("/>") {
+            open_end
+        } else {
+            block[open_end..]
+                .find("</w:bidi>")
+                .map(|offset| open_end + offset + "</w:bidi>".len())
+                .ok_or_else(|| HandlerError::OperationFailed("invalid bidi element".to_string()))?
+        };
+        if !rtl {
+            block.replace_range(start..end, "");
+        }
+    } else if rtl {
+        block.insert_str(ppr_open_end, "<w:bidi/>");
+    }
+    Ok(())
+}
+
+fn set_level_run_properties(
+    block: &mut String,
+    properties: &HashMap<String, String>,
+) -> Result<(), HandlerError> {
+    let needs_rpr = ["font", "size", "color", "bold", "italic"]
+        .iter()
+        .any(|key| properties.contains_key(*key));
+    if !needs_rpr {
+        return Ok(());
+    }
+    ensure_level_container(block, "rPr")?;
+    if let Some(value) = properties.get("font") {
+        let (open_end, _) = ensure_level_container(block, "rPr")?;
+        if let Some((start, _)) = level_child_bounds(block, open_end, "rPr", "rFonts")? {
+            for attribute in ["w:ascii", "w:hAnsi", "w:eastAsia"] {
+                upsert_element_attribute(block, start, attribute, &escape_attr(value))?;
+            }
+        } else {
+            insert_level_rpr_child(
+                block,
+                "rFonts",
+                &format!(
+                    "<w:rFonts w:ascii=\"{0}\" w:hAnsi=\"{0}\" w:eastAsia=\"{0}\"/>",
+                    escape_attr(value)
+                ),
+            )?;
+        }
+    }
+    if let Some(value) = properties.get("size") {
+        let points = parse_font_points(value)?;
+        set_level_rpr_value(block, "sz", &(points * 2.0).round().to_string())?;
+    }
+    if let Some(value) = properties.get("color") {
+        set_level_rpr_value(block, "color", &escape_attr(value.trim_start_matches('#')))?;
+    }
+    for (property, tag) in [("bold", "b"), ("italic", "i")] {
+        if let Some(value) = properties.get(property) {
+            set_level_rpr_empty(block, tag, is_truthy_string(value))?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_level_direction(value: &str) -> Result<bool, HandlerError> {
+    match value.to_ascii_lowercase().as_str() {
+        "rtl" | "righttoleft" | "right-to-left" | "true" | "1" => Ok(true),
+        "ltr" | "lefttoright" | "left-to-right" | "false" | "0" | "" => Ok(false),
+        _ => Err(HandlerError::InvalidArgument(format!(
+            "invalid direction '{}'",
+            value
+        ))),
+    }
+}
+
+fn parse_font_points(value: &str) -> Result<f64, HandlerError> {
+    let value = value.trim().trim_end_matches("pt");
+    let points = value.parse::<f64>().map_err(|_| {
+        HandlerError::InvalidArgument(format!("size must be a point value (got '{}')", value))
+    })?;
+    if points.is_finite() {
+        Ok(points)
+    } else {
+        Err(HandlerError::InvalidArgument(
+            "size must be finite".to_string(),
+        ))
+    }
+}
+
+fn ensure_level_container(block: &mut String, tag: &str) -> Result<(usize, usize), HandlerError> {
+    if let Some(bounds) = level_container_bounds(block, tag) {
+        return Ok(bounds);
+    }
+    let insert_at = level_insert_at(block, tag)?;
+    block.insert_str(insert_at, &format!("<w:{tag}></w:{tag}>"));
+    level_container_bounds(block, tag)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("failed to create {tag}")))
+}
+
+/// Returns the content bounds (after opening tag, before closing tag) for a
+/// direct level child container such as pPr or rPr.
+fn level_container_bounds(block: &str, tag: &str) -> Option<(usize, usize)> {
+    let start = block.find(&format!("<w:{tag}"))?;
+    let open_end = block[start..].find('>')? + start + 1;
+    if block[..open_end].ends_with("/>") {
+        return Some((open_end, open_end));
+    }
+    let end = block[open_end..].find(&format!("</w:{tag}>"))? + open_end;
+    Some((open_end, end))
+}
+
+fn level_child_bounds(
+    block: &str,
+    container_open_end: usize,
+    container_tag: &str,
+    child_tag: &str,
+) -> Result<Option<(usize, usize)>, HandlerError> {
+    let container_end = block[container_open_end..]
+        .find(&format!("</w:{container_tag}>"))
+        .map(|offset| container_open_end + offset)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {container_tag}")))?;
+    let Some(relative_start) =
+        block[container_open_end..container_end].find(&format!("<w:{child_tag}"))
+    else {
+        return Ok(None);
+    };
+    let start = container_open_end + relative_start;
+    let open_end = block[start..]
+        .find('>')
+        .map(|offset| start + offset + 1)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {child_tag}")))?;
+    let end = if block[..open_end].ends_with("/>") {
+        open_end
+    } else {
+        block[open_end..]
+            .find(&format!("</w:{child_tag}>"))
+            .map(|offset| open_end + offset + child_tag.len() + 5)
+            .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {child_tag}")))?
+    };
+    Ok(Some((start, end)))
+}
+
+fn upsert_element_attribute(
+    block: &mut String,
+    element_start: usize,
+    attribute: &str,
+    value: &str,
+) -> Result<(), HandlerError> {
+    let open_end = block[element_start..]
+        .find('>')
+        .map(|offset| element_start + offset + 1)
+        .ok_or_else(|| HandlerError::OperationFailed("invalid element".to_string()))?;
+    let marker = format!("{attribute}=\"");
+    if let Some(relative_value_start) = block[element_start..open_end].find(&marker) {
+        let value_start = element_start + relative_value_start + marker.len();
+        let value_end = block[value_start..open_end]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .ok_or_else(|| HandlerError::OperationFailed("invalid attribute".to_string()))?;
+        block.replace_range(value_start..value_end, value);
+    } else {
+        let insert_at = if block[..open_end].ends_with("/>") {
+            open_end - 2
+        } else {
+            open_end - 1
+        };
+        block.insert_str(insert_at, &format!(" {attribute}=\"{value}\""));
+    }
+    Ok(())
+}
+
+fn set_level_rpr_value(block: &mut String, tag: &str, value: &str) -> Result<(), HandlerError> {
+    let (open_end, _) = ensure_level_container(block, "rPr")?;
+    if let Some((start, _)) = level_child_bounds(block, open_end, "rPr", tag)? {
+        upsert_element_attribute(block, start, "w:val", value)
+    } else {
+        insert_level_rpr_child(block, tag, &format!("<w:{tag} w:val=\"{value}\"/>"))
+    }
+}
+
+fn set_level_rpr_empty(block: &mut String, tag: &str, enabled: bool) -> Result<(), HandlerError> {
+    let (open_end, _) = ensure_level_container(block, "rPr")?;
+    if let Some((start, end)) = level_child_bounds(block, open_end, "rPr", tag)? {
+        if enabled {
+            block.replace_range(start..end, &format!("<w:{tag}/>"));
+        } else {
+            block.replace_range(start..end, "");
+        }
+    } else if enabled {
+        insert_level_rpr_child(block, tag, &format!("<w:{tag}/>"))?;
+    }
+    Ok(())
+}
+
+fn insert_level_rpr_child(block: &mut String, tag: &str, xml: &str) -> Result<(), HandlerError> {
+    let (open_end, container_end) = ensure_level_container(block, "rPr")?;
+    let order = ["rFonts", "b", "i", "color", "sz"];
+    let current = order
+        .iter()
+        .position(|item| *item == tag)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("unknown rPr tag {tag}")))?;
+    let mut insert_at = open_end;
+    for previous in &order[..current] {
+        if let Some((_, end)) = level_child_bounds(block, open_end, "rPr", previous)? {
+            insert_at = end;
+        }
+    }
+    // No earlier sibling: schema order starts directly after rPr's opening
+    // tag.  Otherwise append after the last earlier child; `container_end` is
+    // intentionally retained to make the empty-container case explicit.
+    if insert_at > container_end {
+        return Err(HandlerError::OperationFailed(
+            "invalid rPr insertion point".to_string(),
+        ));
+    }
+    block.insert_str(insert_at, xml);
+    Ok(())
 }
 
 fn parse_numbering_id(value: &str) -> Result<i32, HandlerError> {

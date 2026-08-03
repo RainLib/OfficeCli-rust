@@ -675,6 +675,14 @@ fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
             "suff=space",
             "jc=center",
             "isLgl=true",
+            "indent=1440",
+            "hanging=360",
+            "direction=rtl",
+            "font=Symbol",
+            "size=14pt",
+            "color=#FF0000",
+            "bold=true",
+            "italic=true",
         ])
         .assert()
         .success();
@@ -704,6 +712,19 @@ fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
         .stdout(predicate::str::contains("\"suff\": \"space\""))
         .stdout(predicate::str::contains("\"justification\": \"center\""))
         .stdout(predicate::str::contains("\"isLgl\": true"));
+    officecli()
+        .args(["raw", &p, "word/numbering.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "<w:ind w:left=\"1440\" w:hanging=\"360\"/>",
+        ))
+        .stdout(predicate::str::contains("<w:bidi/>"))
+        .stdout(predicate::str::contains("w:ascii=\"Symbol\""))
+        .stdout(predicate::str::contains("<w:sz w:val=\"28\"/>"))
+        .stdout(predicate::str::contains("<w:color w:val=\"FF0000\"/>"))
+        .stdout(predicate::str::contains("<w:b/>"))
+        .stdout(predicate::str::contains("<w:i/>"));
 }
 
 #[test]

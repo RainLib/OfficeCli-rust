@@ -13,17 +13,17 @@
     "format": { "type": "string", "aliases": ["numFmt"], "add": true, "set": true, "get": true, "enforcement": "report" },
     "text": { "type": "string", "aliases": ["lvlText"], "add": true, "set": true, "get": true, "enforcement": "report" },
     "start": { "type": "int", "add": true, "set": true, "get": true, "enforcement": "report" },
-    "indent": { "type": "int", "add": true, "enforcement": "report" },
-    "hanging": { "type": "int", "add": true, "enforcement": "report" },
+    "indent": { "type": "int", "add": true, "set": true, "enforcement": "report" },
+    "hanging": { "type": "int", "add": true, "set": true, "enforcement": "report" },
     "justification": { "type": "enum", "values": ["left", "center", "right"], "aliases": ["jc"], "add": true, "set": true, "get": true, "enforcement": "report" },
     "suff": { "type": "enum", "values": ["tab", "space", "nothing"], "add": true, "set": true, "get": true, "enforcement": "report" },
     "lvlRestart": { "type": "int", "add": true, "set": true, "get": true, "enforcement": "report" },
     "isLgl": { "type": "bool", "add": true, "set": true, "get": true, "enforcement": "report" },
-    "direction": { "type": "enum", "values": ["rtl", "ltr"], "aliases": ["dir", "bidi"], "add": true, "enforcement": "report" },
-    "font": { "type": "string", "add": true, "enforcement": "report" },
-    "size": { "type": "font-size", "add": true, "enforcement": "report" },
-    "color": { "type": "color", "add": true, "enforcement": "report" },
-    "bold": { "type": "bool", "add": true, "enforcement": "report" },
-    "italic": { "type": "bool", "add": true, "enforcement": "report" }
+    "direction": { "type": "enum", "values": ["rtl", "ltr"], "aliases": ["dir", "bidi"], "add": true, "set": true, "enforcement": "report" },
+    "font": { "type": "string", "add": true, "set": true, "enforcement": "report" },
+    "size": { "type": "font-size", "add": true, "set": true, "enforcement": "report" },
+    "color": { "type": "color", "add": true, "set": true, "enforcement": "report" },
+    "bold": { "type": "bool", "add": true, "set": true, "enforcement": "report" },
+    "italic": { "type": "bool", "add": true, "set": true, "enforcement": "report" }
   }
 }
