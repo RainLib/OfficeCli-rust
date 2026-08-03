@@ -47,6 +47,18 @@ pub struct SetCommand {
     #[arg(num_args = 0..)]
     pub properties: Vec<String>,
 
+    /// Property to set (C#-compatible spelling; may be repeated).
+    #[arg(long = "prop", num_args = 1..)]
+    pub prop: Vec<String>,
+
+    /// Find text or raw-regex pattern (C#-compatible shorthand for find=).
+    #[arg(long)]
+    pub find: Option<String>,
+
+    /// Replacement text paired with --find (C#-compatible shorthand for replace=).
+    #[arg(long)]
+    pub replace: Option<String>,
+
     /// Emit the refreshed text+offset map after the edit (JSON output only).
     /// Use this after range edits to re-address elements whose node structure changed.
     #[arg(long)]
@@ -64,8 +76,33 @@ pub struct SetCommand {
 pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, true)?;
 
-    let mut properties: HashMap<String, String> = cmd
-        .properties
+    let mut raw_properties = cmd.properties.clone();
+    raw_properties.extend(cmd.prop.iter().cloned());
+    let has_property = |name: &str| {
+        raw_properties.iter().any(|property| {
+            property
+                .split_once('=')
+                .is_some_and(|(key, _)| key.eq_ignore_ascii_case(name))
+        })
+    };
+    if cmd.find.is_some() && has_property("find") {
+        return Err(HandlerError::InvalidArgument(
+            "Cannot combine --find and find= property. Use --find only.".to_string(),
+        ));
+    }
+    if cmd.replace.is_some() && has_property("replace") {
+        return Err(HandlerError::InvalidArgument(
+            "Cannot combine --replace and replace= property. Use --replace only.".to_string(),
+        ));
+    }
+    if let Some(find) = &cmd.find {
+        raw_properties.push(format!("find={find}"));
+    }
+    if let Some(replace) = &cmd.replace {
+        raw_properties.push(format!("replace={replace}"));
+    }
+
+    let mut properties: HashMap<String, String> = raw_properties
         .iter()
         .filter_map(|p| {
             let parts: Vec<&str> = p.splitn(2, '=').collect();

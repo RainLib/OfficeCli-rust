@@ -3239,6 +3239,43 @@ fn test_set_text() {
         .stdout(predicate::str::contains("Modified"));
 }
 
+#[test]
+fn test_set_accepts_csharp_prop_syntax() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_set_csharp_prop.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["set", &p, "/body/p[1]", "--prop", "text=C# property flag"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("OK"));
+    officecli()
+        .args(["get", &p, "/body/p[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("C# property flag"));
+
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[1]",
+            "--find",
+            "property",
+            "--replace",
+            "selector",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("C# selector flag"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Remove — delete an element
 // ═══════════════════════════════════════════════════════════════════════
