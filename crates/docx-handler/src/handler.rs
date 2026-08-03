@@ -32,6 +32,14 @@ const WPG_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessi
 const WPS_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
+fn hyperlink_target(properties: &HashMap<String, String>) -> Option<&str> {
+    properties
+        .get("url")
+        .or_else(|| properties.get("target"))
+        .or_else(|| properties.get("link"))
+        .map(String::as_str)
+}
+
 pub struct WordHandler {
     package: RefCell<OxmlPackage>,
     editable: bool,
@@ -736,6 +744,15 @@ impl DocumentHandler for WordHandler {
         } else {
             set_properties(&mut dom, path, properties)?
         };
+        if path_lc.contains("/hyperlink[") {
+            if let Some(target) = hyperlink_target(properties) {
+                let relationship_id = mutations::add_document_hyperlink_relationship(
+                    &mut self.package.borrow_mut(),
+                    target,
+                )?;
+                mutations::set_hyperlink_relationship_id(&mut dom, path, &relationship_id)?;
+            }
+        }
         self.write_dom(&dom)?;
         Ok(result)
     }
@@ -818,6 +835,17 @@ impl DocumentHandler for WordHandler {
         }
         let mut dom = self.parse_dom()?;
         let new_path = add_element(&mut dom, parent, element_type, position, properties, wrap)?;
+        if element_type.eq_ignore_ascii_case("hyperlink")
+            || element_type.eq_ignore_ascii_case("link")
+        {
+            if let Some(target) = hyperlink_target(properties) {
+                let relationship_id = mutations::add_document_hyperlink_relationship(
+                    &mut self.package.borrow_mut(),
+                    target,
+                )?;
+                mutations::set_hyperlink_relationship_id(&mut dom, &new_path, &relationship_id)?;
+            }
+        }
         self.write_dom(&dom)?;
         Ok(new_path)
     }

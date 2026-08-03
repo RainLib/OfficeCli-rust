@@ -2179,6 +2179,61 @@ fn test_docx_tracked_find_rejects_hyperlink_boundary() {
 }
 
 #[test]
+fn test_docx_hyperlink_add_and_set_write_external_relationships() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("hyperlink_relationship.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body/p[1]",
+            "--type-name",
+            "hyperlink",
+            "--properties",
+            "text=first",
+            "url=https://example.com/first",
+        ])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let document = package.read_part_xml("word/document.xml").unwrap();
+    let rels = package
+        .read_part_xml("word/_rels/document.xml.rels")
+        .unwrap();
+    assert!(document.contains(r#"w:hyperlink r:id="rId2""#));
+    assert!(rels.contains(r#"Id="rId2""#));
+    assert!(rels.contains(r#"Target="https://example.com/first" TargetMode="External""#));
+
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[1]/hyperlink[1]",
+            "url=https://example.com/second",
+        ])
+        .assert()
+        .success();
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let document = package.read_part_xml("word/document.xml").unwrap();
+    let rels = package
+        .read_part_xml("word/_rels/document.xml.rels")
+        .unwrap();
+    assert!(document.contains(r#"w:hyperlink r:id="rId3""#));
+    assert!(rels.contains(r#"Id="rId3""#));
+    assert!(rels.contains(r#"Target="https://example.com/second" TargetMode="External""#));
+    officecli()
+        .args(["--json", "validate", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"data\": []"));
+}
+
+#[test]
 fn test_docx_comment_set_formats_existing_body_without_flattening() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_comment_set_format.docx");

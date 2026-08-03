@@ -27,6 +27,7 @@ const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const WP_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
 const WPG_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
 const WPS_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DrawingShapeKind {
@@ -8463,6 +8464,52 @@ fn next_docx_rel_id(package: &OxmlPackage, rels_path: &str) -> String {
         }
     }
     format!("rId{}", max_id + 1)
+}
+
+/// Create an external hyperlink relationship on the main Word document and
+/// return the relationship ID that must be stored in `w:hyperlink/@r:id`.
+pub fn add_document_hyperlink_relationship(
+    package: &mut OxmlPackage,
+    target: &str,
+) -> Result<String, HandlerError> {
+    handler_common::hyperlink_validator::require_safe_scheme(target, "hyperlink")
+        .map_err(HandlerError::InvalidArgument)?;
+    let relationship_id = next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART);
+    let relation = format!(
+        "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"{}\" TargetMode=\"External\"/>",
+        relationship_id,
+        escape_attr(target),
+    );
+    inject_docx_relationship(package, DOCX_DOCUMENT_RELS_PART, &relation)?;
+    Ok(relationship_id)
+}
+
+/// Replace a hyperlink's temporary URL-valued `r:id` with the package
+/// relationship ID allocated by [`add_document_hyperlink_relationship`].
+pub fn set_hyperlink_relationship_id(
+    dom: &mut WordDom,
+    path: &str,
+    relationship_id: &str,
+) -> Result<(), HandlerError> {
+    let hyperlink = navigate_to_element_mut(dom, path)?;
+    if hyperlink.element_type != WordElementType::Hyperlink {
+        return Err(HandlerError::InvalidPath(format!(
+            "expected hyperlink path, got '{}'",
+            path
+        )));
+    }
+    // Parsed attributes are keyed by local name (`id`) plus a namespace URI.
+    // `add_hyperlink` and the legacy setter temporarily use `r:id`; remove it
+    // before writing the normalized pair or XML serialization emits r:id twice.
+    hyperlink.attributes.remove("r:id");
+    hyperlink.attribute_namespaces.remove("r:id");
+    hyperlink
+        .attributes
+        .insert("id".to_string(), relationship_id.to_string());
+    hyperlink
+        .attribute_namespaces
+        .insert("id".to_string(), R_NS.to_string());
+    Ok(())
 }
 
 /// Inject a Relationship element into a .rels part, creating the wrapper if missing.
