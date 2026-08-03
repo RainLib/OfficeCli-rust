@@ -99,13 +99,23 @@ pub fn populate_node(package: &OxmlPackage, node: &mut DocumentNode) -> Result<(
 pub fn set(
     package: &mut OxmlPackage,
     properties: &HashMap<String, String>,
+    lock_structure_explicit: &mut bool,
 ) -> Result<Vec<String>, HandlerError> {
     let mut xml = read(package)?;
     let sheets = sheet_names(&xml)?;
-    let lock_structure_explicit = properties
-        .get("workbook.lockStructure")
-        .or_else(|| properties.get("lockStructure"))
-        .is_some_and(|value| truthy(value));
+    // HashMap property order is deliberately unspecified. Apply an explicit
+    // lock intent before handling a password clear so a single Set request is
+    // deterministic, and retain it for later calls on this handler just like
+    // C#'s `_workbookLockStructureExplicit` field.
+    if let Some(value) = properties.iter().find_map(|(key, value)| {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "workbook.lockstructure" | "lockstructure"
+        )
+        .then_some(value)
+    }) {
+        *lock_structure_explicit = truthy(value);
+    }
     let mut unsupported = Vec::new();
     for (key, value) in properties {
         match key.to_ascii_lowercase().as_str() {
@@ -235,6 +245,7 @@ pub fn set(
             }
             "workbook.lockstructure" | "lockstructure" => {
                 xml = set_protection_attr(&xml, "lockStructure", value)?;
+                *lock_structure_explicit = truthy(value);
             }
             "workbook.lockwindows" | "lockwindows" => {
                 xml = set_protection_attr(&xml, "lockWindows", value)?;
@@ -242,7 +253,7 @@ pub fn set(
             "workbook.passwordhash" => {
                 if value.is_empty() || value.eq_ignore_ascii_case("none") {
                     xml = remove_protection_attr(&xml, "workbookPassword")?;
-                    if !lock_structure_explicit {
+                    if !*lock_structure_explicit {
                         xml = remove_protection_attr(&xml, "lockStructure")?;
                     }
                 } else {
@@ -272,7 +283,7 @@ pub fn set(
             "workbook.password" | "workbookpassword" => {
                 if value.is_empty() || value.eq_ignore_ascii_case("none") {
                     xml = remove_protection_attr(&xml, "workbookPassword")?;
-                    if !lock_structure_explicit {
+                    if !*lock_structure_explicit {
                         xml = remove_protection_attr(&xml, "lockStructure")?;
                     }
                 } else {

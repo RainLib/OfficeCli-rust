@@ -3349,6 +3349,35 @@ fn test_xlsx_workbook_settings_root_lifecycle() {
 }
 
 #[test]
+fn test_xlsx_password_clear_keeps_session_explicit_structure_lock() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_password_explicit_lock.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    // Batch deliberately keeps one handler open, matching the C# field's
+    // session lifetime. The final password clear must only remove the lock it
+    // auto-implied, never the caller's prior explicit structure lock.
+    let batch_json = r#"[
+        {"command":"set","path":"/","props":{"workbook.lockStructure":"true"}},
+        {"command":"set","path":"/","props":{"workbook.password":"secret"}},
+        {"command":"set","path":"/","props":{"workbook.password":"none"}}
+    ]"#;
+    officecli()
+        .args(["batch", &p, batch_json])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/workbook.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<workbookProtection"))
+        .stdout(predicate::str::contains(r#"lockStructure="1""#))
+        .stdout(predicate::str::contains("workbookPassword=").not());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
 fn test_xlsx_in_cell_rich_value_image_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("in_cell_image.xlsx");

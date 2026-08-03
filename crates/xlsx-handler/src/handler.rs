@@ -15,6 +15,9 @@ use crate::view;
 pub struct ExcelHandler {
     package: RefCell<OxmlPackage>,
     editable: bool,
+    // Mirrors C#'s session-local distinction between a lock implied by a
+    // workbook password and one explicitly requested by the caller.
+    workbook_lock_structure_explicit: RefCell<bool>,
 }
 
 impl ExcelHandler {
@@ -24,6 +27,7 @@ impl ExcelHandler {
         Ok(Self {
             package: RefCell::new(package),
             editable,
+            workbook_lock_structure_explicit: RefCell::new(false),
         })
     }
 }
@@ -182,7 +186,11 @@ impl DocumentHandler for ExcelHandler {
             })?;
             mutations::apply_xlsx_range_highlights(&mut pkg, properties, &segments)
         } else if path == "/" {
-            crate::workbook_settings::set(&mut pkg, properties)
+            crate::workbook_settings::set(
+                &mut pkg,
+                properties,
+                &mut self.workbook_lock_structure_explicit.borrow_mut(),
+            )
         } else {
             mutations::set_cell_properties(&mut pkg, path, properties)
         }
