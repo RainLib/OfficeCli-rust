@@ -138,6 +138,7 @@ fn main() {
         std::process::exit(1);
     });
 
+    let mut validate_succeeded = true;
     let result = match command {
         commands::Command::View(cmd) => commands::handle_view(cmd, format),
         commands::Command::Get(cmd) => commands::handle_get(cmd, format),
@@ -151,7 +152,12 @@ fn main() {
         commands::Command::Refresh(cmd) => commands::handle_refresh(cmd, format),
         commands::Command::Raw(cmd) => commands::handle_raw(cmd, format),
         commands::Command::RawSet(cmd) => commands::handle_raw_set(cmd, format),
-        commands::Command::Validate(cmd) => commands::handle_validate(cmd, format),
+        commands::Command::Validate(cmd) => {
+            commands::handle_validate_with_status(cmd, format).map(|(output, succeeded)| {
+                validate_succeeded = succeeded;
+                output
+            })
+        }
         commands::Command::Save(cmd) => commands::handle_save(cmd, format),
         commands::Command::ExtractText(cmd) => commands::handle_extract_text(cmd, format),
         commands::Command::Create(cmd) => commands::handle_create(cmd, format),
@@ -188,8 +194,11 @@ fn main() {
                 if !succeeded {
                     std::process::exit(1);
                 }
-            } else {
+            } else if validate_succeeded {
                 println!("{}", text);
+            } else {
+                eprintln!("{}", text);
+                std::process::exit(1);
             }
         }
         Err(e) => {

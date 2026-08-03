@@ -412,7 +412,7 @@ pub use save::handle_save;
 pub use set::handle_set;
 pub use skills::handle_skills;
 pub use swap::handle_swap;
-pub use validate::handle_validate;
+pub use validate::handle_validate_with_status;
 pub use view::handle_view;
 
 // ─── Watch subcommand handlers (mark/unmark/marks/goto) ──────────────────

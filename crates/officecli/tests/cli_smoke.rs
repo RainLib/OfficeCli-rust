@@ -3707,7 +3707,9 @@ fn test_xlsx_sheet_order_mutations_preserve_defined_name_scopes() {
         .args(["validate", &p])
         .assert()
         .success()
-        .stdout(predicate::str::contains("No validation errors"));
+        .stdout(predicate::str::contains(
+            "Validation passed: no errors found.",
+        ));
 
     let package = oxml::OxmlPackage::open(&p, false).unwrap();
     let workbook = package.read_part_xml("xl/workbook.xml").unwrap();
@@ -4096,7 +4098,9 @@ fn test_pptx_remove_middle_slide_then_edit_and_add() {
         .args(["validate", &p])
         .assert()
         .success()
-        .stdout(predicate::str::contains("No validation errors"));
+        .stdout(predicate::str::contains(
+            "Validation passed: no errors found.",
+        ));
     officecli()
         .args(["view", &p, "-m", "stats"])
         .assert()
@@ -4932,6 +4936,40 @@ fn test_json_envelopes_wrap_writes_and_failures() {
         .as_str()
         .unwrap()
         .contains("not found"));
+}
+
+#[test]
+fn test_validate_uses_csharp_judgment_exit_and_streams() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("validate_judgment.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["validate", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Validation passed: no errors found.",
+        ));
+
+    officecli()
+        .args(["set", &p, "/body/p[1]", "style=MissingStyle"])
+        .assert()
+        .success();
+    officecli()
+        .args(["validate", &p])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("Found 1 validation error(s):"))
+        .stderr(predicate::str::contains("[dangling-reference]"));
+    officecli()
+        .args(["--json", "validate", &p])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"success\": false"))
+        .stdout(predicate::str::contains("MissingStyle"));
 }
 
 #[test]

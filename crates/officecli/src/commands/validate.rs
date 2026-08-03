@@ -7,24 +7,34 @@ pub struct ValidateCommand {
     pub file: String,
 }
 
-pub fn handle_validate(cmd: ValidateCommand, format: OutputFormat) -> Result<String, HandlerError> {
+pub fn handle_validate_with_status(
+    cmd: ValidateCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
     let handler = crate::open_handler(&cmd.file, false)?;
     let errors = handler.validate()?;
-    match format {
+    let valid = errors.is_empty();
+    let output = match format {
         OutputFormat::Text => {
-            if errors.is_empty() {
-                Ok("No validation errors".to_string())
+            if valid {
+                "Validation passed: no errors found.".to_string()
             } else {
-                let lines: Vec<String> = errors
-                    .iter()
-                    .map(|e| format!("{}: {}", e.error_type, e.description))
-                    .collect();
-                Ok(lines.join("\n"))
+                let mut lines = vec![format!("Found {} validation error(s):", errors.len())];
+                for error in errors {
+                    lines.push(format!("  [{}] {}", error.error_type, error.description));
+                    if let Some(path) = error.path {
+                        lines.push(format!("    Path: {}", path));
+                    }
+                    if let Some(part) = error.part {
+                        lines.push(format!("    Part: {}", part));
+                    }
+                }
+                lines.join("\n")
             }
         }
-        OutputFormat::Json => Ok(crate::commands::json_data_envelope(
-            serde_json::to_value(&errors)?,
-            errors.is_empty(),
-        )),
-    }
+        OutputFormat::Json => {
+            crate::commands::json_data_envelope(serde_json::to_value(&errors)?, valid)
+        }
+    };
+    Ok((output, valid))
 }
