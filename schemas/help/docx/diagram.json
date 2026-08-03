@@ -1,0 +1,16 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "diagram",
+  "elementAliases": ["flowchart"],
+  "parent": "body",
+  "operations": {"add": true, "set": false, "get": false, "query": false, "remove": false},
+  "paths": {"positional": ["/body"]},
+  "note": "Expands Mermaid source into one native editable DrawingML group (wpg:wgp). Add returns /body/group[N]. The current native compiler supports flowchart/graph TD/TB/LR/RL with ordinary/rounded/ellipse/diamond/hexagon nodes, chained links, pipe labels and dashed links; and sequenceDiagram participants, lifelines, solid/dashed messages and labels. Unsupported Mermaid kinds and advanced directives are intentionally rejected or ignored; C#'s full crossing-reduction/router and browser image renderer remain pending parity work.",
+  "properties": {
+    "mermaid": {"type": "string", "aliases": ["text", "dsl"], "description": "Mermaid source.", "add": true, "examples": ["--properties 'mermaid=flowchart TD; A[Start] --> B{Ready?} --> C[Done]'" ]},
+    "src": {"type": "string", "aliases": ["path"], "description": "Path to a Mermaid source file when no inline source is supplied.", "add": true},
+    "width": {"type": "length", "description": "Bounding-box width. Aspect ratio is preserved.", "add": true, "examples": ["--properties width=12cm"]},
+    "height": {"type": "length", "description": "Bounding-box height. Aspect ratio is preserved.", "add": true, "examples": ["--properties height=8cm"]}
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "permStart",
+  "elementAliases": ["permEnd"],
+  "parent": "body|paragraph",
+  "operations": { "add": true, "set": false, "get": true, "query": false, "remove": true },
+  "paths": { "stable": ["/body/p[N]/permStart[@id=ID]"], "positional": ["/body/p[N]/permStart[M]"] },
+  "note": "Protected-document permission range markers. Add permStart with id and optional edGrp, ed, colFirst, colLast; add permEnd with the same id to close the range.",
+  "properties": {
+    "id": { "type": "number", "description": "Required shared range id.", "add": true, "get": true, "enforcement": "strict" },
+    "edGrp": { "type": "string", "add": true, "get": true, "enforcement": "report" },
+    "ed": { "type": "string", "add": true, "get": true, "enforcement": "report" },
+    "colFirst": { "type": "number", "add": true, "get": true, "enforcement": "report" },
+    "colLast": { "type": "number", "add": true, "get": true, "enforcement": "report" }
+  }
+}

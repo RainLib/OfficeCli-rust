@@ -1,0 +1,21 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "shape",
+  "elementAliases": ["sp"],
+  "parent": "body",
+  "operations": {"add": true, "set": true, "get": true, "query": false, "remove": true},
+  "paths": {"positional": ["/body/shape[N]"]},
+  "note": "Floating DrawingML geometric shape (wps:wsp). Add creates a host paragraph; Get exposes geometry and EMU dimensions; Set currently supports geometry, width, height, fill and line properties; Remove deletes the host paragraph, matching the C# lifecycle.",
+  "properties": {
+    "geometry": {"type": "string", "aliases": ["preset"], "default": "rect", "add": true, "set": true, "examples": ["--properties geometry=ellipse"]},
+    "width": {"type": "length", "description": "Shape width (cm/in/pt/EMU).", "add": true, "set": true, "examples": ["--properties width=4cm"]},
+    "height": {"type": "length", "description": "Shape height (cm/in/pt/EMU).", "add": true, "set": true, "examples": ["--properties height=2cm"]},
+    "fill": {"type": "color", "description": "Hex fill color or none.", "aliases": ["fillcolor"], "add": true, "set": true, "examples": ["--properties fill=FF0000"]},
+    "line": {"type": "string", "description": "Outline STYLE;SIZE;COLOR, or none. Split line.style/line.width/line.color keys are also accepted.", "add": true, "set": true},
+    "wrap": {"type": "enum", "values": ["none", "square", "tight", "through", "topAndBottom", "behind", "front"], "default": "none", "add": true},
+    "anchor.x": {"type": "length", "aliases": ["hposition"], "add": true},
+    "anchor.y": {"type": "length", "aliases": ["vposition"], "add": true},
+    "alt": {"type": "string", "aliases": ["name"], "add": true}
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "abstractNum",
+  "parent": "numbering",
+  "addParent": "/numbering",
+  "operations": { "add": true, "set": false, "get": true, "query": true, "remove": false },
+  "paths": { "stable": ["/numbering/abstractNum[@id=N]"], "positional": ["/numbering/abstractNum[N]"] },
+  "note": "Numbering template. Add creates nine OOXML levels; format and text configure level 0 and provide defaults for the template.",
+  "properties": {
+    "id": { "type": "int", "add": true, "get": true, "enforcement": "strict" },
+    "format": { "type": "string", "add": true, "get": false, "enforcement": "report" },
+    "text": { "type": "string", "add": true, "get": false, "enforcement": "report" }
+  }
+}

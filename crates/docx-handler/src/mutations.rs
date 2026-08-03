@@ -2,11 +2,447 @@ use crate::dom_types::{WordDom, WordElementType, WordNode};
 use crate::helpers::{build_paragraph_properties, build_run_properties};
 use crate::navigation::{navigate_to_element, navigate_to_element_mut, parse_path};
 use handler_common::{
-    self, extract_find_replace_props, replace_in_string, FindReplaceOptions, HandlerError,
+    self, extract_find_replace_props, find_all_replacements, find_all_spans,
+    find_replace_property_keys, replace_in_string, DocumentNode, FindReplaceOptions, HandlerError,
     InsertPosition,
 };
 use oxml::OxmlPackage;
 use std::collections::HashMap;
+
+const DOCX_COMMENTS_PART: &str = "word/comments.xml";
+const DOCX_DOCUMENT_PART: &str = "word/document.xml";
+const DOCX_DOCUMENT_RELS_PART: &str = "word/_rels/document.xml.rels";
+const DOCX_COMMENTS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const DOCX_COMMENTS_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml";
+const DOCX_COMMENTS_EXT_PART: &str = "word/commentsExtended.xml";
+const DOCX_COMMENTS_EXT_REL_TYPE: &str =
+    "http://schemas.microsoft.com/office/2011/relationships/commentsExtended";
+const DOCX_COMMENTS_EXT_CONTENT_TYPE: &str = "application/vnd.ms-word.commentsExt+xml";
+const W14_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+const W15_NS: &str = "http://schemas.microsoft.com/office/word/2012/wordml";
+const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const WP_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+const WPG_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
+const WPS_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrawingShapeKind {
+    Shape,
+    Textbox,
+}
+
+const DOCX_NUMBERING_PART: &str = "word/numbering.xml";
+const DOCX_NUMBERING_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
+const DOCX_NUMBERING_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
+
+/// Create a numbering template or instance while maintaining the package parts
+/// Word requires.  The template emits all nine OOXML levels so it remains a
+/// valid reusable abstractNum even when callers initially use only level zero.
+pub fn add_numbering_definition(
+    package: &mut OxmlPackage,
+    parent: &str,
+    element_type: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    if parent != "/numbering" {
+        return Err(HandlerError::InvalidPath(format!(
+            "{} must be added under /numbering",
+            element_type
+        )));
+    }
+    let xml = package.read_part_xml(DOCX_NUMBERING_PART).unwrap_or_else(|_| {
+        format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"{}\"></w:numbering>", W_NS)
+    });
+    let is_abstract = element_type.eq_ignore_ascii_case("abstractNum");
+    let (fragment, path) = if is_abstract {
+        let id = properties
+            .get("id")
+            .map(String::as_str)
+            .map(parse_numbering_id)
+            .transpose()?
+            .unwrap_or_else(|| next_numbering_id(&xml, "abstractNumId"));
+        if xml.contains(&format!("w:abstractNumId=\"{}\"", id)) {
+            return Err(HandlerError::InvalidArgument(format!(
+                "abstractNumId {} already exists",
+                id
+            )));
+        }
+        (
+            build_abstract_num(id, properties),
+            format!("/numbering/abstractNum[@id={}]", id),
+        )
+    } else {
+        let abs_id = properties
+            .get("abstractNumId")
+            .ok_or_else(|| HandlerError::InvalidArgument("num requires abstractNumId".to_string()))
+            .and_then(|v| parse_numbering_id(v))?;
+        if !xml.contains(&format!("w:abstractNumId=\"{}\"", abs_id)) {
+            return Err(HandlerError::InvalidArgument(format!(
+                "abstractNumId={} not found",
+                abs_id
+            )));
+        }
+        let id = properties
+            .get("id")
+            .map(String::as_str)
+            .map(parse_numbering_id)
+            .transpose()?
+            .unwrap_or_else(|| next_numbering_id(&xml, "numId").max(1));
+        if xml.contains(&format!("w:numId=\"{}\"", id)) {
+            return Err(HandlerError::InvalidArgument(format!(
+                "numId {} already exists",
+                id
+            )));
+        }
+        (
+            build_num(id, abs_id, &xml, properties)?,
+            format!("/numbering/num[@id={}]", id),
+        )
+    };
+    let close = "</w:numbering>";
+    let pos = xml
+        .find(close)
+        .ok_or_else(|| HandlerError::OperationFailed("invalid numbering.xml".to_string()))?;
+    let mut updated = xml;
+    updated.insert_str(pos, &fragment);
+    package
+        .write_part_xml(DOCX_NUMBERING_PART, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    ensure_numbering_package_wiring(package)?;
+    Ok(path)
+}
+
+/// Update a numbering instance's template reference without permitting a
+/// dangling `w:abstractNumId` pointer.
+pub fn set_numbering_definition(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let id = path
+        .strip_prefix("/numbering/num[@id=")
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| {
+            HandlerError::UnsupportedProperty(
+                "only /numbering/num[@id=N] is currently settable".to_string(),
+            )
+        })?;
+    parse_numbering_id(id)?;
+    let xml = package
+        .read_part_xml(DOCX_NUMBERING_PART)
+        .map_err(|_| HandlerError::PathNotFound("numbering definition not found".to_string()))?;
+    let start_marker = format!("<w:num w:numId=\"{}\"", id);
+    let start = xml
+        .find(&start_marker)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("numId {} not found", id)))?;
+    let end = xml[start..]
+        .find("</w:num>")
+        .map(|offset| start + offset + "</w:num>".len())
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("invalid numbering num element".to_string())
+        })?;
+    let mut updated_block = xml[start..end].to_string();
+    if let Some(target) = properties.get("abstractNumId") {
+        parse_numbering_id(target)?;
+        if !xml.contains(&format!("w:abstractNumId=\"{}\"", target)) {
+            return Err(HandlerError::InvalidArgument(format!(
+                "abstractNumId={} not found",
+                target
+            )));
+        }
+        let old = updated_block
+            .find("<w:abstractNumId w:val=\"")
+            .ok_or_else(|| HandlerError::OperationFailed("num has no abstractNumId".to_string()))?;
+        let value_start = old + "<w:abstractNumId w:val=\"".len();
+        let value_end = updated_block[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .ok_or_else(|| HandlerError::OperationFailed("invalid abstractNumId".to_string()))?;
+        updated_block.replace_range(value_start..value_end, target);
+    }
+    for (level, value) in start_overrides(properties)? {
+        set_start_override(&mut updated_block, level, value)?;
+    }
+    let mut updated = xml;
+    updated.replace_range(start..end, &updated_block);
+    package
+        .write_part_xml(DOCX_NUMBERING_PART, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(properties
+        .keys()
+        .filter(|key| !is_num_property(key))
+        .cloned()
+        .collect())
+}
+
+pub fn set_numbering_level(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let target = path
+        .strip_prefix("/numbering/abstractNum[@id=")
+        .and_then(|value| value.split_once("]/"))
+        .and_then(|(id, rest)| {
+            rest.strip_prefix("level[")
+                .and_then(|level| level.strip_suffix(']'))
+                .map(|level| (id, level))
+        })
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let (abstract_num_id, level) = target;
+    parse_numbering_id(abstract_num_id)?;
+    parse_numbering_id(level)?;
+    let xml = package
+        .read_part_xml(DOCX_NUMBERING_PART)
+        .map_err(|_| HandlerError::PathNotFound("numbering definition not found".to_string()))?;
+    let abstract_marker = format!("<w:abstractNum w:abstractNumId=\"{}\"", abstract_num_id);
+    let abstract_start = xml
+        .find(&abstract_marker)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let abstract_end = xml[abstract_start..]
+        .find("</w:abstractNum>")
+        .map(|n| abstract_start + n + "</w:abstractNum>".len())
+        .ok_or_else(|| HandlerError::OperationFailed("invalid abstractNum".to_string()))?;
+    let marker = format!("<w:lvl w:ilvl=\"{}\"", level);
+    let start = xml[abstract_start..abstract_end]
+        .find(&marker)
+        .map(|n| abstract_start + n)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let end = xml[start..abstract_end]
+        .find("</w:lvl>")
+        .map(|n| start + n + 8)
+        .ok_or_else(|| HandlerError::OperationFailed("invalid level".to_string()))?;
+    let mut block = xml[start..end].to_string();
+    for (key, tag) in [("format", "numFmt"), ("text", "lvlText")] {
+        if let Some(value) = properties.get(key) {
+            let token = format!("<w:{} w:val=\"", tag);
+            let pos = block
+                .find(&token)
+                .ok_or_else(|| HandlerError::OperationFailed(format!("level missing {}", tag)))?
+                + token.len();
+            let close = block[pos..].find('"').map(|n| pos + n).unwrap();
+            block.replace_range(pos..close, &escape_attr(value));
+        }
+    }
+    let mut updated = xml;
+    updated.replace_range(start..end, &block);
+    package
+        .write_part_xml(DOCX_NUMBERING_PART, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(properties
+        .keys()
+        .filter(|k| k.as_str() != "format" && k.as_str() != "text")
+        .cloned()
+        .collect())
+}
+
+fn parse_numbering_id(value: &str) -> Result<i32, HandlerError> {
+    value
+        .parse::<i32>()
+        .map_err(|_| HandlerError::InvalidArgument(format!("invalid numbering id '{}'", value)))
+}
+fn next_numbering_id(xml: &str, attr: &str) -> i32 {
+    xml.split(&format!("w:{}=\"", attr))
+        .skip(1)
+        .filter_map(|tail| tail.split('"').next()?.parse().ok())
+        .max()
+        .unwrap_or(-1)
+        + 1
+}
+fn build_abstract_num(id: i32, props: &HashMap<String, String>) -> String {
+    let format = props.get("format").map(String::as_str).unwrap_or("decimal");
+    let text = props.get("text").cloned().unwrap_or_else(|| {
+        if format == "bullet" {
+            "•".into()
+        } else {
+            "%1.".into()
+        }
+    });
+    let mut levels = String::new();
+    for level in 0..9 {
+        let f = props
+            .get(&format!("level{}.format", level))
+            .map(String::as_str)
+            .unwrap_or(format);
+        let t = props
+            .get(&format!("level{}.text", level))
+            .cloned()
+            .unwrap_or_else(|| {
+                if level == 0 {
+                    text.clone()
+                } else {
+                    format!("%{}. ", level + 1).trim().to_string()
+                }
+            });
+        levels.push_str(&format!("<w:lvl w:ilvl=\"{}\"><w:start w:val=\"1\"/><w:numFmt w:val=\"{}\"/><w:lvlText w:val=\"{}\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"{}\" w:hanging=\"360\"/></w:pPr></w:lvl>",level,escape_attr(f),escape_attr(&t),(level+1)*720));
+    }
+    format!("<w:abstractNum w:abstractNumId=\"{}\"><w:multiLevelType w:val=\"hybridMultilevel\"/>{}</w:abstractNum>",id,levels)
+}
+
+fn build_num(
+    id: i32,
+    abstract_num_id: i32,
+    numbering_xml: &str,
+    props: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let mut overrides = start_overrides(props)?;
+    let continues = props
+        .get("continue")
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+    if !continues && !overrides.iter().any(|(level, _)| *level == 0) {
+        overrides.push((
+            0,
+            abstract_num_level_start(numbering_xml, abstract_num_id).unwrap_or(1),
+        ));
+    }
+    overrides.sort_by_key(|(level, _)| *level);
+    let override_xml: String = overrides
+        .into_iter()
+        .map(|(level, value)| {
+            format!(
+                "<w:lvlOverride w:ilvl=\"{}\"><w:startOverride w:val=\"{}\"/></w:lvlOverride>",
+                level, value
+            )
+        })
+        .collect();
+    Ok(format!(
+        "<w:num w:numId=\"{}\"><w:abstractNumId w:val=\"{}\"/>{}</w:num>",
+        id, abstract_num_id, override_xml
+    ))
+}
+
+fn start_overrides(props: &HashMap<String, String>) -> Result<Vec<(u8, i32)>, HandlerError> {
+    let mut result = Vec::new();
+    if let Some(value) = props.get("start") {
+        result.push((0, parse_numbering_id(value)?));
+    }
+    for (key, value) in props {
+        if let Some(level) = key.strip_prefix("startOverride.") {
+            let level = level.parse::<u8>().map_err(|_| {
+                HandlerError::InvalidArgument(format!("invalid startOverride level '{}'", level))
+            })?;
+            if level > 8 {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "startOverride level must be 0..8 (got {})",
+                    level
+                )));
+            }
+            let value = parse_numbering_id(value)?;
+            if let Some(existing) = result
+                .iter_mut()
+                .find(|(item_level, _)| *item_level == level)
+            {
+                existing.1 = value;
+            } else {
+                result.push((level, value));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn set_start_override(block: &mut String, level: u8, value: i32) -> Result<(), HandlerError> {
+    let marker = format!("<w:lvlOverride w:ilvl=\"{}\"", level);
+    if let Some(start) = block.find(&marker) {
+        let end = block[start..]
+            .find("</w:lvlOverride>")
+            .map(|offset| start + offset + "</w:lvlOverride>".len())
+            .ok_or_else(|| HandlerError::OperationFailed("invalid lvlOverride".to_string()))?;
+        let override_block = &block[start..end];
+        if let Some(value_start) = override_block.find("<w:startOverride w:val=\"") {
+            let value_start = start + value_start + "<w:startOverride w:val=\"".len();
+            let value_end = block[value_start..]
+                .find('"')
+                .map(|offset| value_start + offset)
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("invalid startOverride".to_string())
+                })?;
+            block.replace_range(value_start..value_end, &value.to_string());
+        } else {
+            let insert_at = end - "</w:lvlOverride>".len();
+            block.insert_str(
+                insert_at,
+                &format!("<w:startOverride w:val=\"{}\"/>", value),
+            );
+        }
+    } else {
+        let insert_at = block.rfind("</w:num>").ok_or_else(|| {
+            HandlerError::OperationFailed("invalid numbering num element".to_string())
+        })?;
+        block.insert_str(
+            insert_at,
+            &format!(
+                "<w:lvlOverride w:ilvl=\"{}\"><w:startOverride w:val=\"{}\"/></w:lvlOverride>",
+                level, value
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn abstract_num_level_start(numbering_xml: &str, abstract_num_id: i32) -> Option<i32> {
+    let marker = format!("<w:abstractNum w:abstractNumId=\"{}\"", abstract_num_id);
+    let start = numbering_xml.find(&marker)?;
+    let end = numbering_xml[start..].find("</w:abstractNum>")? + start;
+    let abstract_num = &numbering_xml[start..end];
+    let start = abstract_num.find("<w:lvl w:ilvl=\"0\"")?;
+    let end = abstract_num[start..].find("</w:lvl>")? + start;
+    let level_zero = &abstract_num[start..end];
+    let value_start = level_zero.find("<w:start w:val=\"")? + "<w:start w:val=\"".len();
+    let value_end = level_zero[value_start..].find('"')? + value_start;
+    level_zero[value_start..value_end].parse().ok()
+}
+
+fn is_num_property(key: &str) -> bool {
+    key == "abstractNumId"
+        || key == "start"
+        || key == "continue"
+        || key
+            .strip_prefix("startOverride.")
+            .is_some_and(|level| level.parse::<u8>().is_ok_and(|level| level <= 8))
+}
+
+fn ensure_numbering_package_wiring(package: &mut OxmlPackage) -> Result<(), HandlerError> {
+    let rels = package
+        .read_part_xml(DOCX_DOCUMENT_RELS_PART)
+        .unwrap_or_default();
+    if !rels.contains(DOCX_NUMBERING_REL_TYPE) {
+        let relation_id = next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART);
+        inject_docx_relationship(
+            package,
+            DOCX_DOCUMENT_RELS_PART,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"numbering.xml\"/>",
+                relation_id, DOCX_NUMBERING_REL_TYPE
+            ),
+        )?;
+    }
+    let ct = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    if !ct.contains("/word/numbering.xml") {
+        let pos = ct.find("</Types>").ok_or_else(|| {
+            HandlerError::OperationFailed("invalid [Content_Types].xml".to_string())
+        })?;
+        let mut updated = ct;
+        updated.insert_str(
+            pos,
+            &format!(
+                "<Override PartName=\"/word/numbering.xml\" ContentType=\"{}\"/>",
+                DOCX_NUMBERING_CONTENT_TYPE
+            ),
+        );
+        package
+            .write_part_xml("[Content_Types].xml", &updated)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    }
+    Ok(())
+}
 
 /// Set properties on an element at a given path.
 /// Dispatches to element-type-specific handlers matching the C# WordHandler.Set.Dispatch
@@ -1984,6 +2420,16 @@ fn apply_find_replace(
         )
     })?;
 
+    if properties.keys().any(|key| key.starts_with("revision.")) {
+        if properties
+            .get("revision.type")
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("format"))
+        {
+            return apply_tracked_find_format(dom, path, properties, &find, &opts);
+        }
+        return apply_tracked_find_replace(dom, path, properties, &find, &replace, &opts);
+    }
+
     let path_lc = path.trim().to_lowercase();
     let total = if path_lc == "/" || path_lc == "/body" || path_lc.is_empty() {
         find_replace_in_body(dom, &find, &replace, &opts)?
@@ -1998,6 +2444,559 @@ fn apply_find_replace(
     };
 
     Ok(vec![format!("replaced={}", total)])
+}
+
+fn apply_tracked_find_format(
+    dom: &mut WordDom,
+    path: &str,
+    properties: &HashMap<String, String>,
+    find: &str,
+    opts: &FindReplaceOptions,
+) -> Result<Vec<String>, HandlerError> {
+    if properties.contains_key("replace") || properties.contains_key("revision.id") {
+        return Err(HandlerError::UnsupportedProperty(
+            "tracked find format does not accept replace= or revision.id".to_string(),
+        ));
+    }
+    let find_keys = find_replace_property_keys();
+    let format: HashMap<_, _> = properties
+        .iter()
+        .filter(|(key, _)| !find_keys.contains(&key.as_str()) && !key.starts_with("revision."))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if format.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "tracked find format requires a run-format property".to_string(),
+        ));
+    }
+    let author = properties
+        .get("revision.author")
+        .map(String::as_str)
+        .unwrap_or("OfficeCLI");
+    let date = properties.get("revision.date").map(String::as_str);
+    let mut id = crate::add::next_revision_id(&dom.root)
+        .parse::<u32>()
+        .unwrap_or(1);
+    let body = dom
+        .body_mut()
+        .ok_or_else(|| HandlerError::InvalidPath("document has no body".to_string()))?;
+    let mut total = 0;
+    let mut context = TrackedFindFormatContext {
+        format: &format,
+        author,
+        date,
+        next_id: &mut id,
+    };
+    for index in tracked_find_paragraph_indices(body, path)? {
+        ensure_tracked_find_safe_boundaries(&body.children[index], find, opts)?;
+        for group in collect_plain_run_span_groups(&body.children[index])
+            .into_iter()
+            .rev()
+        {
+            let text: String = group.iter().map(|span| span.text.as_str()).collect();
+            for (start, end) in find_all_spans(&text, find, opts)
+                .into_iter()
+                .filter(|(start, end)| start < end)
+                .rev()
+            {
+                tracked_find_format_group_match(
+                    &mut body.children[index],
+                    &group,
+                    start,
+                    end,
+                    &mut context,
+                )?;
+                total += 1;
+            }
+        }
+    }
+    Ok(vec![format!("replaced={}", total)])
+}
+
+/// Track a literal find/replace at the actual text-fragment boundary.  Each
+/// occurrence keeps its unmatched prefix/suffix in ordinary runs, records the
+/// old fragment in `w:del/w:delText`, and records a non-empty replacement in
+/// `w:ins`.  This is deliberately separate from the legacy in-place string
+/// replacement above: wrapping a whole run would incorrectly mark unmatched
+/// text as changed.
+fn apply_tracked_find_replace(
+    dom: &mut WordDom,
+    path: &str,
+    properties: &HashMap<String, String>,
+    find: &str,
+    replace: &str,
+    opts: &FindReplaceOptions,
+) -> Result<Vec<String>, HandlerError> {
+    if properties.contains_key("revision.action") || properties.contains_key("revision.id") {
+        return Err(HandlerError::InvalidArgument(
+            "find revisions do not accept revision.action or revision.id; ids are allocated per fragment"
+                .to_string(),
+        ));
+    }
+    if let Some(kind) = properties.get("revision.type") {
+        if !kind.eq_ignore_ascii_case("format") {
+            return Err(HandlerError::InvalidArgument(
+                "find infers ins/del from replace; revision.type is only accepted as format for a future format-only path"
+                    .to_string(),
+            ));
+        }
+        return Err(HandlerError::UnsupportedProperty(
+            "tracked find format-only changes are not implemented yet; provide replace= to create del/ins revisions"
+                .to_string(),
+        ));
+    }
+    if !properties.contains_key("replace") {
+        return Err(HandlerError::InvalidArgument(
+            "tracked find requires replace=NEW (or replace= for a deletion)".to_string(),
+        ));
+    }
+    let author = properties
+        .get("revision.author")
+        .cloned()
+        .unwrap_or_else(|| "OfficeCLI".to_string());
+    let date = properties.get("revision.date").cloned();
+    let next_id = crate::add::next_revision_id(&dom.root)
+        .parse::<u32>()
+        .unwrap_or(1);
+    let mut context = TrackedFindContext {
+        find,
+        replace,
+        opts,
+        author: &author,
+        date: date.as_deref(),
+        next_id,
+        remaining: opts.max_replacements.unwrap_or(usize::MAX),
+    };
+    let body = dom
+        .body_mut()
+        .ok_or_else(|| HandlerError::InvalidPath("document has no body".to_string()))?;
+    let target_indices = tracked_find_paragraph_indices(body, path)?;
+    let mut total = 0;
+    for index in target_indices {
+        if context.remaining == 0 {
+            break;
+        }
+        ensure_tracked_find_safe_boundaries(&body.children[index], context.find, context.opts)?;
+        let changed = tracked_find_in_paragraph(&mut body.children[index], &mut context)?;
+        total += changed;
+    }
+    Ok(vec![format!("replaced={}", total)])
+}
+
+struct TrackedFindContext<'a> {
+    find: &'a str,
+    replace: &'a str,
+    opts: &'a FindReplaceOptions,
+    author: &'a str,
+    date: Option<&'a str>,
+    next_id: u32,
+    remaining: usize,
+}
+
+#[derive(Clone)]
+struct PlainRunSpan {
+    child_index: usize,
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+/// Consecutive direct runs eligible for tracked-find splitting. Inline
+/// elements such as hyperlinks, fields and drawings terminate a group: a
+/// match can never cross one of those boundaries and flatten its OOXML
+/// structure.
+fn collect_plain_run_span_groups(paragraph: &WordNode) -> Vec<Vec<PlainRunSpan>> {
+    let mut offset = 0;
+    let mut group = Vec::new();
+    let mut groups = Vec::new();
+    for (child_index, child) in paragraph.children.iter().enumerate() {
+        let is_plain_run = is_plain_direct_run(child);
+        if !is_plain_run {
+            if !group.is_empty() {
+                groups.push(std::mem::take(&mut group));
+            }
+            offset = 0;
+            continue;
+        }
+        let text = child
+            .children
+            .iter()
+            .find(|node| node.element_type == WordElementType::Text)
+            .and_then(|node| node.text_content.clone())
+            .unwrap_or_default();
+        let end = offset + text.len();
+        group.push(PlainRunSpan {
+            child_index,
+            start: offset,
+            end,
+            text,
+        });
+        offset = end;
+    }
+    if !group.is_empty() {
+        groups.push(group);
+    }
+    groups
+}
+
+fn is_plain_direct_run(node: &WordNode) -> bool {
+    node.element_type == WordElementType::Run && {
+        let text_nodes: Vec<_> = node
+            .children
+            .iter()
+            .filter(|child| child.element_type == WordElementType::Text)
+            .collect();
+        text_nodes.len() == 1
+            && node.children.iter().all(|child| {
+                child.element_type == WordElementType::Text
+                    || child.element_type == WordElementType::RunProperties
+            })
+    }
+}
+
+/// Track changes only manipulates ordinary direct runs. Detect a match that
+/// enters or crosses an inline structure before mutating anything; silently
+/// skipping it would make a successful command report the wrong result, while
+/// flattening it would lose hyperlink/field/drawing semantics.
+fn ensure_tracked_find_safe_boundaries(
+    paragraph: &WordNode,
+    find: &str,
+    opts: &FindReplaceOptions,
+) -> Result<(), HandlerError> {
+    let mut full_text = String::new();
+    let mut safe_ranges = Vec::new();
+    let mut group_start = None;
+    for child in &paragraph.children {
+        let start = full_text.len();
+        let child_text = child.paragraph_text();
+        if is_plain_direct_run(child) {
+            group_start.get_or_insert(start);
+        } else if child.element_type == WordElementType::Run || !child_text.is_empty() {
+            if let Some(group_start) = group_start.take() {
+                safe_ranges.push((group_start, start));
+            }
+        }
+        full_text.push_str(&child_text);
+    }
+    if let Some(group_start) = group_start {
+        safe_ranges.push((group_start, full_text.len()));
+    }
+    let matches = if opts.use_regex {
+        find_all_replacements(&full_text, find, "", opts)
+            .map_err(|error| {
+                HandlerError::InvalidArgument(format!("invalid find regex: {}", error))
+            })?
+            .into_iter()
+            .map(|(start, end, _)| (start, end))
+            .collect()
+    } else {
+        find_all_spans(&full_text, find, opts)
+    };
+    if matches.into_iter().any(|(start, end)| {
+        start < end
+            && !safe_ranges
+                .iter()
+                .any(|(range_start, range_end)| start >= *range_start && end <= *range_end)
+    }) {
+        return Err(HandlerError::UnsupportedProperty(
+            "tracked find cannot target or cross an inline structure boundary (hyperlink, field, drawing, or non-text run); narrow the match to an ordinary direct run sequence"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn tracked_find_paragraph_indices(body: &WordNode, path: &str) -> Result<Vec<usize>, HandlerError> {
+    let path_lc = path.trim().to_ascii_lowercase();
+    if path_lc.is_empty() || matches!(path_lc.as_str(), "/" | "/body") {
+        return Ok(body
+            .children
+            .iter()
+            .enumerate()
+            .filter_map(|(index, child)| {
+                (child.element_type == WordElementType::Paragraph).then_some(index)
+            })
+            .collect());
+    }
+    let index = path_lc
+        .strip_prefix("/body/p[")
+        .and_then(|value| value.strip_suffix(']'))
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|index| *index > 0)
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let found = body
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.element_type == WordElementType::Paragraph)
+        .nth(index - 1)
+        .map(|(index, _)| index)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    Ok(vec![found])
+}
+
+fn tracked_find_in_paragraph(
+    para: &mut WordNode,
+    context: &mut TrackedFindContext<'_>,
+) -> Result<usize, HandlerError> {
+    let mut total = 0;
+    for group in collect_plain_run_span_groups(para).into_iter().rev() {
+        if context.remaining == 0 {
+            break;
+        }
+        let text: String = group.iter().map(|span| span.text.as_str()).collect();
+        let matches = find_all_replacements(&text, context.find, context.replace, context.opts)
+            .map_err(|error| {
+                HandlerError::InvalidArgument(format!("invalid find regex: {}", error))
+            })?;
+        let count = matches.len().min(context.remaining);
+        for (start, end, replacement) in matches.into_iter().take(count).rev() {
+            tracked_find_replace_group_match(para, &group, start, end, &replacement, context)?;
+            total += 1;
+            context.remaining -= 1;
+        }
+    }
+    Ok(total)
+}
+
+/// Replace one match in a continuous plain-run group. The group is processed
+/// right-to-left, so replacing a later range does not invalidate the child
+/// indices of a preceding range.
+fn tracked_find_replace_group_match(
+    para: &mut WordNode,
+    group: &[PlainRunSpan],
+    match_start: usize,
+    match_end: usize,
+    replacement: &str,
+    context: &mut TrackedFindContext<'_>,
+) -> Result<(), HandlerError> {
+    let affected: Vec<_> = group
+        .iter()
+        .filter(|span| span.start < match_end && span.end > match_start)
+        .collect();
+    let first = affected.first().ok_or_else(|| {
+        HandlerError::InvalidArgument("tracked find match has no eligible run".to_string())
+    })?;
+    let last = affected.last().expect("non-empty affected spans");
+    let template_rpr = para.children[first.child_index]
+        .children
+        .iter()
+        .find(|child| child.element_type == WordElementType::RunProperties)
+        .cloned();
+    let mut replacement_nodes = Vec::new();
+
+    let prefix_end = match_start - first.start;
+    if prefix_end > 0 {
+        replacement_nodes.push(tracked_text_run(
+            template_rpr.as_ref(),
+            &first.text[..prefix_end],
+            false,
+        ));
+    }
+    for span in &affected {
+        let start = match_start.saturating_sub(span.start);
+        let end = match_end.min(span.end) - span.start;
+        if start >= end {
+            continue;
+        }
+        let rpr = para.children[span.child_index]
+            .children
+            .iter()
+            .find(|child| child.element_type == WordElementType::RunProperties)
+            .cloned();
+        let del_id = allocate_tracked_id(&mut context.next_id);
+        replacement_nodes.push(tracked_wrapper(
+            "del",
+            del_id,
+            context.author,
+            context.date,
+            tracked_text_run(rpr.as_ref(), &span.text[start..end], true),
+        ));
+    }
+    if !replacement.is_empty() {
+        let ins_id = allocate_tracked_id(&mut context.next_id);
+        replacement_nodes.push(tracked_wrapper(
+            "ins",
+            ins_id,
+            context.author,
+            context.date,
+            tracked_text_run(template_rpr.as_ref(), replacement, false),
+        ));
+    }
+    let suffix_start = match_end - last.start;
+    if suffix_start < last.text.len() {
+        let rpr = para.children[last.child_index]
+            .children
+            .iter()
+            .find(|child| child.element_type == WordElementType::RunProperties)
+            .cloned();
+        replacement_nodes.push(tracked_text_run(
+            rpr.as_ref(),
+            &last.text[suffix_start..],
+            false,
+        ));
+    }
+    para.children
+        .splice(first.child_index..=last.child_index, replacement_nodes);
+    Ok(())
+}
+
+/// Apply a format revision to one match in a continuous plain-run group. Like
+/// replacement, this first materializes exact run boundaries, so unmatched
+/// prefix/suffix text keeps its original formatting and revision history.
+struct TrackedFindFormatContext<'a> {
+    format: &'a HashMap<String, String>,
+    author: &'a str,
+    date: Option<&'a str>,
+    next_id: &'a mut u32,
+}
+
+fn tracked_find_format_group_match(
+    para: &mut WordNode,
+    group: &[PlainRunSpan],
+    match_start: usize,
+    match_end: usize,
+    context: &mut TrackedFindFormatContext<'_>,
+) -> Result<(), HandlerError> {
+    let affected: Vec<_> = group
+        .iter()
+        .filter(|span| span.start < match_end && span.end > match_start)
+        .collect();
+    let first = affected.first().ok_or_else(|| {
+        HandlerError::InvalidArgument("tracked find match has no eligible run".to_string())
+    })?;
+    let last = affected.last().expect("non-empty affected spans");
+    let first_rpr = para.children[first.child_index]
+        .children
+        .iter()
+        .find(|child| child.element_type == WordElementType::RunProperties)
+        .cloned();
+    let mut replacement_nodes = Vec::new();
+    let prefix_end = match_start - first.start;
+    if prefix_end > 0 {
+        replacement_nodes.push(tracked_text_run(
+            first_rpr.as_ref(),
+            &first.text[..prefix_end],
+            false,
+        ));
+    }
+    for span in &affected {
+        let start = match_start.saturating_sub(span.start);
+        let end = match_end.min(span.end) - span.start;
+        if start >= end {
+            continue;
+        }
+        let rpr = para.children[span.child_index]
+            .children
+            .iter()
+            .find(|child| child.element_type == WordElementType::RunProperties)
+            .cloned();
+        replacement_nodes.push(tracked_format_run(
+            rpr.as_ref(),
+            &span.text[start..end],
+            context.format,
+            context.author,
+            context.date,
+            allocate_tracked_id(context.next_id),
+        ));
+    }
+    let suffix_start = match_end - last.start;
+    if suffix_start < last.text.len() {
+        let rpr = para.children[last.child_index]
+            .children
+            .iter()
+            .find(|child| child.element_type == WordElementType::RunProperties)
+            .cloned();
+        replacement_nodes.push(tracked_text_run(
+            rpr.as_ref(),
+            &last.text[suffix_start..],
+            false,
+        ));
+    }
+    para.children
+        .splice(first.child_index..=last.child_index, replacement_nodes);
+    Ok(())
+}
+
+fn tracked_format_run(
+    prior_rpr: Option<&WordNode>,
+    text: &str,
+    format: &HashMap<String, String>,
+    author: &str,
+    date: Option<&str>,
+    id: String,
+) -> WordNode {
+    let snapshot = prior_rpr
+        .cloned()
+        .unwrap_or_else(|| WordNode::new(WordElementType::RunProperties));
+    let mut run = tracked_text_run(prior_rpr, text, false);
+    apply_run_props_to_run(&mut run, format);
+    let rpr = run
+        .children
+        .iter_mut()
+        .find(|node| node.element_type == WordElementType::RunProperties)
+        .expect("format properties create rPr");
+    let mut change = WordNode::new(WordElementType::Unknown("rPrChange".to_string()));
+    change.attributes.insert("id".to_string(), id);
+    change
+        .attributes
+        .insert("author".to_string(), author.to_string());
+    if let Some(date) = date {
+        change
+            .attributes
+            .insert("date".to_string(), date.to_string());
+    }
+    change.children.push(snapshot);
+    rpr.children.push(change);
+    run
+}
+
+fn allocate_tracked_id(next_id: &mut u32) -> String {
+    let id = *next_id;
+    *next_id = next_id.saturating_add(1);
+    id.to_string()
+}
+
+fn tracked_text_run(rpr: Option<&WordNode>, text: &str, deleted: bool) -> WordNode {
+    let mut run = WordNode::new(WordElementType::Run);
+    if let Some(rpr) = rpr {
+        run.children.push(rpr.clone());
+    }
+    let mut text_node = WordNode::new(if deleted {
+        WordElementType::Unknown("delText".to_string())
+    } else {
+        WordElementType::Text
+    })
+    .with_text(text);
+    if text.starts_with(' ') || text.ends_with(' ') {
+        text_node
+            .attributes
+            .insert("xml:space".to_string(), "preserve".to_string());
+        text_node.preserve_space = true;
+    }
+    run.children.push(text_node);
+    run
+}
+
+fn tracked_wrapper(
+    kind: &str,
+    id: String,
+    author: &str,
+    date: Option<&str>,
+    run: WordNode,
+) -> WordNode {
+    let mut wrapper = WordNode::new(WordElementType::Unknown(kind.to_string()));
+    wrapper.attributes.insert("id".to_string(), id);
+    wrapper
+        .attributes
+        .insert("author".to_string(), author.to_string());
+    if let Some(date) = date {
+        wrapper
+            .attributes
+            .insert("date".to_string(), date.to_string());
+    }
+    wrapper.children.push(run);
+    wrapper
 }
 
 /// Run find/replace across all paragraphs in the body. Returns total replacements.
@@ -2571,7 +3570,10 @@ pub fn set_comment_on_part(
     path: &str,
     properties: &HashMap<String, String>,
 ) -> Result<Vec<String>, HandlerError> {
-    let comment_id = extract_id_from_path(path, "comments")?;
+    if comment_body_relative_path(path).is_some() {
+        return set_comment_body_element(package, part, path, properties);
+    }
+    let comment_id = get_comment(package, path)?.id;
     let xml = package
         .read_part_xml(part)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
@@ -2590,6 +3592,7 @@ pub fn set_comment_on_part(
     let block = &xml[open..close];
     let mut new_block = block.to_string();
     let mut unsupported = Vec::new();
+    let mut done_update = None;
 
     for (key, value) in properties {
         match key.as_str() {
@@ -2597,29 +3600,679 @@ pub fn set_comment_on_part(
             "initials" => set_attr_on_open_tag(&mut new_block, "w:initials", value),
             "date" => set_attr_on_open_tag(&mut new_block, "w:date", value),
             "text" => {
-                // Replace the inner <w:t>...</w:t> text.
-                let opts = FindReplaceOptions::default();
-                let (replaced, n) = replace_first_text_node(&new_block, value, &opts);
-                new_block = replaced;
-                if n == 0 {
-                    unsupported.push("text".to_string());
-                }
+                new_block = replace_comment_body(&new_block, value)?;
             }
+            "done" | "resolved" => done_update = Some(is_truthy(Some(value))),
+            _ if is_comment_format_key(key) => {}
             _ => unsupported.push(key.clone()),
         }
     }
 
-    if new_block != block {
-        let mut new_xml = String::with_capacity(xml.len() + new_block.len());
-        new_xml.push_str(&xml[..open]);
-        new_xml.push_str(&new_block);
-        new_xml.push_str(&xml[close..]);
+    let mut new_xml = if new_block != block {
+        let mut updated = String::with_capacity(xml.len() + new_block.len());
+        updated.push_str(&xml[..open]);
+        updated.push_str(&new_block);
+        updated.push_str(&xml[close..]);
+        updated
+    } else {
+        xml.clone()
+    };
+    let format_props: HashMap<_, _> = properties
+        .iter()
+        .filter(|(key, _)| is_comment_format_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !format_props.is_empty() {
+        new_xml = apply_comment_body_format(&new_xml, &comment_id, &format_props)?;
+    }
+    if new_xml != xml {
         package
             .write_part_xml(part, &new_xml)
             .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     }
 
+    if let Some(done) = done_update {
+        let current = package
+            .read_part_xml(part)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        let (with_para_id, para_id) = assign_comment_para_id(&current, &comment_id)?;
+        if with_para_id != current {
+            package
+                .write_part_xml(part, &with_para_id)
+                .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+        }
+        upsert_comment_extension(package, &para_id, None, Some(done))?;
+    }
+
     Ok(unsupported)
+}
+
+/// Read a nested comments.xml element such as
+/// `/comments/comment[@commentId=7]/p[1]/r[2]` without pretending it belongs
+/// to document.xml. This gives comment bodies the same inspectable structure
+/// as normal Word paragraphs and runs.
+pub fn get_comment_body_element(
+    package: &OxmlPackage,
+    path: &str,
+    depth: usize,
+) -> Result<DocumentNode, HandlerError> {
+    let (comment_path, relative) = split_comment_body_path(path)?;
+    let comment_id = get_comment(package, comment_path)?.id;
+    let xml = package
+        .read_part_xml(DOCX_COMMENTS_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let dom = crate::handler::parse_document_xml(&xml)?;
+    let comment = find_comment_node(&dom.root, &comment_id)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let node = navigate_comment_body_node(comment, relative, path)?;
+    Ok(comment_body_element_to_document_node(node, path, depth))
+}
+
+/// Query paragraph/run selectors in comments.xml as well as document.xml.
+/// Paths remain rooted at the stable logical comment id so returned nodes can
+/// be used directly by comment-body get/set/add/remove commands.
+pub fn query_comment_body_elements(
+    package: &OxmlPackage,
+    selector: &str,
+) -> Result<Vec<DocumentNode>, HandlerError> {
+    let Ok(xml) = package.read_part_xml(DOCX_COMMENTS_PART) else {
+        return Ok(Vec::new());
+    };
+    let dom = crate::handler::parse_document_xml(&xml)?;
+    let mut comments = Vec::new();
+    collect_comment_nodes(&dom.root, &mut comments);
+    let mut results = Vec::new();
+    for (ordinal, comment) in comments.into_iter().enumerate() {
+        let path = comment
+            .attributes
+            .get("id")
+            .map(|id| format!("/comments/comment[@commentId={}]", id))
+            .unwrap_or_else(|| format!("/comments/comment[{}]", ordinal + 1));
+        results.extend(crate::query::query_subtree(comment, selector, &path)?);
+    }
+    Ok(results)
+}
+
+fn collect_comment_nodes<'a>(node: &'a WordNode, output: &mut Vec<&'a WordNode>) {
+    if matches!(&node.element_type, WordElementType::Unknown(name) if name == "comment") {
+        output.push(node);
+        return;
+    }
+    for child in &node.children {
+        collect_comment_nodes(child, output);
+    }
+}
+
+/// Mutate a nested comment body paragraph/run. The path is intentionally
+/// separate from `set_comment_on_part`'s metadata/body operation: applying a
+/// run path to the whole comment would silently flatten unrelated runs.
+fn set_comment_body_element(
+    package: &mut OxmlPackage,
+    part: &str,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let (comment_path, relative) = split_comment_body_path(path)?;
+    let comment_id = get_comment(package, comment_path)?.id;
+    let xml = package
+        .read_part_xml(part)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let comment = find_comment_node_mut(&mut dom.root, &comment_id)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let node = navigate_comment_body_node_mut(comment, relative, path)?;
+    let unsupported = match node.element_type {
+        WordElementType::Paragraph => set_comment_body_paragraph(node, properties),
+        WordElementType::Run => set_comment_body_run(node, properties),
+        _ => {
+            return Err(HandlerError::UnsupportedProperty(
+                "comment body set supports only paragraph or run paths".to_string(),
+            ))
+        }
+    };
+    package
+        .write_part_xml(part, &crate::handler::serialize_dom(&dom))
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(unsupported)
+}
+
+fn split_comment_body_path(path: &str) -> Result<(&str, &str), HandlerError> {
+    let Some(close) = path.find("]/") else {
+        return Err(HandlerError::InvalidPath(path.to_string()));
+    };
+    let comment_path = &path[..=close];
+    if !comment_path.starts_with("/comments/comment[") {
+        return Err(HandlerError::InvalidPath(path.to_string()));
+    }
+    Ok((comment_path, &path[close + 1..]))
+}
+
+fn comment_body_relative_path(path: &str) -> Option<&str> {
+    split_comment_body_path(path)
+        .ok()
+        .map(|(_, relative)| relative)
+}
+
+fn find_comment_node<'a>(node: &'a WordNode, id: &str) -> Option<&'a WordNode> {
+    if matches!(&node.element_type, WordElementType::Unknown(name) if name == "comment")
+        && node.attributes.get("id").map(String::as_str) == Some(id)
+    {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_comment_node(child, id))
+}
+
+fn navigate_comment_body_node<'a>(
+    node: &'a WordNode,
+    relative: &str,
+    full_path: &str,
+) -> Result<&'a WordNode, HandlerError> {
+    let segments = parse_path(relative)?;
+    let mut current = node;
+    for segment in segments {
+        let matches: Vec<_> = current
+            .children
+            .iter()
+            .filter(|child| child.element_type.to_path_name() == segment.name)
+            .collect();
+        let index = segment.index.unwrap_or(1);
+        current = matches
+            .get(index.saturating_sub(1))
+            .copied()
+            .ok_or_else(|| HandlerError::PathNotFound(full_path.to_string()))?;
+    }
+    Ok(current)
+}
+
+fn navigate_comment_body_node_mut<'a>(
+    node: &'a mut WordNode,
+    relative: &str,
+    full_path: &str,
+) -> Result<&'a mut WordNode, HandlerError> {
+    let segments = parse_path(relative)?;
+    let mut current = node;
+    for segment in segments {
+        let index = segment.index.unwrap_or(1);
+        let child_index = current
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| child.element_type.to_path_name() == segment.name)
+            .nth(index.saturating_sub(1))
+            .map(|(index, _)| index)
+            .ok_or_else(|| HandlerError::PathNotFound(full_path.to_string()))?;
+        current = &mut current.children[child_index];
+    }
+    Ok(current)
+}
+
+fn comment_body_element_to_document_node(
+    node: &WordNode,
+    path: &str,
+    depth: usize,
+) -> DocumentNode {
+    let text = node.paragraph_text();
+    let mut result = DocumentNode::new(path, node.element_type.to_path_name());
+    if !text.is_empty() {
+        result = result.with_text(&text).with_preview(&text);
+    }
+    result.child_count = node.children.len();
+    if depth > 0 {
+        result = result.with_children(build_comment_body_children(node, path, depth - 1));
+    }
+    result
+}
+
+fn build_comment_body_children(
+    node: &WordNode,
+    parent_path: &str,
+    depth: usize,
+) -> Vec<DocumentNode> {
+    let mut counts = HashMap::<String, usize>::new();
+    node.children
+        .iter()
+        .map(|child| {
+            let name = child.element_type.to_path_name().to_string();
+            let index = counts.entry(name.clone()).or_default();
+            *index += 1;
+            let path = format!("{}/{}[{}]", parent_path, name, index);
+            comment_body_element_to_document_node(child, &path, depth)
+        })
+        .collect()
+}
+
+fn set_comment_body_paragraph(
+    node: &mut WordNode,
+    properties: &HashMap<String, String>,
+) -> Vec<String> {
+    if let Some(text) = properties.get("text") {
+        set_paragraph_text(node, text);
+    }
+    let paragraph_props: HashMap<_, _> = properties
+        .iter()
+        .filter(|(key, _)| COMMENT_PARAGRAPH_FORMAT_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !paragraph_props.is_empty() {
+        apply_comment_paragraph_properties(node, &paragraph_props);
+    }
+    let run_props: HashMap<_, _> = properties
+        .iter()
+        .filter(|(key, _)| COMMENT_RUN_FORMAT_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !run_props.is_empty() {
+        apply_comment_run_properties(node, &run_props);
+    }
+    properties
+        .keys()
+        .filter(|key| key.as_str() != "text" && !is_comment_format_key(key))
+        .cloned()
+        .collect()
+}
+
+fn set_comment_body_run(node: &mut WordNode, properties: &HashMap<String, String>) -> Vec<String> {
+    if let Some(text) = properties.get("text") {
+        let text_indices: Vec<_> = node
+            .children
+            .iter()
+            .enumerate()
+            .filter_map(|(index, child)| {
+                (child.element_type == WordElementType::Text).then_some(index)
+            })
+            .collect();
+        if text_indices.is_empty() {
+            node.children
+                .push(WordNode::new(WordElementType::Text).with_text(text));
+        } else {
+            for index in text_indices {
+                node.children[index].text_content = Some(text.clone());
+            }
+        }
+    }
+    let run_props: HashMap<_, _> = properties
+        .iter()
+        .filter(|(key, _)| COMMENT_RUN_FORMAT_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !run_props.is_empty() {
+        apply_run_props_to_run(node, &run_props);
+    }
+    properties
+        .keys()
+        .filter(|key| key.as_str() != "text" && !COMMENT_RUN_FORMAT_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Add a paragraph or run beneath an existing logical comment. This mirrors
+/// normal Word `add` but targets word/comments.xml, where comment bodies are
+/// their own WordprocessingML trees.
+pub fn add_comment_body_element(
+    package: &mut OxmlPackage,
+    parent: &str,
+    element_type: &str,
+    position: InsertPosition,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let (comment_path, relative) = split_comment_parent_path(parent)?;
+    let comment_id = get_comment(package, comment_path)?.id;
+    let xml = package
+        .read_part_xml(DOCX_COMMENTS_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let comment = find_comment_node_mut(&mut dom.root, &comment_id)
+        .ok_or_else(|| HandlerError::PathNotFound(parent.to_string()))?;
+    let target = if relative.is_empty() {
+        comment
+    } else {
+        navigate_comment_body_node_mut(comment, relative, parent)?
+    };
+    let normalized = element_type.to_ascii_lowercase();
+    let result = match normalized.as_str() {
+        "paragraph" | "p" => {
+            if !relative.is_empty()
+                || !matches!(&target.element_type, WordElementType::Unknown(name) if name == "comment")
+            {
+                return Err(HandlerError::InvalidPath(
+                    "comment paragraphs must be added directly under a comment path".to_string(),
+                ));
+            }
+            let mut paragraph = WordNode::new(WordElementType::Paragraph);
+            if let Some(text) = properties.get("text") {
+                paragraph.children.push(comment_body_text_run(text));
+            }
+            let paragraph_props: HashMap<_, _> = properties
+                .iter()
+                .filter(|(key, _)| COMMENT_PARAGRAPH_FORMAT_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if !paragraph_props.is_empty() {
+                apply_comment_paragraph_properties(&mut paragraph, &paragraph_props);
+            }
+            let run_props: HashMap<_, _> = properties
+                .iter()
+                .filter(|(key, _)| COMMENT_RUN_FORMAT_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if !run_props.is_empty() {
+                apply_comment_run_properties(&mut paragraph, &run_props);
+            }
+            insert_comment_body_child(target, paragraph, &position);
+            let ordinal = target
+                .children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Paragraph)
+                .count();
+            format!("{}/p[{}]", parent, ordinal)
+        }
+        "run" | "r" => {
+            if target.element_type != WordElementType::Paragraph {
+                return Err(HandlerError::InvalidPath(
+                    "comment runs must be added under a comment paragraph path".to_string(),
+                ));
+            }
+            let mut run = properties
+                .get("text")
+                .map(|text| comment_body_text_run(text))
+                .unwrap_or_else(|| WordNode::new(WordElementType::Run));
+            let run_props: HashMap<_, _> = properties
+                .iter()
+                .filter(|(key, _)| COMMENT_RUN_FORMAT_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if !run_props.is_empty() {
+                apply_run_props_to_run(&mut run, &run_props);
+            }
+            insert_comment_body_child(target, run, &position);
+            let ordinal = target
+                .children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Run)
+                .count();
+            format!("{}/r[{}]", parent, ordinal)
+        }
+        _ => {
+            return Err(HandlerError::UnsupportedProperty(
+                "comment body add supports only paragraph or run".to_string(),
+            ))
+        }
+    };
+    package
+        .write_part_xml(DOCX_COMMENTS_PART, &crate::handler::serialize_dom(&dom))
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(result)
+}
+
+pub fn remove_comment_body_element(
+    package: &mut OxmlPackage,
+    path: &str,
+) -> Result<(), HandlerError> {
+    let (comment_path, relative) = split_comment_body_path(path)?;
+    let comment_id = get_comment(package, comment_path)?.id;
+    let xml = package
+        .read_part_xml(DOCX_COMMENTS_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let comment = find_comment_node_mut(&mut dom.root, &comment_id)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let segments = parse_path(relative)?;
+    remove_comment_body_node(comment, &segments, path)?;
+    package
+        .write_part_xml(DOCX_COMMENTS_PART, &crate::handler::serialize_dom(&dom))
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(())
+}
+
+fn split_comment_parent_path(parent: &str) -> Result<(&str, &str), HandlerError> {
+    let Some(close) = parent.find(']') else {
+        return Err(HandlerError::InvalidPath(parent.to_string()));
+    };
+    let comment_path = &parent[..=close];
+    if !comment_path.starts_with("/comments/comment[") {
+        return Err(HandlerError::InvalidPath(parent.to_string()));
+    }
+    Ok((comment_path, &parent[close + 1..]))
+}
+
+fn comment_body_text_run(text: &str) -> WordNode {
+    let mut text_node = WordNode::new(WordElementType::Text).with_text(text);
+    if text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace) {
+        text_node
+            .attributes
+            .insert("xml:space".to_string(), "preserve".to_string());
+        text_node.preserve_space = true;
+    }
+    WordNode::new(WordElementType::Run).with_children(vec![text_node])
+}
+
+fn insert_comment_body_child(parent: &mut WordNode, child: WordNode, position: &InsertPosition) {
+    match position {
+        InsertPosition::AtIndex(index) if *index < parent.children.len() => {
+            parent.children.insert(*index, child)
+        }
+        _ => parent.children.push(child),
+    }
+}
+
+fn remove_comment_body_node(
+    parent: &mut WordNode,
+    segments: &[handler_common::PathSegment],
+    full_path: &str,
+) -> Result<(), HandlerError> {
+    let (segment, rest) = segments
+        .split_first()
+        .ok_or_else(|| HandlerError::InvalidPath(full_path.to_string()))?;
+    let index = segment.index.unwrap_or(1);
+    let child_index = parent
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.element_type.to_path_name() == segment.name)
+        .nth(index.saturating_sub(1))
+        .map(|(index, _)| index)
+        .ok_or_else(|| HandlerError::PathNotFound(full_path.to_string()))?;
+    if rest.is_empty() {
+        if !matches!(
+            parent.children[child_index].element_type,
+            WordElementType::Paragraph | WordElementType::Run
+        ) {
+            return Err(HandlerError::UnsupportedProperty(
+                "comment body remove supports only paragraph or run paths".to_string(),
+            ));
+        }
+        parent.children.remove(child_index);
+        return Ok(());
+    }
+    remove_comment_body_node(&mut parent.children[child_index], rest, full_path)
+}
+
+const COMMENT_PARAGRAPH_FORMAT_KEYS: &[&str] = &[
+    "style",
+    "pStyle",
+    "alignment",
+    "jc",
+    "indentLeft",
+    "indentRight",
+    "indent",
+    "firstLine",
+    "hanging",
+    "spacingBefore",
+    "spacingAfter",
+    "lineSpacing",
+    "spacing",
+    "keepLines",
+    "keepNext",
+    "outlineLevel",
+    "numId",
+    "numLevel",
+    "listStyle",
+    "border",
+    "shading",
+    "shd",
+    "pageBreakBefore",
+    "widowControl",
+];
+
+const COMMENT_RUN_FORMAT_KEYS: &[&str] = &[
+    "bold",
+    "b",
+    "italic",
+    "i",
+    "underline",
+    "u",
+    "strike",
+    "strikeout",
+    "font",
+    "fontFamily",
+    "size",
+    "fontSize",
+    "color",
+    "fontColor",
+    "bgColor",
+    "highlight",
+    "bg",
+    "caps",
+    "smallCaps",
+    "vanish",
+    "hidden",
+    "kern",
+    "characterSpacing",
+    "emphasisMark",
+    "lang",
+    "rightToLeft",
+];
+
+fn is_comment_format_key(key: &str) -> bool {
+    COMMENT_PARAGRAPH_FORMAT_KEYS.contains(&key) || COMMENT_RUN_FORMAT_KEYS.contains(&key)
+}
+
+/// Apply C#-compatible direct formatting to a comment body without flattening
+/// its paragraphs or runs. comments.xml shares WordprocessingML's node shape,
+/// so reuse the normal DOM parser/serializer and run-property merger.
+fn apply_comment_body_format(
+    xml: &str,
+    comment_id: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let mut dom = crate::handler::parse_document_xml(xml)?;
+    let comment = find_comment_node_mut(&mut dom.root, comment_id).ok_or_else(|| {
+        HandlerError::PathNotFound(format!("comment id '{}' not found", comment_id))
+    })?;
+    let paragraph_props: HashMap<_, _> = properties
+        .iter()
+        .filter(|(key, _)| COMMENT_PARAGRAPH_FORMAT_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let run_props: HashMap<_, _> = properties
+        .iter()
+        .filter(|(key, _)| COMMENT_RUN_FORMAT_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !paragraph_props.is_empty() {
+        if let Some(paragraph) = find_first_paragraph_mut(comment) {
+            apply_comment_paragraph_properties(paragraph, &paragraph_props);
+        }
+    }
+    if !run_props.is_empty() {
+        apply_comment_run_properties(comment, &run_props);
+    }
+    Ok(crate::handler::serialize_dom(&dom))
+}
+
+fn find_comment_node_mut<'a>(node: &'a mut WordNode, id: &str) -> Option<&'a mut WordNode> {
+    if matches!(&node.element_type, WordElementType::Unknown(name) if name == "comment")
+        && node.attributes.get("id").map(String::as_str) == Some(id)
+    {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(comment) = find_comment_node_mut(child, id) {
+            return Some(comment);
+        }
+    }
+    None
+}
+
+fn find_first_paragraph_mut(node: &mut WordNode) -> Option<&mut WordNode> {
+    if node.element_type == WordElementType::Paragraph {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(paragraph) = find_first_paragraph_mut(child) {
+            return Some(paragraph);
+        }
+    }
+    None
+}
+
+fn apply_comment_paragraph_properties(
+    paragraph: &mut WordNode,
+    properties: &HashMap<String, String>,
+) {
+    let existing = paragraph
+        .children
+        .iter()
+        .find(|child| child.element_type == WordElementType::ParagraphProperties);
+    let merged = existing
+        .map(|node| merge_ppr_into_props(node, properties))
+        .unwrap_or_else(|| properties.clone());
+    paragraph
+        .children
+        .retain(|child| child.element_type != WordElementType::ParagraphProperties);
+    if let Some(ppr) = build_paragraph_properties(&merged) {
+        paragraph.children.insert(0, ppr);
+    }
+}
+
+fn apply_comment_run_properties(node: &mut WordNode, properties: &HashMap<String, String>) {
+    if node.element_type == WordElementType::Run {
+        apply_run_props_to_run(node, properties);
+        return;
+    }
+    for child in &mut node.children {
+        apply_comment_run_properties(child, properties);
+    }
+}
+
+fn replace_comment_body(block: &str, text: &str) -> Result<String, HandlerError> {
+    let open_end = find_tag_close_after(block, 0)
+        .ok_or_else(|| HandlerError::OperationFailed("malformed comment element".to_string()))?;
+    let close = block
+        .rfind("</w:comment>")
+        .ok_or_else(|| HandlerError::OperationFailed("unterminated comment".to_string()))?;
+    // commentsExtended.xml identifies a comment by the first comment-body
+    // paragraph's w14:paraId. Preserve that id when replacing the body so a
+    // text edit cannot silently sever reply threading or resolved state.
+    let para_id_attr = first_comment_para_id(block)
+        .map(|id| {
+            format!(
+                " xmlns:w14=\"{}\" w14:paraId=\"{}\"",
+                W14_NS,
+                escape_attr(&id)
+            )
+        })
+        .unwrap_or_default();
+    let preserve = text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace);
+    let space_attr = if preserve {
+        " xml:space=\"preserve\""
+    } else {
+        ""
+    };
+    let body = format!(
+        "<w:p{}><w:r><w:t{}>{}</w:t></w:r></w:p>",
+        para_id_attr,
+        space_attr,
+        xml_escape_text(text)
+    );
+    Ok(format!(
+        "{}{}{}",
+        &block[..=open_end],
+        body,
+        &block[close..]
+    ))
 }
 
 /// Set properties on a footnote or endnote. The same XML shape applies to both.
@@ -2834,12 +4487,1003 @@ fn extract_id_from_path(path: &str, prefix: &str) -> Result<String, HandlerError
             HandlerError::InvalidArgument(format!("expected '/{}/<id>', got '{}'", prefix, path))
         })?;
     let rest = rest.trim_start_matches('/');
-    // Accept either "Heading1" or "comment[1]" or "5".
+    // `/comments/comment[@commentId=7]` is the stable public path.  Do not
+    // return the literal `@commentId=7`: callers need the OOXML w:id value.
+    if let Some(marker) = rest.find("[@commentId=") {
+        let value_start = marker + "[@commentId=".len();
+        let value_end = rest[value_start..]
+            .find(']')
+            .map(|n| value_start + n)
+            .unwrap_or(rest.len());
+        return Ok(rest[value_start..value_end]
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string());
+    }
     if let Some(bracket) = rest.find('[') {
         let inner = &rest[bracket + 1..rest.find(']').unwrap_or(rest.len())];
         return Ok(inner.to_string());
     }
     Ok(rest.to_string())
+}
+
+/// A semantic view of one entry in word/comments.xml.  Keeping this small
+/// structure at the package boundary lets get/query/remove operate on comments
+/// without pretending that comments are children of word/document.xml.
+#[derive(Debug, Clone)]
+pub struct DocxComment {
+    pub id: String,
+    pub author: Option<String>,
+    pub initials: Option<String>,
+    pub date: Option<String>,
+    pub text: String,
+    pub anchor: Option<String>,
+    pub parent_id: Option<String>,
+    pub done: bool,
+    para_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CommentAnchorMode {
+    Range,
+    Point,
+    OpenRange,
+}
+
+/// Add a Word comment and its document anchor as one package-level mutation.
+/// A comment is only valid when all of comments.xml, its relationship/content
+/// type, and the three document markers agree on the same id.
+pub fn add_comment_part_aware(
+    package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    if is_truthy(
+        properties
+            .get("rangeEnd")
+            .or_else(|| properties.get("rangeend")),
+    ) {
+        return close_open_comment_range(package, parent, properties);
+    }
+    let text = properties.get("text").ok_or_else(|| {
+        HandlerError::InvalidArgument("'text' property is required for comment type".to_string())
+    })?;
+    let mut comments_xml = ensure_comments_part(package)?;
+    let existing = parse_comments(&comments_xml)?;
+    let requested_id = properties
+        .get("commentId")
+        .or_else(|| properties.get("commentid"))
+        .or_else(|| properties.get("id"));
+    let id = if let Some(id) = requested_id {
+        if existing.iter().any(|c| c.id == *id) {
+            return Err(HandlerError::InvalidArgument(format!(
+                "comment id '{}' already exists",
+                id
+            )));
+        }
+        id.clone()
+    } else {
+        existing
+            .iter()
+            .filter_map(|c| c.id.parse::<u64>().ok())
+            .max()
+            .map(|n| n + 1)
+            .unwrap_or(0)
+            .to_string()
+    };
+
+    let author = properties
+        .get("author")
+        .map(String::as_str)
+        .unwrap_or("officecli");
+    let initials = properties
+        .get("initials")
+        .cloned()
+        .unwrap_or_else(|| author.chars().next().unwrap_or('o').to_string());
+    let generated_date = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| HandlerError::OperationFailed(format!("format comment date: {}", e)))?;
+    let date = properties
+        .get("date")
+        .map(String::as_str)
+        .unwrap_or(&generated_date);
+    let parent_id = properties
+        .get("parentId")
+        .or_else(|| properties.get("parentid"))
+        .cloned();
+    let done = properties
+        .get("done")
+        .or_else(|| properties.get("resolved"))
+        .is_some_and(|value| is_truthy(Some(value)));
+    let needs_extension = parent_id.is_some()
+        || properties.contains_key("done")
+        || properties.contains_key("resolved");
+    let comment_para_id = properties
+        .get("commentParaId")
+        .or_else(|| properties.get("commentparaid"))
+        .cloned()
+        .or_else(|| needs_extension.then(crate::para_id::generate_para_id));
+    if let Some(parent_id) = parent_id.as_deref() {
+        let parent = existing
+            .iter()
+            .find(|comment| comment.id == parent_id)
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "parentId={}: no comment with that id",
+                    parent_id
+                ))
+            })?;
+        if parent.para_id.is_none() {
+            let (updated, _) = assign_comment_para_id(&comments_xml, parent_id)?;
+            comments_xml = updated;
+        }
+    }
+    let comment_xml = build_comment_xml(
+        &id,
+        author,
+        &initials,
+        Some(date),
+        text,
+        comment_para_id.as_deref(),
+    );
+
+    let definition_only = properties
+        .get("range")
+        .is_some_and(|range| range.eq_ignore_ascii_case("none"));
+    let updated_document = if definition_only {
+        None
+    } else {
+        let document_xml = package
+            .read_part_xml(DOCX_DOCUMENT_PART)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        let mut dom = crate::handler::parse_document_xml(&document_xml)?;
+        let point_ref = is_truthy(
+            properties
+                .get("pointRef")
+                .or_else(|| properties.get("pointref")),
+        ) || properties
+            .get("range")
+            .is_some_and(|range| is_explicit_false(range));
+        let mode = if point_ref {
+            CommentAnchorMode::Point
+        } else if is_truthy(
+            properties
+                .get("rangeOpen")
+                .or_else(|| properties.get("rangeopen")),
+        ) {
+            CommentAnchorMode::OpenRange
+        } else {
+            CommentAnchorMode::Range
+        };
+        insert_comment_anchor(&mut dom, parent, &id, properties, mode)?;
+        Some(crate::handler::serialize_dom(&dom))
+    };
+
+    let comments_close = comments_xml.rfind("</w:comments>").ok_or_else(|| {
+        HandlerError::OperationFailed("malformed comments.xml: missing </w:comments>".to_string())
+    })?;
+    let mut updated_comments = String::with_capacity(comments_xml.len() + comment_xml.len());
+    updated_comments.push_str(&comments_xml[..comments_close]);
+    updated_comments.push_str(&comment_xml);
+    updated_comments.push_str(&comments_xml[comments_close..]);
+
+    if let Some(document) = updated_document {
+        package
+            .write_part_xml(DOCX_DOCUMENT_PART, &document)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    }
+    package
+        .write_part_xml(DOCX_COMMENTS_PART, &updated_comments)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+
+    if let Some(parent_id) = parent_id.as_deref() {
+        let current = parse_comments(&updated_comments)?;
+        let parent_para_id = current
+            .iter()
+            .find(|comment| comment.id == parent_id)
+            .and_then(|comment| comment.para_id.clone())
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("parent comment missing paraId".to_string())
+            })?;
+        let child_para_id = comment_para_id.clone().ok_or_else(|| {
+            HandlerError::OperationFailed("reply comment missing generated paraId".to_string())
+        })?;
+        upsert_comment_extension(package, &parent_para_id, None, None)?;
+        upsert_comment_extension(package, &child_para_id, Some(&parent_para_id), Some(false))?;
+    } else if needs_extension {
+        let para_id = comment_para_id.clone().ok_or_else(|| {
+            HandlerError::OperationFailed("comment metadata missing generated paraId".to_string())
+        })?;
+        upsert_comment_extension(package, &para_id, None, Some(done))?;
+    }
+
+    Ok(format!("/comments/comment[@commentId={}]", id))
+}
+
+/// Return comments as semantic records. Missing comments.xml is a valid empty
+/// comment collection, matching a freshly-created Word document.
+pub fn list_comments(package: &OxmlPackage) -> Result<Vec<DocxComment>, HandlerError> {
+    let Ok(xml) = package.read_part_xml(DOCX_COMMENTS_PART) else {
+        return Ok(Vec::new());
+    };
+    let mut comments = parse_comments(&xml)?;
+    let extensions = read_comment_extensions(package)?;
+    let ids_by_para: HashMap<String, String> = comments
+        .iter()
+        .filter_map(|comment| {
+            comment
+                .para_id
+                .as_ref()
+                .map(|para_id| (para_id.clone(), comment.id.clone()))
+        })
+        .collect();
+    let document_xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    for comment in &mut comments {
+        comment.anchor = find_comment_anchor(&document_xml, &comment.id);
+        if let Some(para_id) = &comment.para_id {
+            if let Some(extension) = extensions.get(para_id) {
+                comment.done = extension.done;
+                comment.parent_id = extension
+                    .parent_para_id
+                    .as_ref()
+                    .and_then(|parent| ids_by_para.get(parent).cloned());
+            }
+        }
+    }
+    Ok(comments)
+}
+
+pub fn get_comment(package: &OxmlPackage, path: &str) -> Result<DocxComment, HandlerError> {
+    let comments = list_comments(package)?;
+    let requested = extract_id_from_path(path, "comments")?;
+    if path.contains("[@commentId=") {
+        comments
+            .into_iter()
+            .find(|c| c.id == requested)
+            .ok_or_else(|| {
+                HandlerError::PathNotFound(format!("comment id '{}' not found", requested))
+            })
+    } else if let Ok(index) = requested.parse::<usize>() {
+        if path.contains("comment[") {
+            comments
+                .into_iter()
+                .nth(index.saturating_sub(1))
+                .ok_or_else(|| {
+                    HandlerError::PathNotFound(format!("comment index '{}' not found", index))
+                })
+        } else {
+            comments
+                .into_iter()
+                .find(|c| c.id == requested)
+                .ok_or_else(|| {
+                    HandlerError::PathNotFound(format!("comment id '{}' not found", requested))
+                })
+        }
+    } else {
+        Err(HandlerError::InvalidPath(format!(
+            "invalid comment path '{}'",
+            path
+        )))
+    }
+}
+
+/// Remove a comment definition and every document marker that refers to it.
+/// This avoids Word's orphan-comment repair prompt and mirrors the C# handler's
+/// anchor cleanup behaviour.
+pub fn remove_comment_part_aware(
+    package: &mut OxmlPackage,
+    path: &str,
+) -> Result<(), HandlerError> {
+    let target = get_comment(package, path)?;
+    let comments_xml = package
+        .read_part_xml(DOCX_COMMENTS_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let new_comments = remove_comment_block(&comments_xml, &target.id)?;
+    let document_xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let new_document = remove_comment_markers(&document_xml, &target.id);
+
+    package
+        .write_part_xml(DOCX_COMMENTS_PART, &new_comments)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &new_document)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(())
+}
+
+fn ensure_comments_part(package: &mut OxmlPackage) -> Result<String, HandlerError> {
+    let comments_xml = if package.has_part(DOCX_COMMENTS_PART) {
+        package
+            .read_part_xml(DOCX_COMMENTS_PART)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?
+    } else {
+        let xml = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+            "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>",
+        )
+        .to_string();
+        package
+            .write_part_xml(DOCX_COMMENTS_PART, &xml)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+        xml
+    };
+    ensure_docx_comments_relationship(package)?;
+    ensure_docx_comments_content_type(package)?;
+    Ok(if comments_xml.trim_end().ends_with("/>") {
+        comments_xml.replacen("/>", "></w:comments>", 1)
+    } else {
+        comments_xml
+    })
+}
+
+fn ensure_docx_comments_relationship(package: &mut OxmlPackage) -> Result<(), HandlerError> {
+    let rels = package
+        .read_part_xml(DOCX_DOCUMENT_RELS_PART)
+        .unwrap_or_default();
+    if rels.contains(DOCX_COMMENTS_REL_TYPE) {
+        return Ok(());
+    }
+    let rid = next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART);
+    let relationship = format!(
+        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"comments.xml\"/>",
+        rid, DOCX_COMMENTS_REL_TYPE
+    );
+    inject_docx_relationship(package, DOCX_DOCUMENT_RELS_PART, &relationship)
+}
+
+fn ensure_docx_comments_content_type(package: &mut OxmlPackage) -> Result<(), HandlerError> {
+    let xml = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    if xml.contains("PartName=\"/word/comments.xml\"") {
+        return Ok(());
+    }
+    let override_xml = format!(
+        "<Override PartName=\"/word/comments.xml\" ContentType=\"{}\"/>",
+        DOCX_COMMENTS_CONTENT_TYPE
+    );
+    let types_open = xml.find("<Types").ok_or_else(|| {
+        HandlerError::OperationFailed("malformed [Content_Types].xml".to_string())
+    })?;
+    let insertion = find_tag_close_after(&xml, types_open).ok_or_else(|| {
+        HandlerError::OperationFailed("malformed [Content_Types].xml".to_string())
+    })? + 1;
+    let mut updated = String::with_capacity(xml.len() + override_xml.len());
+    updated.push_str(&xml[..insertion]);
+    updated.push_str(&override_xml);
+    updated.push_str(&xml[insertion..]);
+    package
+        .write_part_xml("[Content_Types].xml", &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))
+}
+
+fn build_comment_xml(
+    id: &str,
+    author: &str,
+    initials: &str,
+    date: Option<&str>,
+    text: &str,
+    para_id: Option<&str>,
+) -> String {
+    let date_attr = date
+        .map(|value| format!(" w:date=\"{}\"", escape_attr(value)))
+        .unwrap_or_default();
+    let preserve = text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace);
+    let space_attr = if preserve {
+        " xml:space=\"preserve\""
+    } else {
+        ""
+    };
+    let para_id_attr = para_id
+        .map(|value| {
+            format!(
+                " xmlns:w14=\"{}\" w14:paraId=\"{}\"",
+                W14_NS,
+                escape_attr(value)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<w:comment w:id=\"{}\" w:author=\"{}\" w:initials=\"{}\"{}><w:p{}><w:r><w:t{}>{}</w:t></w:r></w:p></w:comment>",
+        escape_attr(id),
+        escape_attr(author),
+        escape_attr(initials),
+        date_attr,
+        para_id_attr,
+        space_attr,
+        xml_escape_text(text)
+    )
+}
+
+fn assign_comment_para_id(xml: &str, comment_id: &str) -> Result<(String, String), HandlerError> {
+    let needle = format!("w:id=\"{}\"", comment_id);
+    let id_pos = xml.find(&needle).ok_or_else(|| {
+        HandlerError::PathNotFound(format!("comment id '{}' not found", comment_id))
+    })?;
+    let comment_start = xml[..id_pos]
+        .rfind("<w:comment")
+        .ok_or_else(|| HandlerError::OperationFailed("malformed comments.xml".to_string()))?;
+    let comment_end = find_matching_close(xml, comment_start, "<w:comment", "</w:comment>")
+        .ok_or_else(|| HandlerError::OperationFailed("unterminated comment".to_string()))?;
+    let paragraph_rel = xml[comment_start..comment_end]
+        .find("<w:p")
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("comment has no paragraph for metadata".to_string())
+        })?;
+    let paragraph_start = comment_start + paragraph_rel;
+    let paragraph_end = find_tag_close_after(xml, paragraph_start)
+        .ok_or_else(|| HandlerError::OperationFailed("malformed comment paragraph".to_string()))?;
+    if let Some(existing) = xml_attribute(&xml[paragraph_start..=paragraph_end], "w14:paraId") {
+        return Ok((xml.to_string(), existing));
+    }
+    let para_id = crate::para_id::generate_para_id();
+    let insertion = format!(" xmlns:w14=\"{}\" w14:paraId=\"{}\"", W14_NS, para_id);
+    let mut updated = String::with_capacity(xml.len() + insertion.len());
+    updated.push_str(&xml[..paragraph_end]);
+    updated.push_str(&insertion);
+    updated.push_str(&xml[paragraph_end..]);
+    Ok((updated, para_id))
+}
+
+fn insert_comment_anchor(
+    dom: &mut WordDom,
+    parent: &str,
+    id: &str,
+    properties: &HashMap<String, String>,
+    mode: CommentAnchorMode,
+) -> Result<(), HandlerError> {
+    let segments = parse_path(parent)?;
+    let last = segments
+        .last()
+        .ok_or_else(|| HandlerError::InvalidPath("empty comment parent".to_string()))?;
+    let start = WordNode::new(WordElementType::Unknown("commentRangeStart".to_string()))
+        .with_attribute("id", id);
+    let end = WordNode::new(WordElementType::Unknown("commentRangeEnd".to_string()))
+        .with_attribute("id", id);
+    let reference = WordNode::new(WordElementType::Run)
+        .with_children(vec![
+            WordNode::new(WordElementType::CommentReference).with_attribute("id", id)
+        ]);
+
+    if last.name == "r" {
+        let run_number = last.index.ok_or_else(|| {
+            HandlerError::InvalidPath("comment run parent must include a 1-based index".to_string())
+        })?;
+        let paragraph_path = parent.rsplit_once('/').map(|(p, _)| p).unwrap_or(parent);
+        let paragraph = navigate_to_element_mut(dom, paragraph_path)?;
+        if paragraph.element_type != WordElementType::Paragraph {
+            return Err(HandlerError::InvalidArgument(
+                "comments must be added to a paragraph or a direct run inside one".to_string(),
+            ));
+        }
+        let run_index = nth_direct_run_index(paragraph, run_number).ok_or_else(|| {
+            HandlerError::PathNotFound(format!(
+                "run {} not found in '{}'",
+                run_number, paragraph_path
+            ))
+        })?;
+        match mode {
+            CommentAnchorMode::Point => paragraph.children.insert(run_index + 1, reference),
+            CommentAnchorMode::OpenRange => paragraph.children.insert(run_index, start),
+            CommentAnchorMode::Range => {
+                paragraph.children.insert(run_index, start);
+                paragraph.children.insert(run_index + 2, end);
+                paragraph.children.insert(run_index + 3, reference);
+            }
+        }
+        return Ok(());
+    }
+
+    if last.name != "p" {
+        return Err(HandlerError::InvalidArgument(
+            "comments must be added to a paragraph or run: /body/p[N] or /body/p[N]/r[M]"
+                .to_string(),
+        ));
+    }
+    let paragraph = navigate_to_element_mut(dom, parent)?;
+    let run_start = properties
+        .get("runStart")
+        .or_else(|| properties.get("runstart"))
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| {
+            HandlerError::InvalidArgument("runStart must be a non-negative integer".to_string())
+        })?
+        .unwrap_or(0);
+    let start_index = if run_start == 0 {
+        paragraph
+            .children
+            .iter()
+            .position(|child| child.element_type != WordElementType::ParagraphProperties)
+            .unwrap_or(paragraph.children.len())
+    } else {
+        nth_direct_run_index(paragraph, run_start)
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                HandlerError::PathNotFound(format!("run {} not found in '{}'", run_start, parent))
+            })?
+    };
+    match mode {
+        CommentAnchorMode::Point => {
+            let point_index = if run_start == 0 {
+                paragraph.children.len()
+            } else {
+                start_index
+            };
+            paragraph.children.insert(point_index, reference);
+        }
+        CommentAnchorMode::OpenRange => paragraph.children.insert(start_index, start),
+        CommentAnchorMode::Range => {
+            paragraph.children.insert(start_index, start);
+            paragraph.children.push(end);
+            paragraph.children.push(reference);
+        }
+    }
+    Ok(())
+}
+
+fn close_open_comment_range(
+    package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let document_xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&document_xml)?;
+    let id = last_open_comment_range_id(&dom).ok_or_else(|| {
+        HandlerError::InvalidArgument(
+            "comment rangeEnd has no matching open comment range (add with rangeOpen=true first)"
+                .to_string(),
+        )
+    })?;
+    insert_comment_range_end(&mut dom, parent, &id, properties)?;
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &crate::handler::serialize_dom(&dom))
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!("/comments/comment[@commentId={}]/rangeEnd", id))
+}
+
+fn last_open_comment_range_id(dom: &WordDom) -> Option<String> {
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    collect_comment_markers(&dom.root, &mut starts, &mut ends);
+    starts.into_iter().rev().find(|id| !ends.contains(id))
+}
+
+fn collect_comment_markers(node: &WordNode, starts: &mut Vec<String>, ends: &mut Vec<String>) {
+    match &node.element_type {
+        WordElementType::Unknown(name) if name == "commentRangeStart" => {
+            if let Some(id) = node.attributes.get("id") {
+                starts.push(id.clone());
+            }
+        }
+        WordElementType::Unknown(name) if name == "commentRangeEnd" => {
+            if let Some(id) = node.attributes.get("id") {
+                ends.push(id.clone());
+            }
+        }
+        _ => {}
+    }
+    for child in &node.children {
+        collect_comment_markers(child, starts, ends);
+    }
+}
+
+fn insert_comment_range_end(
+    dom: &mut WordDom,
+    parent: &str,
+    id: &str,
+    properties: &HashMap<String, String>,
+) -> Result<(), HandlerError> {
+    let segments = parse_path(parent)?;
+    let last = segments
+        .last()
+        .ok_or_else(|| HandlerError::InvalidPath("empty comment parent".to_string()))?;
+    let end = WordNode::new(WordElementType::Unknown("commentRangeEnd".to_string()))
+        .with_attribute("id", id);
+    let reference = WordNode::new(WordElementType::Run)
+        .with_children(vec![
+            WordNode::new(WordElementType::CommentReference).with_attribute("id", id)
+        ]);
+    if last.name == "r" {
+        let run = last.index.ok_or_else(|| {
+            HandlerError::InvalidPath("comment run parent must include a 1-based index".to_string())
+        })?;
+        let paragraph_path = parent.rsplit_once('/').map(|(p, _)| p).unwrap_or(parent);
+        let paragraph = navigate_to_element_mut(dom, paragraph_path)?;
+        let index = nth_direct_run_index(paragraph, run).ok_or_else(|| {
+            HandlerError::PathNotFound(format!("run {} not found in '{}'", run, paragraph_path))
+        })? + 1;
+        paragraph.children.insert(index, end);
+        paragraph.children.insert(index + 1, reference);
+        return Ok(());
+    }
+    if last.name != "p" {
+        return Err(HandlerError::InvalidArgument(
+            "comments must be added to a paragraph or run: /body/p[N] or /body/p[N]/r[M]"
+                .to_string(),
+        ));
+    }
+    let paragraph = navigate_to_element_mut(dom, parent)?;
+    let run_end = properties
+        .get("runEnd")
+        .or_else(|| properties.get("runend"))
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| {
+            HandlerError::InvalidArgument("runEnd must be a non-negative integer".to_string())
+        })?
+        .unwrap_or(0);
+    if run_end == 0 {
+        paragraph.children.push(end);
+        paragraph.children.push(reference);
+    } else {
+        let index = nth_direct_run_index(paragraph, run_end).ok_or_else(|| {
+            HandlerError::PathNotFound(format!("run {} not found in '{}'", run_end, parent))
+        })? + 1;
+        paragraph.children.insert(index, end);
+        paragraph.children.insert(index + 1, reference);
+    }
+    Ok(())
+}
+
+fn is_truthy(value: Option<&String>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "true" | "1" | "yes" | "on")
+    )
+}
+
+fn is_explicit_false(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
+}
+
+fn nth_direct_run_index(paragraph: &WordNode, number: usize) -> Option<usize> {
+    paragraph
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.element_type == WordElementType::Run)
+        .nth(number.saturating_sub(1))
+        .map(|(index, _)| index)
+}
+
+fn parse_comments(xml: &str) -> Result<Vec<DocxComment>, HandlerError> {
+    let mut comments = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = xml[cursor..].find("<w:comment") {
+        let open = cursor + relative;
+        let after_name = xml.as_bytes().get(open + "<w:comment".len()).copied();
+        if !matches!(
+            after_name,
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'>')
+        ) {
+            cursor = open + 1;
+            continue;
+        }
+        let close =
+            find_matching_close(xml, open, "<w:comment", "</w:comment>").ok_or_else(|| {
+                HandlerError::OperationFailed("unterminated comment in comments.xml".to_string())
+            })?;
+        let block = &xml[open..close];
+        let open_end = find_tag_close_after(block, 0).ok_or_else(|| {
+            HandlerError::OperationFailed("malformed comment opening tag".to_string())
+        })?;
+        let opening = &block[..=open_end];
+        let id = xml_attribute(opening, "w:id")
+            .ok_or_else(|| HandlerError::OperationFailed("comment without w:id".to_string()))?;
+        comments.push(DocxComment {
+            id,
+            author: xml_attribute(opening, "w:author"),
+            initials: xml_attribute(opening, "w:initials"),
+            date: xml_attribute(opening, "w:date"),
+            text: collect_word_text(block),
+            anchor: None,
+            parent_id: None,
+            done: false,
+            para_id: first_comment_para_id(block),
+        });
+        cursor = close;
+    }
+    Ok(comments)
+}
+
+fn xml_attribute(tag: &str, name: &str) -> Option<String> {
+    let marker = format!("{}=\"", name);
+    let start = tag.find(&marker)? + marker.len();
+    let end = tag[start..].find('"')? + start;
+    Some(xml_unescape(&tag[start..end]))
+}
+
+fn collect_word_text(xml: &str) -> String {
+    let mut text = String::new();
+    let mut cursor = 0;
+    while let Some(relative) = xml[cursor..].find("<w:t") {
+        let open = cursor + relative;
+        let Some(open_end) = find_tag_close_after(xml, open) else {
+            break;
+        };
+        let content_start = open_end + 1;
+        let Some(close_relative) = xml[content_start..].find("</w:t>") else {
+            break;
+        };
+        let content_end = content_start + close_relative;
+        text.push_str(&xml_unescape(&xml[content_start..content_end]));
+        cursor = content_end + "</w:t>".len();
+    }
+    text
+}
+
+fn first_comment_para_id(comment_xml: &str) -> Option<String> {
+    let p_start = comment_xml.find("<w:p")?;
+    let p_end = find_tag_close_after(comment_xml, p_start)?;
+    xml_attribute(&comment_xml[p_start..=p_end], "w14:paraId")
+}
+
+#[derive(Debug, Clone)]
+struct CommentExtension {
+    parent_para_id: Option<String>,
+    done: bool,
+}
+
+fn read_comment_extensions(
+    package: &OxmlPackage,
+) -> Result<HashMap<String, CommentExtension>, HandlerError> {
+    let Ok(xml) = package.read_part_xml(DOCX_COMMENTS_EXT_PART) else {
+        return Ok(HashMap::new());
+    };
+    let mut result = HashMap::new();
+    let mut cursor = 0;
+    while let Some(relative) = xml[cursor..].find("<w15:commentEx") {
+        let start = cursor + relative;
+        let Some(end) = find_tag_close_after(&xml, start) else {
+            return Err(HandlerError::OperationFailed(
+                "malformed commentsExtended.xml".to_string(),
+            ));
+        };
+        let tag = &xml[start..=end];
+        if let Some(para_id) = xml_attribute(tag, "w15:paraId") {
+            let done = xml_attribute(tag, "w15:done")
+                .as_ref()
+                .map(|value| is_truthy(Some(value)))
+                .unwrap_or(false);
+            result.insert(
+                para_id,
+                CommentExtension {
+                    parent_para_id: xml_attribute(tag, "w15:paraIdParent"),
+                    done,
+                },
+            );
+        }
+        cursor = end + 1;
+    }
+    Ok(result)
+}
+
+fn ensure_comment_extension_part(package: &mut OxmlPackage) -> Result<String, HandlerError> {
+    let xml = if package.has_part(DOCX_COMMENTS_EXT_PART) {
+        package
+            .read_part_xml(DOCX_COMMENTS_EXT_PART)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?
+    } else {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w15:commentsEx xmlns:w15=\"{}\"></w15:commentsEx>",
+            W15_NS
+        );
+        package
+            .write_part_xml(DOCX_COMMENTS_EXT_PART, &xml)
+            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+        xml
+    };
+    let rels = package
+        .read_part_xml(DOCX_DOCUMENT_RELS_PART)
+        .unwrap_or_default();
+    if !rels.contains(DOCX_COMMENTS_EXT_REL_TYPE) {
+        let rid = next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART);
+        let relationship = format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"commentsExtended.xml\"/>",
+            rid, DOCX_COMMENTS_EXT_REL_TYPE
+        );
+        inject_docx_relationship(package, DOCX_DOCUMENT_RELS_PART, &relationship)?;
+    }
+    ensure_content_type_override(
+        package,
+        "/word/commentsExtended.xml",
+        DOCX_COMMENTS_EXT_CONTENT_TYPE,
+    )?;
+    Ok(xml)
+}
+
+/// Prepare the package for a whole-part `/commentsExtended` replacement.
+///
+/// Word keys `w15:commentEx` records by the first body paragraph's
+/// `w14:paraId`, not by `w:comment/@w:id`.  C# stamps absent paragraph ids
+/// before replaying a dumped commentsExtended part; do the same here so raw
+/// replay cannot create a silently unthreaded comment graph.
+pub(crate) fn prepare_comments_extended_raw_replace(
+    package: &mut OxmlPackage,
+) -> Result<(), HandlerError> {
+    if package.has_part(DOCX_COMMENTS_PART) {
+        let mut comments_xml = package
+            .read_part_xml(DOCX_COMMENTS_PART)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let comment_ids: Vec<String> = parse_comments(&comments_xml)?
+            .into_iter()
+            .map(|comment| comment.id)
+            .collect();
+        for id in comment_ids {
+            let (updated, _) = assign_comment_para_id(&comments_xml, &id)?;
+            comments_xml = updated;
+        }
+        package
+            .write_part_xml(DOCX_COMMENTS_PART, &comments_xml)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    let _ = ensure_comment_extension_part(package)?;
+    Ok(())
+}
+
+fn ensure_content_type_override(
+    package: &mut OxmlPackage,
+    part_name: &str,
+    content_type: &str,
+) -> Result<(), HandlerError> {
+    let xml = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    if xml.contains(&format!("PartName=\"{}\"", part_name)) {
+        return Ok(());
+    }
+    let types_open = xml.find("<Types").ok_or_else(|| {
+        HandlerError::OperationFailed("malformed [Content_Types].xml".to_string())
+    })?;
+    let insertion = find_tag_close_after(&xml, types_open).ok_or_else(|| {
+        HandlerError::OperationFailed("malformed [Content_Types].xml".to_string())
+    })? + 1;
+    let override_xml = format!(
+        "<Override PartName=\"{}\" ContentType=\"{}\"/>",
+        part_name, content_type
+    );
+    let mut updated = String::with_capacity(xml.len() + override_xml.len());
+    updated.push_str(&xml[..insertion]);
+    updated.push_str(&override_xml);
+    updated.push_str(&xml[insertion..]);
+    package
+        .write_part_xml("[Content_Types].xml", &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))
+}
+
+fn upsert_comment_extension(
+    package: &mut OxmlPackage,
+    para_id: &str,
+    parent_para_id: Option<&str>,
+    done: Option<bool>,
+) -> Result<(), HandlerError> {
+    let xml = ensure_comment_extension_part(package)?;
+    let existing = format!("w15:paraId=\"{}\"", para_id);
+    let updated = if let Some(match_pos) = xml.find(&existing) {
+        let start = xml[..match_pos].rfind("<w15:commentEx").ok_or_else(|| {
+            HandlerError::OperationFailed("malformed commentsExtended.xml".to_string())
+        })?;
+        let end = tag_end_after(&xml, start).ok_or_else(|| {
+            HandlerError::OperationFailed("malformed commentsExtended.xml".to_string())
+        })?;
+        let mut tag = xml[start..end].to_string();
+        if let Some(parent) = parent_para_id {
+            set_attr_on_open_tag(&mut tag, "w15:paraIdParent", parent);
+        }
+        if let Some(done) = done {
+            set_attr_on_open_tag(&mut tag, "w15:done", if done { "1" } else { "0" });
+        }
+        format!("{}{}{}", &xml[..start], tag, &xml[end..])
+    } else {
+        let close = xml.rfind("</w15:commentsEx>").ok_or_else(|| {
+            HandlerError::OperationFailed("malformed commentsExtended.xml".to_string())
+        })?;
+        let parent = parent_para_id
+            .map(|value| format!(" w15:paraIdParent=\"{}\"", escape_attr(value)))
+            .unwrap_or_default();
+        let done = done.unwrap_or(false);
+        let entry = format!(
+            "<w15:commentEx w15:paraId=\"{}\"{} w15:done=\"{}\"/>",
+            escape_attr(para_id),
+            parent,
+            if done { "1" } else { "0" }
+        );
+        format!("{}{}{}", &xml[..close], entry, &xml[close..])
+    };
+    package
+        .write_part_xml(DOCX_COMMENTS_EXT_PART, &updated)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))
+}
+
+fn tag_end_after(xml: &str, tag_start: usize) -> Option<usize> {
+    let close = find_tag_close_after(xml, tag_start)?;
+    if xml.as_bytes().get(close) == Some(&b'/') {
+        Some(close + 2)
+    } else {
+        Some(close + 1)
+    }
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
+fn find_comment_anchor(document_xml: &str, id: &str) -> Option<String> {
+    let marker = format!("<w:commentRangeStart w:id=\"{}\"", id);
+    let marker_pos = document_xml.find(&marker)?;
+    // Word paths are 1-based. This is intentionally based on parsed document
+    // order rather than comment ids, so sparse ids remain stable.
+    let para_count = document_xml[..marker_pos]
+        .match_indices("<w:p")
+        .filter(|(index, _)| {
+            matches!(
+                document_xml.as_bytes().get(index + 4),
+                Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+            )
+        })
+        .count();
+    Some(format!("/body/p[{}]", para_count))
+}
+
+fn remove_comment_block(xml: &str, id: &str) -> Result<String, HandlerError> {
+    let needle = format!("w:id=\"{}\"", id);
+    let id_offset = xml
+        .find(&needle)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("comment id '{}' not found", id)))?;
+    let open = xml[..id_offset]
+        .rfind("<w:comment")
+        .ok_or_else(|| HandlerError::OperationFailed("malformed comments.xml".to_string()))?;
+    let close = find_matching_close(xml, open, "<w:comment", "</w:comment>").ok_or_else(|| {
+        HandlerError::OperationFailed("unterminated comment in comments.xml".to_string())
+    })?;
+    let mut out = String::with_capacity(xml.len());
+    out.push_str(&xml[..open]);
+    out.push_str(&xml[close..]);
+    Ok(out)
+}
+
+fn remove_comment_markers(xml: &str, id: &str) -> String {
+    let mut output = xml.to_string();
+    for tag in ["commentRangeStart", "commentRangeEnd"] {
+        let needle = format!("<w:{} w:id=\"{}\"", tag, id);
+        while let Some(start) = output.find(&needle) {
+            let Some(end) = find_tag_close_after(&output, start) else {
+                break;
+            };
+            output.replace_range(start..=end, "");
+        }
+    }
+    // The reference normally occupies a dedicated run. Remove that whole run
+    // when it contains this comment reference, otherwise leave surrounding
+    // text/run properties untouched.
+    let reference = format!("<w:commentReference w:id=\"{}\"", id);
+    while let Some(reference_pos) = output.find(&reference) {
+        let run_open = output[..reference_pos].rfind("<w:r");
+        let run_close = output[reference_pos..]
+            .find("</w:r>")
+            .map(|n| reference_pos + n + "</w:r>".len());
+        if let (Some(start), Some(end)) = (run_open, run_close) {
+            output.replace_range(start..end, "");
+        } else if let Some(end) = find_tag_close_after(&output, reference_pos) {
+            output.replace_range(reference_pos..=end, "");
+        } else {
+            break;
+        }
+    }
+    output
 }
 
 fn escape_attr(s: &str) -> String {
@@ -2961,7 +5605,11 @@ pub fn add_image_part_aware(
         rid = image_rel_id,
     );
 
-    let new_doc_xml = insert_drawing_in_paragraph(&doc_xml, parent, &drawing_xml)?;
+    let new_doc_xml = ensure_document_root_namespaces(&insert_drawing_in_paragraph(
+        &doc_xml,
+        parent,
+        &drawing_xml,
+    )?);
     package
         .write_part_xml("word/document.xml", &new_doc_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
@@ -3058,12 +5706,1437 @@ pub fn add_chart_part_aware(
         idx = chart_idx,
         rid = chart_rel_id,
     );
-    let new_doc_xml = insert_drawing_in_paragraph(&doc_xml, parent, &drawing_xml)?;
+    let new_doc_xml = ensure_document_root_namespaces(&insert_drawing_in_paragraph(
+        &doc_xml,
+        parent,
+        &drawing_xml,
+    )?);
     package
         .write_part_xml("word/document.xml", &new_doc_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     Ok(format!("{}/drawing[{}]", parent, chart_idx))
+}
+
+/// Add a floating DrawingML `wps:wsp` shape or textbox.  These objects live in
+/// a non-WordprocessingML namespace, so they deliberately bypass the regular
+/// `WordDom` add path just like pictures and charts do.
+pub fn add_drawing_shape_part_aware(
+    package: &mut OxmlPackage,
+    parent: &str,
+    element_type: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let kind = match element_type.to_ascii_lowercase().as_str() {
+        "shape" | "sp" => DrawingShapeKind::Shape,
+        "textbox" | "txbx" => DrawingShapeKind::Textbox,
+        _ => unreachable!("caller only routes shape/textbox element types"),
+    };
+    if parent != "/body" && parent != "/" && parse_paragraph_index_from_parent(parent).is_none() {
+        return Err(HandlerError::InvalidPath(format!(
+            "{} add expects /body or /body/p[N], got '{}'",
+            element_type, parent
+        )));
+    }
+
+    let doc_xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let index = count_drawing_shapes(&doc_xml, kind) + 1;
+    let doc_pr_id = count_all_drawing_shapes(&doc_xml) + 1;
+    let width = properties
+        .get("width")
+        .map(|value| parse_emu(value))
+        .unwrap_or(if kind == DrawingShapeKind::Textbox {
+            2_286_000
+        } else {
+            914_400
+        });
+    let height = properties
+        .get("height")
+        .map(|value| parse_emu(value))
+        .unwrap_or(914_400);
+    if width <= 0 || height <= 0 {
+        return Err(HandlerError::InvalidArgument(
+            "shape width and height must be positive".to_string(),
+        ));
+    }
+    let geometry = properties
+        .get("geometry")
+        .or_else(|| properties.get("preset"))
+        .or_else(|| properties.get("shape"))
+        .map(|value| sanitize_geometry(value))
+        .unwrap_or("rect");
+    let fill = drawing_fill_xml(
+        properties
+            .get("fill")
+            .or_else(|| properties.get("fillcolor")),
+    );
+    let line = drawing_line_xml(properties);
+    let text = properties.get("text").map(String::as_str).unwrap_or("");
+    let name = properties
+        .get("alt")
+        .or_else(|| properties.get("name"))
+        .map(String::as_str)
+        .unwrap_or(if kind == DrawingShapeKind::Textbox {
+            "Text Box"
+        } else {
+            "Shape"
+        });
+    let wrap = properties.get("wrap").map(String::as_str).unwrap_or(
+        if kind == DrawingShapeKind::Textbox {
+            "square"
+        } else {
+            "none"
+        },
+    );
+    let wrap_xml = drawing_wrap_xml(wrap)?;
+    let x = properties
+        .get("anchor.x")
+        .or_else(|| properties.get("hposition"))
+        .map(|value| parse_emu(value))
+        .unwrap_or(0);
+    let y = properties
+        .get("anchor.y")
+        .or_else(|| properties.get("vposition"))
+        .map(|value| parse_emu(value))
+        .unwrap_or(0);
+    let text_body = if kind == DrawingShapeKind::Textbox {
+        format!("<wps:txbx><w:txbxContent><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns=\"91440\" tIns=\"45720\" rIns=\"91440\" bIns=\"45720\"/>", xml_escape_text(text))
+    } else {
+        "<wps:bodyPr/>".to_string()
+    };
+    let tx_box = if kind == DrawingShapeKind::Textbox {
+        " txBox=\"1\""
+    } else {
+        ""
+    };
+    let drawing = format!(
+        r#"<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="251{index:03}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>{x}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>{y}</wp:posOffset></wp:positionV><wp:extent cx="{width}" cy="{height}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>{wrap_xml}<wp:docPr id="{doc_pr_id}" name="{name}"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr{tx_box}/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="{geometry}"><a:avLst/></a:prstGeom>{fill}{line}</wps:spPr>{text_body}</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        name = escape_attr(name),
+    );
+    let new_xml =
+        ensure_document_root_namespaces(&insert_floating_drawing(&doc_xml, parent, &drawing)?);
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &new_xml)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!(
+        "/body/{}[{}]",
+        if kind == DrawingShapeKind::Textbox {
+            "textbox"
+        } else {
+            "shape"
+        },
+        index
+    ))
+}
+
+/// Emit a native, editable DrawingML group for Mermaid's common flowchart
+/// subset.  The result is one `wpg:wgp` anchor, keeping the diagram movable as
+/// a unit and leaving every node and connector editable in Word.
+pub fn add_diagram_part_aware(
+    package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    if parent != "/body" && parent != "/" && parse_paragraph_index_from_parent(parent).is_none() {
+        return Err(HandlerError::InvalidPath(format!(
+            "diagram add expects /body or /body/p[N], got '{}'",
+            parent
+        )));
+    }
+    let source = if let Some(value) = properties
+        .get("mermaid")
+        .or_else(|| properties.get("text"))
+        .or_else(|| properties.get("dsl"))
+    {
+        value.clone()
+    } else if let Some(path) = properties.get("src").or_else(|| properties.get("path")) {
+        std::fs::read_to_string(path).map_err(|e| {
+            HandlerError::InvalidArgument(format!("diagram source file '{}': {}", path, e))
+        })?
+    } else {
+        return Err(HandlerError::InvalidArgument(
+            "diagram requires 'mermaid' (aliases: text, dsl) or src/path".to_string(),
+        ));
+    };
+    let layout = parse_flowchart_layout(&source)?;
+    let doc_xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let group_index = count_drawing_groups(&doc_xml) + 1;
+    let drawing_id = count_all_drawing_shapes(&doc_xml) + count_drawing_groups(&doc_xml) + 1;
+    let requested_width = properties.get("width").map(|value| parse_emu(value));
+    let requested_height = properties.get("height").map(|value| parse_emu(value));
+    let scale = match (requested_width, requested_height) {
+        (Some(width), Some(height)) => {
+            (width as f64 / layout.width as f64).min(height as f64 / layout.height as f64)
+        }
+        (Some(width), None) => width as f64 / layout.width as f64,
+        (None, Some(height)) => height as f64 / layout.height as f64,
+        (None, None) => 1.0,
+    }
+    .max(0.01);
+    let width = (layout.width as f64 * scale).round() as i64;
+    let height = (layout.height as f64 * scale).round() as i64;
+    let mut children = String::new();
+    let mut next_id = drawing_id + 1;
+    for node in &layout.nodes {
+        let x = (node.x as f64 * scale).round() as i64;
+        let y = (node.y as f64 * scale).round() as i64;
+        let w = (node.width as f64 * scale).round() as i64;
+        let h = (node.height as f64 * scale).round() as i64;
+        children.push_str(&diagram_node_xml(next_id, node, x, y, w, h));
+        next_id += 1;
+    }
+    for edge in &layout.edges {
+        let x1 = (edge.x1 as f64 * scale).round() as i64;
+        let y1 = (edge.y1 as f64 * scale).round() as i64;
+        let x2 = (edge.x2 as f64 * scale).round() as i64;
+        let y2 = (edge.y2 as f64 * scale).round() as i64;
+        children.push_str(&diagram_edge_xml(next_id, x1, y1, x2, y2, edge.dashed));
+        next_id += 1;
+        if !edge.label.is_empty() {
+            let label_width =
+                720_000i64.min((edge.label.chars().count() as i64 * 95_250 + 144_000).max(360_000));
+            let label_height = 187_325i64;
+            children.push_str(&diagram_label_xml(
+                next_id,
+                &edge.label,
+                (x1 + x2) / 2 - label_width / 2,
+                (y1 + y2) / 2 - label_height,
+                label_width,
+                label_height,
+            ));
+            next_id += 1;
+        }
+    }
+    let group_xml = format!(
+        r#"<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2510000" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="{width}" cy="{height}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="{drawing_id}" name="Diagram {group_index}"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/><a:chOff x="0" y="0"/><a:chExt cx="{width}" cy="{height}"/></a:xfrm></wpg:grpSpPr>{children}</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    );
+    let new_xml =
+        ensure_document_root_namespaces(&insert_floating_drawing(&doc_xml, parent, &group_xml)?);
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &new_xml)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(format!("/body/group[{}]", group_index))
+}
+
+/// Parse the synthetic public DrawingML paths used by C# compatibility.
+pub fn is_drawing_shape_path(path: &str) -> bool {
+    drawing_shape_path(path).is_some()
+}
+
+pub fn get_drawing_shape(package: &OxmlPackage, path: &str) -> Result<DocumentNode, HandlerError> {
+    let (kind, wanted) =
+        drawing_shape_path(path).ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let doc = roxmltree::Document::parse(&xml)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let wsp = drawing_shape_nodes(&doc, kind)
+        .into_iter()
+        .nth(wanted - 1)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let mut result = DocumentNode::new(
+        path,
+        if kind == DrawingShapeKind::Textbox {
+            "textbox"
+        } else {
+            "shape"
+        },
+    );
+    let text: String = wsp
+        .descendants()
+        .filter(|node| node.has_tag_name((W_NS, "t")))
+        .filter_map(|node| node.text())
+        .collect();
+    if !text.is_empty() {
+        result = result.with_preview(&text).with_text(&text);
+    }
+    if let Some(geometry) = wsp
+        .descendants()
+        .find(|node| node.has_tag_name((A_NS, "prstGeom")))
+        .and_then(|node| node.attribute("prst"))
+    {
+        result = result.with_format("geometry", serde_json::Value::String(geometry.to_string()));
+    }
+    if let Some(anchor) = wsp
+        .ancestors()
+        .find(|node| node.has_tag_name((WP_NS, "anchor")) || node.has_tag_name((WP_NS, "inline")))
+    {
+        if let Some(extent) = anchor
+            .children()
+            .find(|node| node.has_tag_name((WP_NS, "extent")))
+        {
+            for key in ["cx", "cy"] {
+                if let Some(value) = extent.attribute(key) {
+                    result = result.with_format(
+                        if key == "cx" { "width" } else { "height" },
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub fn set_drawing_shape(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let (kind, wanted) =
+        drawing_shape_path(path).ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let width_update = properties
+        .get("width")
+        .map(|value| parse_emu(value).to_string());
+    let height_update = properties
+        .get("height")
+        .map(|value| parse_emu(value).to_string());
+    let wsp = find_drawing_shape_mut(&mut dom.root, kind, wanted)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let mut unsupported = Vec::new();
+    for (key, value) in properties {
+        match key.as_str() {
+            "geometry" | "preset" | "shape" => {
+                if let Some(geometry) = find_descendant_mut(wsp, A_NS, "prstGeom") {
+                    geometry
+                        .attributes
+                        .insert("prst".to_string(), sanitize_geometry(value).to_string());
+                }
+            }
+            "width" | "height" => {
+                let attr = if key == "width" { "cx" } else { "cy" };
+                let value = parse_emu(value).to_string();
+                if let Some(ext) = find_descendant_mut(wsp, A_NS, "ext") {
+                    ext.attributes.insert(attr.to_string(), value);
+                }
+                // The wrapper's wp:extent is updated below in a separate pass.
+            }
+            "fill" | "fillcolor" | "line" | "line.style" | "linestyle" | "line.width"
+            | "linewidth" | "line.color" | "linecolor" => unsupported.push(key.clone()),
+            _ => unsupported.push(key.clone()),
+        }
+    }
+    // Rebuild recognized fill/line values atomically when any were supplied.
+    let has_fill = properties.contains_key("fill") || properties.contains_key("fillcolor");
+    let has_line = properties.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "line"
+                | "line.style"
+                | "linestyle"
+                | "line.width"
+                | "linewidth"
+                | "line.color"
+                | "linecolor"
+        )
+    });
+    if has_fill || has_line {
+        let sp_pr = find_descendant_mut(wsp, WPS_NS, "spPr").ok_or_else(|| {
+            HandlerError::OperationFailed("DrawingML shape has no wps:spPr".to_string())
+        })?;
+        if has_fill {
+            replace_drawing_child(
+                sp_pr,
+                &["solidFill", "noFill"],
+                drawing_fill_node(
+                    properties
+                        .get("fill")
+                        .or_else(|| properties.get("fillcolor")),
+                ),
+            );
+        }
+        if has_line {
+            replace_drawing_child(sp_pr, &["ln"], drawing_line_node(properties));
+        }
+        unsupported.retain(|key| {
+            !matches!(
+                key.as_str(),
+                "fill"
+                    | "fillcolor"
+                    | "line"
+                    | "line.style"
+                    | "linestyle"
+                    | "line.width"
+                    | "linewidth"
+                    | "line.color"
+                    | "linecolor"
+            )
+        });
+    }
+    let _ = wsp;
+    if width_update.is_some() || height_update.is_some() {
+        let anchor =
+            find_drawing_shape_anchor_mut(&mut dom.root, kind, wanted).ok_or_else(|| {
+                HandlerError::OperationFailed("DrawingML shape has no wp:anchor".to_string())
+            })?;
+        if let Some(extent) = anchor.children.iter_mut().find(|child| {
+            child.namespace.as_deref() == Some(WP_NS)
+                && matches!(&child.element_type, WordElementType::Unknown(name) if name == "extent")
+        }) {
+            if let Some(width) = width_update {
+                extent.attributes.insert("cx".to_string(), width);
+            }
+            if let Some(height) = height_update {
+                extent.attributes.insert("cy".to_string(), height);
+            }
+        }
+    }
+    let output = crate::handler::serialize_dom(&dom);
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &output)
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(unsupported)
+}
+
+pub fn remove_drawing_shape(package: &mut OxmlPackage, path: &str) -> Result<(), HandlerError> {
+    let (kind, wanted) =
+        drawing_shape_path(path).ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let mut seen = 0;
+    if !remove_shape_host_paragraph(&mut dom.root, kind, wanted, &mut seen) {
+        return Err(HandlerError::PathNotFound(path.to_string()));
+    }
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &crate::handler::serialize_dom(&dom))
+        .map_err(|e| HandlerError::SaveError(e.to_string()))
+}
+
+pub fn is_drawing_group_path(path: &str) -> bool {
+    drawing_group_path(path).is_some()
+}
+
+pub fn get_drawing_group(package: &OxmlPackage, path: &str) -> Result<DocumentNode, HandlerError> {
+    let wanted =
+        drawing_group_path(path).ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let doc = roxmltree::Document::parse(&xml)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let group = doc
+        .descendants()
+        .filter(|node| node.has_tag_name((WPG_NS, "wgp")))
+        .nth(wanted - 1)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let mut result = DocumentNode::new(path, "group");
+    let text: String = group
+        .descendants()
+        .filter(|node| node.has_tag_name((W_NS, "t")))
+        .filter_map(|node| node.text())
+        .collect();
+    if !text.is_empty() {
+        result = result.with_text(&text).with_preview(&text);
+    }
+    if let Some(anchor) = group
+        .ancestors()
+        .find(|node| node.has_tag_name((WP_NS, "anchor")))
+    {
+        if let Some(extent) = anchor
+            .children()
+            .find(|node| node.has_tag_name((WP_NS, "extent")))
+        {
+            for (attr, key) in [("cx", "width"), ("cy", "height")] {
+                if let Some(value) = extent.attribute(attr) {
+                    result = result.with_format(key, serde_json::Value::String(value.to_string()));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub fn set_drawing_group(
+    package: &mut OxmlPackage,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let wanted =
+        drawing_group_path(path).ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let width = properties
+        .get("width")
+        .map(|value| parse_emu(value).to_string());
+    let height = properties
+        .get("height")
+        .map(|value| parse_emu(value).to_string());
+    let unsupported: Vec<String> = properties
+        .keys()
+        .filter(|key| key.as_str() != "width" && key.as_str() != "height")
+        .cloned()
+        .collect();
+    if width.is_none() && height.is_none() {
+        return Ok(unsupported);
+    }
+    let xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let group = find_drawing_group_mut(&mut dom.root, wanted)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    if let Some(ext) = find_descendant_mut(group, A_NS, "ext") {
+        if let Some(width) = &width {
+            ext.attributes.insert("cx".to_string(), width.clone());
+        }
+        if let Some(height) = &height {
+            ext.attributes.insert("cy".to_string(), height.clone());
+        }
+    }
+    let _ = group;
+    let anchor = find_drawing_group_anchor_mut(&mut dom.root, wanted).ok_or_else(|| {
+        HandlerError::OperationFailed("DrawingML group has no wp:anchor".to_string())
+    })?;
+    if let Some(extent) = anchor.children.iter_mut().find(|child| {
+        child.namespace.as_deref() == Some(WP_NS)
+            && matches!(&child.element_type, WordElementType::Unknown(name) if name == "extent")
+    }) {
+        if let Some(width) = width {
+            extent.attributes.insert("cx".to_string(), width);
+        }
+        if let Some(height) = height {
+            extent.attributes.insert("cy".to_string(), height);
+        }
+    }
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &crate::handler::serialize_dom(&dom))
+        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(unsupported)
+}
+
+pub fn remove_drawing_group(package: &mut OxmlPackage, path: &str) -> Result<(), HandlerError> {
+    let wanted =
+        drawing_group_path(path).ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let mut seen = 0;
+    if !remove_group_host_paragraph(&mut dom.root, wanted, &mut seen) {
+        return Err(HandlerError::PathNotFound(path.to_string()));
+    }
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &crate::handler::serialize_dom(&dom))
+        .map_err(|e| HandlerError::SaveError(e.to_string()))
+}
+
+fn drawing_shape_path(path: &str) -> Option<(DrawingShapeKind, usize)> {
+    let path = path.trim();
+    for (suffix, kind) in [
+        ("textbox", DrawingShapeKind::Textbox),
+        ("txbx", DrawingShapeKind::Textbox),
+        ("shape", DrawingShapeKind::Shape),
+        ("sp", DrawingShapeKind::Shape),
+    ] {
+        let marker = format!("/{}[", suffix);
+        if let Some(offset) = path.rfind(&marker) {
+            let value = path
+                .get(offset + marker.len()..)?
+                .strip_suffix(']')?
+                .parse::<usize>()
+                .ok()?;
+            if value > 0 {
+                return Some((kind, value));
+            }
+        }
+    }
+    None
+}
+
+fn drawing_group_path(path: &str) -> Option<usize> {
+    let path = path.trim();
+    let marker = "/group[";
+    let offset = path.rfind(marker)?;
+    let value = path
+        .get(offset + marker.len()..)?
+        .strip_suffix(']')?
+        .parse::<usize>()
+        .ok()?;
+    (value > 0).then_some(value)
+}
+
+fn drawing_shape_nodes<'a>(
+    doc: &'a roxmltree::Document<'a>,
+    kind: DrawingShapeKind,
+) -> Vec<roxmltree::Node<'a, 'a>> {
+    doc.descendants()
+        .filter(|node| {
+            node.has_tag_name((WPS_NS, "wsp"))
+                && (node
+                    .children()
+                    .any(|child| child.has_tag_name((WPS_NS, "txbx")))
+                    == (kind == DrawingShapeKind::Textbox))
+        })
+        .collect()
+}
+
+fn count_drawing_shapes(xml: &str, kind: DrawingShapeKind) -> usize {
+    roxmltree::Document::parse(xml)
+        .map(|doc| drawing_shape_nodes(&doc, kind).len())
+        .unwrap_or(0)
+}
+
+fn count_all_drawing_shapes(xml: &str) -> usize {
+    roxmltree::Document::parse(xml)
+        .map(|doc| {
+            doc.descendants()
+                .filter(|node| node.has_tag_name((WPS_NS, "wsp")))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn count_drawing_groups(xml: &str) -> usize {
+    const WPG_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
+    roxmltree::Document::parse(xml)
+        .map(|doc| {
+            doc.descendants()
+                .filter(|node| node.has_tag_name((WPG_NS, "wgp")))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+#[derive(Clone)]
+struct DiagramNodeLayout {
+    label: String,
+    geometry: &'static str,
+    fill: &'static str,
+    line: &'static str,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+}
+
+struct DiagramEdgeLayout {
+    x1: i64,
+    y1: i64,
+    x2: i64,
+    y2: i64,
+    dashed: bool,
+    label: String,
+}
+
+struct DiagramLayout {
+    nodes: Vec<DiagramNodeLayout>,
+    edges: Vec<DiagramEdgeLayout>,
+    width: i64,
+    height: i64,
+}
+
+#[derive(Clone)]
+struct DiagramSemanticNode {
+    label: String,
+    geometry: &'static str,
+    fill: &'static str,
+    line: &'static str,
+}
+
+/// A deliberately local port of the C# Mermaid flowchart front-end. It accepts
+/// the high-value syntax (header direction, shape wrappers, chained links,
+/// pipe labels and dashed links) and maps it into a layered editable drawing.
+fn parse_flowchart_layout(source: &str) -> Result<DiagramLayout, HandlerError> {
+    if source
+        .lines()
+        .flat_map(|line| line.split(';'))
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("%%"))
+        .is_some_and(|line| line.eq_ignore_ascii_case("sequenceDiagram"))
+    {
+        return parse_sequence_diagram_layout(source);
+    }
+    let mut left_to_right = false;
+    let mut nodes: Vec<DiagramSemanticNode> = Vec::new();
+    let mut node_index: HashMap<String, usize> = HashMap::new();
+    let mut edges: Vec<(String, String, bool, String)> = Vec::new();
+    for statement in source.lines().flat_map(|line| line.split(';')) {
+        let statement = statement.trim();
+        if statement.is_empty() || statement.starts_with("%%") {
+            continue;
+        }
+        let lower = statement.to_ascii_lowercase();
+        if lower.starts_with("flowchart") || lower.starts_with("graph") {
+            left_to_right = lower
+                .split_whitespace()
+                .nth(1)
+                .is_some_and(|direction| matches!(direction, "lr" | "rl"));
+            continue;
+        }
+        if lower.starts_with("subgraph")
+            || matches!(lower.as_str(), "end")
+            || lower.starts_with("direction")
+            || lower.starts_with("style")
+            || lower.starts_with("class")
+            || lower.starts_with("click")
+            || lower.starts_with("linkstyle")
+        {
+            continue;
+        }
+        let operators = find_mermaid_link_operators(statement);
+        if operators.is_empty() {
+            parse_diagram_node_token(statement, &mut nodes, &mut node_index);
+            continue;
+        }
+        let mut fragments = Vec::new();
+        let mut offset = 0;
+        for (start, end, dashed) in &operators {
+            fragments.push(statement[offset..*start].trim());
+            offset = *end;
+            let _ = dashed;
+        }
+        fragments.push(statement[offset..].trim());
+        let ids: Vec<Option<String>> = fragments
+            .iter()
+            .map(|fragment| parse_diagram_node_token(fragment, &mut nodes, &mut node_index))
+            .collect();
+        for index in 0..ids.len().saturating_sub(1) {
+            if let (Some(from), Some(to)) = (&ids[index], &ids[index + 1]) {
+                edges.push((
+                    from.clone(),
+                    to.clone(),
+                    operators[index].2,
+                    mermaid_link_label(&statement[operators[index].0..operators[index].1]),
+                ));
+            }
+        }
+    }
+    if nodes.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "diagram has no nodes; use e.g. 'flowchart TD; A[Start] --> B[End]'".to_string(),
+        ));
+    }
+    let mut ranks = vec![0usize; nodes.len()];
+    for _ in 0..nodes.len() {
+        let mut changed = false;
+        for (from, to, _, _) in &edges {
+            let from_index = node_index[from];
+            let to_index = node_index[to];
+            if from_index != to_index && ranks[to_index] <= ranks[from_index] {
+                ranks[to_index] = ranks[from_index] + 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut slots: HashMap<usize, usize> = HashMap::new();
+    let node_width = 1_440_000i64; // 4cm
+    let node_height = 576_000i64; // 1.6cm
+    let main_gap = 864_000i64; // 2.4cm
+    let cross_gap = 720_000i64; // 2cm
+    let margin = 288_000i64; // 0.8cm
+    let mut placed = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        let slot = slots.entry(ranks[index]).or_insert(0);
+        let (x, y) = if left_to_right {
+            (
+                margin + ranks[index] as i64 * (node_width + main_gap),
+                margin + *slot as i64 * (node_height + cross_gap),
+            )
+        } else {
+            (
+                margin + *slot as i64 * (node_width + cross_gap),
+                margin + ranks[index] as i64 * (node_height + main_gap),
+            )
+        };
+        *slot += 1;
+        placed.push(DiagramNodeLayout {
+            label: node.label.clone(),
+            geometry: node.geometry,
+            fill: node.fill,
+            line: node.line,
+            x,
+            y,
+            width: node_width,
+            height: node_height,
+        });
+    }
+    let mut routed = Vec::new();
+    for (from, to, dashed, label) in edges {
+        let source = &placed[node_index[&from]];
+        let target = &placed[node_index[&to]];
+        let (x1, y1, x2, y2) = if left_to_right {
+            (
+                source.x + source.width,
+                source.y + source.height / 2,
+                target.x,
+                target.y + target.height / 2,
+            )
+        } else {
+            (
+                source.x + source.width / 2,
+                source.y + source.height,
+                target.x + target.width / 2,
+                target.y,
+            )
+        };
+        routed.push(DiagramEdgeLayout {
+            x1,
+            y1,
+            x2,
+            y2,
+            dashed,
+            label,
+        });
+    }
+    let width = placed
+        .iter()
+        .map(|node| node.x + node.width)
+        .max()
+        .unwrap_or(margin)
+        + margin;
+    let height = placed
+        .iter()
+        .map(|node| node.y + node.height)
+        .max()
+        .unwrap_or(margin)
+        + margin;
+    Ok(DiagramLayout {
+        nodes: placed,
+        edges: routed,
+        width,
+        height,
+    })
+}
+
+/// Compact port of C# `SequenceLayout`: participants become boxes, their
+/// lifelines are dashed vertical edges, and messages are stacked horizontally.
+fn parse_sequence_diagram_layout(source: &str) -> Result<DiagramLayout, HandlerError> {
+    let mut participants: Vec<(String, String)> = Vec::new();
+    let mut participant_index: HashMap<String, usize> = HashMap::new();
+    let mut messages: Vec<(String, String, String, bool)> = Vec::new();
+    let mut see = |id: &str, label: Option<&str>| {
+        if let Some(index) = participant_index.get(id).copied() {
+            if let Some(label) = label {
+                participants[index].1 = label.trim().to_string();
+            }
+        } else {
+            participant_index.insert(id.to_string(), participants.len());
+            participants.push((id.to_string(), label.unwrap_or(id).trim().to_string()));
+        }
+    };
+    for statement in source.lines().flat_map(|line| line.split(';')) {
+        let statement = statement.trim();
+        if statement.is_empty()
+            || statement.starts_with("%%")
+            || statement.eq_ignore_ascii_case("sequenceDiagram")
+        {
+            continue;
+        }
+        let lower = statement.to_ascii_lowercase();
+        if lower.starts_with("participant ") || lower.starts_with("actor ") {
+            let declaration = statement
+                .split_once(char::is_whitespace)
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or("");
+            let (id, label) = declaration
+                .split_once(" as ")
+                .unwrap_or((declaration, declaration));
+            if !id.is_empty() {
+                see(id.trim(), Some(label));
+            }
+            continue;
+        }
+        let Some((left, label)) = statement.split_once(':') else {
+            continue;
+        };
+        let operator = ["-->>", "->>", "-->", "->", "--x", "-x"]
+            .iter()
+            .find_map(|operator| left.find(operator).map(|offset| (offset, *operator)));
+        if let Some((offset, operator)) = operator {
+            let from = left[..offset].trim();
+            let to = left[offset + operator.len()..]
+                .trim()
+                .trim_start_matches(['+', '-']);
+            if !from.is_empty() && !to.is_empty() {
+                see(from, None);
+                see(to, None);
+                messages.push((
+                    from.to_string(),
+                    to.to_string(),
+                    label.trim().to_string(),
+                    operator.starts_with("--"),
+                ));
+            }
+        }
+    }
+    if participants.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "sequence diagram has no participants; use e.g. 'sequenceDiagram; Alice->>Bob: hello'"
+                .to_string(),
+        ));
+    }
+    let margin = 288_000i64;
+    let box_w = 864_000i64;
+    let box_h = 396_000i64;
+    let gap = 504_000i64;
+    let body_top = margin + box_h + 324_000;
+    let row = 414_000i64;
+    let bottom = body_top + (messages.len().max(1) as i64) * row + 216_000;
+    let mut nodes = Vec::new();
+    let mut centers = HashMap::new();
+    for (index, (id, label)) in participants.iter().enumerate() {
+        let x = margin + index as i64 * (box_w + gap);
+        centers.insert(id.clone(), x + box_w / 2);
+        nodes.push(DiagramNodeLayout {
+            label: label.clone(),
+            geometry: "rect",
+            fill: "DAE8FC",
+            line: "6C8EBF",
+            x,
+            y: margin,
+            width: box_w,
+            height: box_h,
+        });
+    }
+    let mut edges = Vec::new();
+    for (id, _) in &participants {
+        let x = centers[id];
+        edges.push(DiagramEdgeLayout {
+            x1: x,
+            y1: margin + box_h,
+            x2: x,
+            y2: bottom,
+            dashed: true,
+            label: String::new(),
+        });
+    }
+    for (index, (from, to, label, dashed)) in messages.iter().enumerate() {
+        let y = body_top + index as i64 * row;
+        let x1 = centers[from];
+        let x2 = centers[to];
+        edges.push(DiagramEdgeLayout {
+            x1,
+            y1: y,
+            x2,
+            y2: y,
+            dashed: *dashed,
+            label: label.clone(),
+        });
+    }
+    let width = margin * 2
+        + participants.len() as i64 * box_w
+        + participants.len().saturating_sub(1) as i64 * gap;
+    Ok(DiagramLayout {
+        nodes,
+        edges,
+        width,
+        height: bottom + margin,
+    })
+}
+
+fn find_mermaid_link_operators(value: &str) -> Vec<(usize, usize, bool)> {
+    let bytes = value.as_bytes();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index + 2 < bytes.len() {
+        if matches!(bytes[index], b'-' | b'=' | b'.')
+            && matches!(bytes[index + 1], b'-' | b'=' | b'.')
+        {
+            let start = index;
+            let dashed = bytes[index] == b'.' || (bytes[index] == b'-' && bytes[index + 2] == b'-');
+            while index < bytes.len() && matches!(bytes[index], b'-' | b'=' | b'.') {
+                index += 1;
+            }
+            if index < bytes.len() && matches!(bytes[index], b'>' | b'x' | b'o') {
+                index += 1;
+            }
+            if index < bytes.len() && bytes[index] == b'|' {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'|' {
+                    index += 1;
+                }
+                if index < bytes.len() {
+                    index += 1;
+                }
+            }
+            found.push((start, index, dashed));
+        } else {
+            index += 1;
+        }
+    }
+    found
+}
+
+fn mermaid_link_label(operator: &str) -> String {
+    let Some(start) = operator.find('|') else {
+        return String::new();
+    };
+    operator[start + 1..]
+        .find('|')
+        .map(|end| operator[start + 1..start + 1 + end].trim().to_string())
+        .unwrap_or_default()
+}
+
+fn parse_diagram_node_token(
+    token: &str,
+    nodes: &mut Vec<DiagramSemanticNode>,
+    index: &mut HashMap<String, usize>,
+) -> Option<String> {
+    let token = token.trim().trim_matches('|').trim();
+    let id_end = token
+        .find(|character: char| !character.is_alphanumeric() && character != '_')
+        .unwrap_or(token.len());
+    let id = token[..id_end].trim();
+    if id.is_empty() {
+        return None;
+    }
+    let suffix = token[id_end..].trim().trim_end_matches(":::class");
+    let (label, geometry, fill, line) = if let Some(label) = suffix
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+    {
+        (label, "hexagon", "FFF2CC", "D6B656")
+    } else if let Some(label) = suffix
+        .strip_prefix("((")
+        .and_then(|value| value.strip_suffix("))"))
+    {
+        (label, "ellipse", "F8CECC", "B85450")
+    } else if let Some(label) = suffix
+        .strip_prefix("[")
+        .and_then(|value| value.strip_suffix("]"))
+    {
+        (label, "rect", "DAE8FC", "6C8EBF")
+    } else if let Some(label) = suffix
+        .strip_prefix("{")
+        .and_then(|value| value.strip_suffix("}"))
+    {
+        (label, "diamond", "FFF2CC", "D6B656")
+    } else if let Some(label) = suffix
+        .strip_prefix("(")
+        .and_then(|value| value.strip_suffix(")"))
+    {
+        (label, "roundRect", "D5E8D4", "82B366")
+    } else {
+        (id, "rect", "DAE8FC", "6C8EBF")
+    };
+    let label = label
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string();
+    let id = id.to_string();
+    if let Some(existing) = index.get(&id).copied() {
+        if label != id {
+            nodes[existing].label = label;
+        }
+    } else {
+        index.insert(id.clone(), nodes.len());
+        nodes.push(DiagramSemanticNode {
+            label,
+            geometry,
+            fill,
+            line,
+        });
+    }
+    Some(id)
+}
+
+fn diagram_node_xml(
+    id: usize,
+    node: &DiagramNodeLayout,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+) -> String {
+    format!(
+        r#"<wps:wsp><wps:cNvPr id="{id}" name="Diagram node {id}"/><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="{geometry}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="{fill}"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="{line}"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0" anchor="ctr" anchorCtr="1"><a:normAutofit/></wps:bodyPr></wps:wsp>"#,
+        geometry = node.geometry,
+        fill = node.fill,
+        line = node.line,
+        text = xml_escape_text(&node.label)
+    )
+}
+
+fn diagram_edge_xml(id: usize, x1: i64, y1: i64, x2: i64, y2: i64, dashed: bool) -> String {
+    let x = x1.min(x2);
+    let y = y1.min(y2);
+    let width = (x1 - x2).unsigned_abs().max(12_700) as i64;
+    let height = (y1 - y2).unsigned_abs().max(12_700) as i64;
+    let p1x = x1 - x;
+    let p1y = y1 - y;
+    let p2x = x2 - x;
+    let p2y = y2 - y;
+    let dash = if dashed {
+        "<a:prstDash val=\"dash\"/>"
+    } else {
+        ""
+    };
+    format!(
+        r#"<wps:wsp><wps:cNvPr id="{id}" name="Diagram edge {id}"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="{width}" b="{height}"/><a:pathLst><a:path w="{width}" h="{height}"><a:moveTo><a:pt x="{p1x}" y="{p1y}"/></a:moveTo><a:lnTo><a:pt x="{p2x}" y="{p2y}"/></a:lnTo></a:path></a:pathLst></a:custGeom><a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="4D4D4D"/></a:solidFill>{dash}<a:tailEnd type="triangle"/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"#
+    )
+}
+
+fn diagram_label_xml(id: usize, text: &str, x: i64, y: i64, width: i64, height: i64) -> String {
+    format!(
+        r#"<wps:wsp><wps:cNvPr id="{id}" name="Diagram label {id}"/><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0" anchor="ctr" anchorCtr="1"><a:noAutofit/></wps:bodyPr></wps:wsp>"#,
+        text = xml_escape_text(text)
+    )
+}
+
+fn sanitize_geometry(value: &str) -> &str {
+    match value.trim() {
+        "rect" | "roundRect" | "ellipse" | "triangle" | "rtTriangle" | "diamond"
+        | "parallelogram" | "trapezoid" | "hexagon" | "octagon" | "star5" | "rightArrow"
+        | "leftArrow" | "upArrow" | "downArrow" | "line" => value.trim(),
+        _ => "rect",
+    }
+}
+
+fn drawing_fill_xml(fill: Option<&String>) -> String {
+    match fill.map(|value| value.trim()).filter(|value| {
+        !value.is_empty()
+            && !value.eq_ignore_ascii_case("none")
+            && !value.eq_ignore_ascii_case("transparent")
+    }) {
+        Some(color) => format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+            sanitize_drawing_color(color)
+        ),
+        None => "<a:noFill/>".to_string(),
+    }
+}
+
+fn drawing_line_xml(properties: &HashMap<String, String>) -> String {
+    let compact = properties.get("line").map(String::as_str);
+    if compact.is_some_and(|value| value.eq_ignore_ascii_case("none")) {
+        return "<a:ln><a:noFill/></a:ln>".to_string();
+    }
+    let parts: Vec<&str> = compact.unwrap_or("").split(';').collect();
+    let style = properties
+        .get("line.style")
+        .or_else(|| properties.get("linestyle"))
+        .map(String::as_str)
+        .or_else(|| parts.first().copied())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("solid");
+    let width = properties
+        .get("line.width")
+        .or_else(|| properties.get("linewidth"))
+        .map(String::as_str)
+        .or_else(|| parts.get(1).copied())
+        .filter(|value| !value.is_empty())
+        .map(parse_emu)
+        .unwrap_or(12_700);
+    let color = properties
+        .get("line.color")
+        .or_else(|| properties.get("linecolor"))
+        .map(String::as_str)
+        .or_else(|| parts.get(2).copied())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("000000");
+    let dash = if style.eq_ignore_ascii_case("solid") {
+        "".to_string()
+    } else {
+        format!("<a:prstDash val=\"{}\"/>", escape_attr(style))
+    };
+    format!(
+        "<a:ln w=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>{}</a:ln>",
+        width,
+        sanitize_drawing_color(color),
+        dash
+    )
+}
+
+fn drawing_wrap_xml(wrap: &str) -> Result<&'static str, HandlerError> {
+    match wrap.to_ascii_lowercase().as_str() {
+        "none" | "front" => Ok("<wp:wrapNone/>"),
+        "behind" => Ok("<wp:wrapNone/>"),
+        "square" => Ok("<wp:wrapSquare wrapText=\"bothSides\"/>"),
+        "tight" => Ok("<wp:wrapTight wrapText=\"bothSides\"/>"),
+        "through" => Ok("<wp:wrapThrough wrapText=\"bothSides\"/>"),
+        "topandbottom" => Ok("<wp:wrapTopAndBottom/>"),
+        value => Err(HandlerError::InvalidArgument(format!(
+            "unsupported DrawingML wrap '{}'",
+            value
+        ))),
+    }
+}
+
+fn sanitize_drawing_color(value: &str) -> String {
+    let value = value.trim().trim_start_matches('#');
+    if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        value.to_ascii_uppercase()
+    } else {
+        "000000".to_string()
+    }
+}
+
+fn insert_floating_drawing(
+    doc_xml: &str,
+    parent: &str,
+    drawing: &str,
+) -> Result<String, HandlerError> {
+    if parent == "/body" || parent == "/" || parent.is_empty() {
+        let paragraph = format!("<w:p>{}</w:p>", drawing);
+        let target = doc_xml
+            .find("<w:sectPr")
+            .or_else(|| doc_xml.find("</w:body>"))
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("could not locate document body".to_string())
+            })?;
+        let mut output = String::with_capacity(doc_xml.len() + paragraph.len());
+        output.push_str(&doc_xml[..target]);
+        output.push_str(&paragraph);
+        output.push_str(&doc_xml[target..]);
+        Ok(output)
+    } else {
+        insert_drawing_in_paragraph(doc_xml, parent, drawing)
+    }
+}
+
+fn node_is_drawing_shape(node: &WordNode, kind: DrawingShapeKind) -> bool {
+    node.namespace.as_deref() == Some(WPS_NS)
+        && matches!(&node.element_type, WordElementType::Unknown(name) if name == "wsp")
+        && (node.children.iter().any(|child| {
+            child.namespace.as_deref() == Some(WPS_NS)
+                && matches!(&child.element_type, WordElementType::Unknown(name) if name == "txbx")
+        }) == (kind == DrawingShapeKind::Textbox))
+}
+
+fn find_drawing_shape_mut(
+    node: &mut WordNode,
+    kind: DrawingShapeKind,
+    wanted: usize,
+) -> Option<&mut WordNode> {
+    fn walk<'a>(
+        node: &'a mut WordNode,
+        kind: DrawingShapeKind,
+        wanted: usize,
+        seen: &mut usize,
+    ) -> Option<&'a mut WordNode> {
+        if node_is_drawing_shape(node, kind) {
+            *seen += 1;
+            if *seen == wanted {
+                return Some(node);
+            }
+        }
+        for child in &mut node.children {
+            if let Some(found) = walk(child, kind, wanted, seen) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(node, kind, wanted, &mut 0)
+}
+
+fn find_descendant_mut<'a>(
+    node: &'a mut WordNode,
+    namespace: &str,
+    local: &str,
+) -> Option<&'a mut WordNode> {
+    if node.namespace.as_deref() == Some(namespace)
+        && matches!(&node.element_type, WordElementType::Unknown(name) if name == local)
+    {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(found) = find_descendant_mut(child, namespace, local) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn contains_drawing_shape(node: &WordNode, kind: DrawingShapeKind) -> bool {
+    node_is_drawing_shape(node, kind)
+        || node
+            .children
+            .iter()
+            .any(|child| contains_drawing_shape(child, kind))
+}
+
+fn find_drawing_shape_anchor_mut(
+    node: &mut WordNode,
+    kind: DrawingShapeKind,
+    wanted: usize,
+) -> Option<&mut WordNode> {
+    fn walk<'a>(
+        node: &'a mut WordNode,
+        kind: DrawingShapeKind,
+        wanted: usize,
+        seen: &mut usize,
+    ) -> Option<&'a mut WordNode> {
+        let is_anchor = node.namespace.as_deref() == Some(WP_NS)
+            && matches!(&node.element_type, WordElementType::Unknown(name) if name == "anchor" || name == "inline");
+        if is_anchor && contains_drawing_shape(node, kind) {
+            *seen += 1;
+            if *seen == wanted {
+                return Some(node);
+            }
+        }
+        for child in &mut node.children {
+            if let Some(found) = walk(child, kind, wanted, seen) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(node, kind, wanted, &mut 0)
+}
+
+fn node_is_drawing_group(node: &WordNode) -> bool {
+    node.namespace.as_deref() == Some(WPG_NS)
+        && matches!(&node.element_type, WordElementType::Unknown(name) if name == "wgp")
+}
+
+fn find_drawing_group_mut(node: &mut WordNode, wanted: usize) -> Option<&mut WordNode> {
+    fn walk<'a>(
+        node: &'a mut WordNode,
+        wanted: usize,
+        seen: &mut usize,
+    ) -> Option<&'a mut WordNode> {
+        if node_is_drawing_group(node) {
+            *seen += 1;
+            if *seen == wanted {
+                return Some(node);
+            }
+        }
+        for child in &mut node.children {
+            if let Some(found) = walk(child, wanted, seen) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(node, wanted, &mut 0)
+}
+
+fn contains_drawing_group(node: &WordNode) -> bool {
+    node_is_drawing_group(node) || node.children.iter().any(contains_drawing_group)
+}
+
+fn find_drawing_group_anchor_mut(node: &mut WordNode, wanted: usize) -> Option<&mut WordNode> {
+    fn walk<'a>(
+        node: &'a mut WordNode,
+        wanted: usize,
+        seen: &mut usize,
+    ) -> Option<&'a mut WordNode> {
+        let is_anchor = node.namespace.as_deref() == Some(WP_NS)
+            && matches!(&node.element_type, WordElementType::Unknown(name) if name == "anchor");
+        if is_anchor && contains_drawing_group(node) {
+            *seen += 1;
+            if *seen == wanted {
+                return Some(node);
+            }
+        }
+        for child in &mut node.children {
+            if let Some(found) = walk(child, wanted, seen) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(node, wanted, &mut 0)
+}
+
+fn namespace_node(namespace: &str, local: &str) -> WordNode {
+    let mut node = WordNode::new(WordElementType::Unknown(local.to_string()));
+    node.namespace = Some(namespace.to_string());
+    node
+}
+
+fn drawing_fill_node(fill: Option<&String>) -> WordNode {
+    if let Some(color) = fill.map(String::as_str).filter(|value| {
+        !value.eq_ignore_ascii_case("none") && !value.eq_ignore_ascii_case("transparent")
+    }) {
+        let mut srgb = namespace_node(A_NS, "srgbClr");
+        srgb.attributes
+            .insert("val".to_string(), sanitize_drawing_color(color));
+        namespace_node(A_NS, "solidFill").with_children(vec![srgb])
+    } else {
+        namespace_node(A_NS, "noFill")
+    }
+}
+
+fn drawing_line_node(properties: &HashMap<String, String>) -> WordNode {
+    let xml = format!(
+        "<root xmlns:a=\"{}\">{}</root>",
+        A_NS,
+        drawing_line_xml(properties)
+    );
+    crate::handler::parse_document_xml(&xml)
+        .ok()
+        .and_then(|dom| dom.root.children.into_iter().next())
+        .unwrap_or_else(|| namespace_node(A_NS, "ln"))
+}
+
+fn replace_drawing_child(parent: &mut WordNode, locals: &[&str], replacement: WordNode) {
+    parent.children.retain(|child| !(child.namespace.as_deref() == Some(A_NS) && matches!(&child.element_type, WordElementType::Unknown(name) if locals.contains(&name.as_str()))));
+    parent.children.push(replacement);
+}
+
+fn remove_shape_host_paragraph(
+    node: &mut WordNode,
+    kind: DrawingShapeKind,
+    wanted: usize,
+    seen: &mut usize,
+) -> bool {
+    let mut index = 0;
+    while index < node.children.len() {
+        if node.children[index].element_type == WordElementType::Paragraph {
+            let mut count_in_paragraph = 0;
+            count_shapes_in_node(&node.children[index], kind, &mut count_in_paragraph);
+            if *seen + count_in_paragraph >= wanted && count_in_paragraph > 0 {
+                node.children.remove(index);
+                return true;
+            }
+            *seen += count_in_paragraph;
+        } else if remove_shape_host_paragraph(&mut node.children[index], kind, wanted, seen) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn count_shapes_in_node(node: &WordNode, kind: DrawingShapeKind, count: &mut usize) {
+    if node_is_drawing_shape(node, kind) {
+        *count += 1;
+    }
+    for child in &node.children {
+        count_shapes_in_node(child, kind, count);
+    }
+}
+
+fn remove_group_host_paragraph(node: &mut WordNode, wanted: usize, seen: &mut usize) -> bool {
+    let mut index = 0;
+    while index < node.children.len() {
+        if node.children[index].element_type == WordElementType::Paragraph {
+            let count = count_groups_in_node(&node.children[index]);
+            if count > 0 && *seen + count >= wanted {
+                node.children.remove(index);
+                return true;
+            }
+            *seen += count;
+        } else if remove_group_host_paragraph(&mut node.children[index], wanted, seen) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn count_groups_in_node(node: &WordNode) -> usize {
+    usize::from(node_is_drawing_group(node))
+        + node
+            .children
+            .iter()
+            .map(count_groups_in_node)
+            .sum::<usize>()
 }
 
 /// Find next free chart index in word/charts/chartN.xml.
@@ -3248,17 +7321,35 @@ fn inject_docx_relationship(
         let mut r = xml.clone();
         r.insert_str(pos, rel_xml);
         r
-    } else if xml.trim().is_empty()
-        || xml.trim() == "<Relationships/>"
-        || xml.trim()
-            == "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"/>"
-    {
+    } else if let Some(close) = xml.find("/>") {
+        // Preserve the original root attributes (especially the package
+        // relationships namespace) when expanding a self-closing root.
+        // `create` writes an XML declaration before this element, so exact
+        // string comparisons against `<Relationships .../>` are insufficient.
+        let root_start = xml[..close].rfind("<Relationships");
+        if root_start.is_some() {
+            let mut r = String::with_capacity(xml.len() + rel_xml.len() + 16);
+            r.push_str(&xml[..close]);
+            r.push('>');
+            r.push_str(rel_xml);
+            r.push_str("</Relationships>");
+            r.push_str(&xml[close + 2..]);
+            r
+        } else {
+            let mut r = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">".to_string();
+            r.push_str(rel_xml);
+            r.push_str("</Relationships>");
+            r
+        }
+    } else if xml.trim().is_empty() {
         let mut r = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">".to_string();
         r.push_str(rel_xml);
         r.push_str("</Relationships>");
         r
     } else {
-        let mut r = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships>".to_string();
+        let mut r =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships>"
+                .to_string();
         r.push_str(rel_xml);
         r.push_str("</Relationships>");
         r
@@ -3352,6 +7443,64 @@ fn insert_drawing_in_paragraph(
     out.push_str(drawing_xml);
     out.push_str(&doc_xml[target..]);
     Ok(out)
+}
+
+/// Ensure a direct XML insertion can be parsed even when the source document
+/// was created with Word's minimal namespace set.  Part-aware image/chart
+/// additions introduce DrawingML prefixes before the document is next passed
+/// through the DOM serializer, so their declarations must be available now.
+fn ensure_document_root_namespaces(xml: &str) -> String {
+    let Some(root_start) = xml.find("<w:document") else {
+        return xml.to_string();
+    };
+    let Some(root_end_relative) = xml[root_start..].find('>') else {
+        return xml.to_string();
+    };
+    let root_end = root_start + root_end_relative;
+    let root = &xml[root_start..=root_end];
+    let namespaces = [
+        ("a", "http://schemas.openxmlformats.org/drawingml/2006/main"),
+        (
+            "c",
+            "http://schemas.openxmlformats.org/drawingml/2006/chart",
+        ),
+        (
+            "pic",
+            "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        ),
+        (
+            "r",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        ),
+        (
+            "wp",
+            "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        ),
+        (
+            "wps",
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        ),
+        (
+            "wpg",
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+        ),
+    ];
+
+    let mut missing = String::new();
+    for (prefix, uri) in namespaces {
+        if !root.contains(&format!("xmlns:{}=", prefix)) {
+            missing.push_str(&format!(" xmlns:{}=\"{}\"", prefix, uri));
+        }
+    }
+    if missing.is_empty() {
+        return xml.to_string();
+    }
+
+    let mut output = String::with_capacity(xml.len() + missing.len());
+    output.push_str(&xml[..root_end]);
+    output.push_str(&missing);
+    output.push_str(&xml[root_end..]);
+    output
 }
 
 /// Parse "/body/p[3]" → Some(3).
@@ -4103,5 +8252,214 @@ mod chart_tests {
     fn text_escaping_in_titles() {
         let xml = build_docx_chart_xml("pie", "A & B < C >", &["A"], &[1.0]).unwrap();
         assert!(xml.contains("A &amp; B &lt; C &gt;</a:t>"));
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    fn comment_test_package() -> OxmlPackage {
+        let mut package = OxmlPackage::create("comment-test.docx");
+        package.add_part(
+            "[Content_Types].xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+        );
+        package.add_part(
+            "word/_rels/document.xml.rels",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        );
+        package.add_part(
+            "word/document.xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>first</w:t></w:r><w:r><w:t>second</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#,
+        );
+        package
+    }
+
+    #[test]
+    fn comment_lifecycle_wires_package_and_cleans_anchors() {
+        let mut package = comment_test_package();
+        let properties = HashMap::from([
+            ("text".to_string(), "Review this".to_string()),
+            ("author".to_string(), "Alice Example".to_string()),
+            ("date".to_string(), "2026-08-03T10:30:00Z".to_string()),
+        ]);
+
+        let path = add_comment_part_aware(&mut package, "/body/p[1]/r[2]", &properties)
+            .expect("add comment");
+        assert_eq!(path, "/comments/comment[@commentId=0]");
+        let comments = list_comments(&package).expect("list comments");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].text, "Review this");
+        assert_eq!(comments[0].author.as_deref(), Some("Alice Example"));
+        assert_eq!(comments[0].anchor.as_deref(), Some("/body/p[1]"));
+        assert!(package
+            .read_part_xml("word/_rels/document.xml.rels")
+            .unwrap()
+            .contains(DOCX_COMMENTS_REL_TYPE));
+        assert!(package
+            .read_part_xml("[Content_Types].xml")
+            .unwrap()
+            .contains("/word/comments.xml"));
+        let document = package.read_part_xml(DOCX_DOCUMENT_PART).unwrap();
+        assert!(document.contains("commentRangeStart"));
+        assert!(document.contains("commentRangeEnd"));
+        assert!(document.contains("commentReference"));
+
+        let set = HashMap::from([("text".to_string(), "Updated comment".to_string())]);
+        assert!(
+            set_comment_on_part(&mut package, DOCX_COMMENTS_PART, &path, &set)
+                .expect("set comment")
+                .is_empty()
+        );
+        assert_eq!(
+            get_comment(&package, &path).unwrap().text,
+            "Updated comment"
+        );
+
+        remove_comment_part_aware(&mut package, &path).expect("remove comment");
+        assert!(list_comments(&package).unwrap().is_empty());
+        let document = package.read_part_xml(DOCX_DOCUMENT_PART).unwrap();
+        assert!(!document.contains("commentRangeStart"));
+        assert!(!document.contains("commentRangeEnd"));
+        assert!(!document.contains("commentReference"));
+    }
+
+    #[test]
+    fn comment_positional_paths_use_collection_order_not_ooxml_ids() {
+        let mut package = comment_test_package();
+        let first = HashMap::from([
+            ("text".to_string(), "first comment".to_string()),
+            ("commentId".to_string(), "7".to_string()),
+        ]);
+        let second = HashMap::from([
+            ("text".to_string(), "second comment".to_string()),
+            ("commentId".to_string(), "42".to_string()),
+        ]);
+        add_comment_part_aware(&mut package, "/body/p[1]/r[1]", &first).unwrap();
+        add_comment_part_aware(&mut package, "/body/p[1]/r[2]", &second).unwrap();
+        assert_eq!(
+            get_comment(&package, "/comments/comment[1]").unwrap().id,
+            "7"
+        );
+        assert_eq!(
+            get_comment(&package, "/comments/comment[@commentId=42]")
+                .unwrap()
+                .text,
+            "second comment"
+        );
+    }
+
+    #[test]
+    fn point_and_cross_paragraph_comment_ranges_preserve_marker_shape() {
+        let mut package = comment_test_package();
+        let point = HashMap::from([
+            ("text".to_string(), "point".to_string()),
+            ("pointRef".to_string(), "true".to_string()),
+        ]);
+        add_comment_part_aware(&mut package, "/body/p[1]/r[1]", &point).unwrap();
+        let document = package.read_part_xml(DOCX_DOCUMENT_PART).unwrap();
+        assert_eq!(document.matches("commentReference").count(), 1);
+        assert!(!document.contains("commentRangeStart"));
+
+        let open = HashMap::from([
+            ("text".to_string(), "spanning".to_string()),
+            ("rangeOpen".to_string(), "true".to_string()),
+        ]);
+        add_comment_part_aware(&mut package, "/body/p[1]/r[2]", &open).unwrap();
+        let close = HashMap::from([("rangeEnd".to_string(), "true".to_string())]);
+        close_open_comment_range(&mut package, "/body/p[1]/r[2]", &close).unwrap();
+        let document = package.read_part_xml(DOCX_DOCUMENT_PART).unwrap();
+        assert_eq!(document.matches("commentRangeStart").count(), 1);
+        assert_eq!(document.matches("commentRangeEnd").count(), 1);
+        assert_eq!(document.matches("commentReference").count(), 2);
+    }
+
+    #[test]
+    fn modern_comment_metadata_round_trips_reply_and_resolved_state() {
+        let mut package = comment_test_package();
+        let root = HashMap::from([
+            ("text".to_string(), "root".to_string()),
+            ("done".to_string(), "true".to_string()),
+        ]);
+        add_comment_part_aware(&mut package, "/body/p[1]/r[1]", &root).unwrap();
+        let reply = HashMap::from([
+            ("text".to_string(), "reply".to_string()),
+            ("parentId".to_string(), "0".to_string()),
+        ]);
+        add_comment_part_aware(&mut package, "/body/p[1]/r[2]", &reply).unwrap();
+
+        let comments = list_comments(&package).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert!(comments[0].done);
+        assert_eq!(comments[1].parent_id.as_deref(), Some("0"));
+        let extended = package.read_part_xml(DOCX_COMMENTS_EXT_PART).unwrap();
+        assert!(extended.contains("w15:commentEx"));
+        assert!(extended.contains("w15:paraIdParent"));
+
+        let text_update = HashMap::from([("text".to_string(), "updated reply".to_string())]);
+        set_comment_on_part(
+            &mut package,
+            DOCX_COMMENTS_PART,
+            "/comments/comment[@commentId=1]",
+            &text_update,
+        )
+        .unwrap();
+        let updated = get_comment(&package, "/comments/comment[@commentId=1]").unwrap();
+        assert_eq!(updated.text, "updated reply");
+        assert_eq!(updated.parent_id.as_deref(), Some("0"));
+
+        let update = HashMap::from([("resolved".to_string(), "true".to_string())]);
+        set_comment_on_part(
+            &mut package,
+            DOCX_COMMENTS_PART,
+            "/comments/comment[@commentId=1]",
+            &update,
+        )
+        .unwrap();
+        assert!(
+            get_comment(&package, "/comments/comment[@commentId=1]")
+                .unwrap()
+                .done
+        );
+    }
+
+    #[test]
+    fn preparing_comments_extended_replace_stamps_existing_comment_para_ids() {
+        let mut package = comment_test_package();
+        let definition_only = HashMap::from([
+            ("text".to_string(), "existing comment".to_string()),
+            ("id".to_string(), "42".to_string()),
+            ("range".to_string(), "none".to_string()),
+        ]);
+        add_comment_part_aware(&mut package, "/body/p[1]", &definition_only).unwrap();
+        prepare_comments_extended_raw_replace(&mut package).unwrap();
+
+        let comments = package.read_part_xml(DOCX_COMMENTS_PART).unwrap();
+        assert!(comments.contains("w14:paraId="));
+        let rels = package.read_part_xml(DOCX_DOCUMENT_RELS_PART).unwrap();
+        assert!(rels.contains(DOCX_COMMENTS_EXT_REL_TYPE));
+        let types = package.read_part_xml("[Content_Types].xml").unwrap();
+        assert!(types.contains("/word/commentsExtended.xml"));
+        assert!(package.has_part(DOCX_COMMENTS_EXT_PART));
+    }
+
+    #[test]
+    fn definition_only_comment_does_not_rewrite_the_document_part() {
+        let mut package = comment_test_package();
+        let before = package.read_part_xml(DOCX_DOCUMENT_PART).unwrap();
+        let properties = HashMap::from([
+            ("text".to_string(), "definition".to_string()),
+            ("id".to_string(), "99".to_string()),
+            ("range".to_string(), "none".to_string()),
+        ]);
+        add_comment_part_aware(&mut package, "/body/p[1]", &properties).unwrap();
+        assert_eq!(package.read_part_xml(DOCX_DOCUMENT_PART).unwrap(), before);
+        assert_eq!(
+            get_comment(&package, "/comments/comment[@commentId=99]")
+                .unwrap()
+                .text,
+            "definition"
+        );
     }
 }

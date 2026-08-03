@@ -8,6 +8,7 @@ pub mod navigation;
 pub mod para_id;
 pub mod query;
 pub mod raw;
+pub mod revision;
 pub mod text_offset;
 pub mod view;
 

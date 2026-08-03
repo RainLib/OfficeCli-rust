@@ -1,0 +1,14 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "level",
+  "parent": "abstractNum",
+  "operations": { "add": false, "set": true, "get": true, "query": false, "remove": false },
+  "paths": { "stable": ["/numbering/abstractNum[@id=N]/level[L]"] },
+  "note": "Read a zero-based numbering level L (0..8) from an abstractNum. Readback includes ilvl, format (numFmt), and text (lvlText). Creation currently occurs with add abstractNum, which emits nine levels.",
+  "properties": {
+    "ilvl": { "type": "int", "get": true, "enforcement": "report" },
+    "format": { "type": "string", "set": true, "get": true, "enforcement": "report" },
+    "text": { "type": "string", "set": true, "get": true, "enforcement": "report" }
+  }
+}

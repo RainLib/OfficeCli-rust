@@ -1,6 +1,6 @@
 use crate::dom_types::{WordDom, WordElementType, WordNode};
 use crate::helpers::{generate_bookmark_id, quote_attr_value_if_needed, validate_bookmark_name};
-use crate::navigation::{navigate_to_element, navigate_to_element_mut, parse_path};
+use crate::navigation::{navigate_to_element, navigate_to_element_mut, parent_path, parse_path};
 use handler_common::{HandlerError, InsertPosition, PathRangeSegment};
 use std::collections::HashMap;
 
@@ -26,16 +26,35 @@ pub fn add_element(
         AddType::TableRow => add_table_row(dom, parent, position, properties),
         AddType::TableCell => add_table_cell(dom, parent, position, properties),
         AddType::Bookmark => add_bookmark(dom, parent, position, properties, wrap),
+        AddType::BookmarkEnd => add_bookmark_end(dom, parent, position, properties),
+        AddType::PermissionStart => {
+            add_permission_marker(dom, parent, position, properties, "permStart")
+        }
+        AddType::PermissionEnd => {
+            add_permission_marker(dom, parent, position, properties, "permEnd")
+        }
         AddType::Hyperlink => add_hyperlink(dom, parent, position, properties),
         AddType::Image => add_image(dom, parent, position, properties),
         AddType::Field => add_field(dom, parent, position, properties),
         AddType::Break => add_break(dom, parent, position, properties),
-        AddType::Tab => add_tab(dom, parent, position, properties),
+        AddType::Tab => {
+            if element_type.eq_ignore_ascii_case("tabstop")
+                || properties.contains_key("pos")
+                || properties.contains_key("position")
+                || properties.contains_key("leader")
+                || properties.contains_key("val")
+            {
+                add_tab_stop(dom, parent, properties)
+            } else {
+                add_tab(dom, parent, position, properties)
+            }
+        }
         AddType::SectionBreak => add_section_break(dom, parent, position, properties),
         AddType::FootnoteRef => add_footnote_reference(dom, parent, position, properties),
         AddType::EndnoteRef => add_endnote_reference(dom, parent, position, properties),
         AddType::Sdt => add_sdt_block(dom, parent, position, properties),
         AddType::SdtRun => add_sdt_run(dom, parent, position, properties),
+        AddType::Markdown => add_markdown(dom, parent, position, properties),
     }
 }
 
@@ -47,6 +66,9 @@ enum AddType {
     TableRow,
     TableCell,
     Bookmark,
+    BookmarkEnd,
+    PermissionStart,
+    PermissionEnd,
     Hyperlink,
     Image,
     Field,
@@ -57,6 +79,7 @@ enum AddType {
     EndnoteRef,
     Sdt,
     SdtRun,
+    Markdown,
 }
 
 #[derive(Debug, Clone)]
@@ -74,18 +97,22 @@ fn resolve_add_type(name: &str) -> Result<AddType, HandlerError> {
         "tr" | "row" => Ok(AddType::TableRow),
         "tc" | "cell" => Ok(AddType::TableCell),
         "bookmark" | "bookmarkStart" | "bookmarkstart" => Ok(AddType::Bookmark),
+        "bookmarkEnd" | "bookmarkend" => Ok(AddType::BookmarkEnd),
+        "permStart" | "permstart" => Ok(AddType::PermissionStart),
+        "permEnd" | "permend" => Ok(AddType::PermissionEnd),
         "hyperlink" | "link" => Ok(AddType::Hyperlink),
         "image" | "drawing" | "picture" => Ok(AddType::Image),
         "field" | "fldSimple" | "fldsimple" => Ok(AddType::Field),
         "break" | "br" => Ok(AddType::Break),
-        "tab" => Ok(AddType::Tab),
+        "tab" | "tabstop" => Ok(AddType::Tab),
         "sectionBreak" | "sectionbreak" => Ok(AddType::SectionBreak),
         "footnote" | "footnoteReference" | "footnoteRef" => Ok(AddType::FootnoteRef),
         "endnote" | "endnoteReference" | "endnoteRef" => Ok(AddType::EndnoteRef),
         "sdt" | "contentControl" | "sdtBlock" => Ok(AddType::Sdt),
         "sdtRun" | "inlineSdt" => Ok(AddType::SdtRun),
+        "markdown" | "md" => Ok(AddType::Markdown),
         other => Err(HandlerError::UnsupportedType(format!(
-            "cannot add element type: '{}' (supported: paragraph/p, run/r, table/tbl, row/tr, cell/tc, bookmark, hyperlink, image, field, break, tab, sectionBreak, footnote, endnote, sdt)",
+            "cannot add element type: '{}' (supported: paragraph/p, run/r, table/tbl, row/tr, cell/tc, bookmark, bookmarkEnd, permStart, permEnd, hyperlink, image, field, break, tab, sectionBreak, footnote, endnote, sdt, markdown/md)",
             other
         ))),
     }
@@ -114,6 +141,114 @@ fn add_bookmark(
 
     // 3. Standard positional mode (migrated from C# AddBookmark)
     add_bookmark_positional(dom, parent, position, properties)
+}
+
+/// Add a standalone bookmark close marker.  This is useful when replaying a
+/// dump whose matching start is emitted separately or lives across a document
+/// structure boundary; regular `add bookmark` remains the convenient paired
+/// operation.
+fn add_bookmark_end(
+    dom: &mut WordDom,
+    parent: &str,
+    position: InsertPosition,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let id = if let Some(id) = properties.get("id") {
+        id.clone()
+    } else if let Some(name) = properties.get("name") {
+        find_last_bookmark_id_by_name(&dom.root, name).ok_or_else(|| {
+            HandlerError::PathNotFound(format!(
+                "bookmarkEnd by name '{}' found no matching bookmarkStart",
+                name
+            ))
+        })?
+    } else {
+        return Err(HandlerError::InvalidArgument(
+            "bookmarkEnd requires an 'id' property or a 'name' of an existing bookmarkStart"
+                .to_string(),
+        ));
+    };
+    id.parse::<u32>().map_err(|_| {
+        HandlerError::InvalidArgument(format!("bookmarkEnd id must be an integer (got '{}')", id))
+    })?;
+
+    let insert_index = resolve_insert_index(dom, parent, &position)?;
+    let container = navigate_to_element_mut(dom, parent)?;
+    let mut marker = WordNode::new(WordElementType::BookmarkEnd);
+    marker.attributes.insert("id".to_string(), id.clone());
+    let insert_index = insert_index.unwrap_or_else(|| {
+        if container.element_type == WordElementType::Body {
+            container
+                .children
+                .iter()
+                .rposition(|child| child.element_type == WordElementType::SectionProperties)
+                .unwrap_or(container.children.len())
+        } else {
+            container.children.len()
+        }
+    });
+    container.children.insert(insert_index, marker);
+    Ok(format!("{}/bookmarkEnd[@id={}]", parent, id))
+}
+
+/// Add one side of a protected-document editable range.  `permStart` carries
+/// the optional editor and table-column scope; `permEnd` only closes the id.
+fn add_permission_marker(
+    dom: &mut WordDom,
+    parent: &str,
+    position: InsertPosition,
+    properties: &HashMap<String, String>,
+    marker_type: &str,
+) -> Result<String, HandlerError> {
+    let id = properties.get("id").ok_or_else(|| {
+        HandlerError::InvalidArgument(format!(
+            "'id' property (integer) is required for {}",
+            marker_type
+        ))
+    })?;
+    id.parse::<u32>().map_err(|_| {
+        HandlerError::InvalidArgument(format!(
+            "'id' property (integer) is required for {}",
+            marker_type
+        ))
+    })?;
+    for key in ["colFirst", "colLast"] {
+        if let Some(value) = properties.get(key) {
+            value.parse::<u32>().map_err(|_| {
+                HandlerError::InvalidArgument(format!("{} must be an integer", key))
+            })?;
+        }
+    }
+    let insert_index = resolve_insert_index(dom, parent, &position)?;
+    let container = navigate_to_element_mut(dom, parent)?;
+    let mut marker = WordNode::new(WordElementType::Unknown(marker_type.to_string()));
+    marker.attributes.insert("id".to_string(), id.clone());
+    if marker_type == "permStart" {
+        for key in ["edGrp", "ed", "colFirst", "colLast"] {
+            if let Some(value) = properties.get(key) {
+                marker.attributes.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    let insert_index = insert_index.unwrap_or(container.children.len());
+    container.children.insert(insert_index, marker);
+    Ok(format!("{}/{}[@id={}]", parent, marker_type, id))
+}
+
+fn find_last_bookmark_id_by_name(node: &WordNode, name: &str) -> Option<String> {
+    let mut found = if node.element_type == WordElementType::BookmarkStart
+        && node.attributes.get("name").map(String::as_str) == Some(name)
+    {
+        node.attributes.get("id").cloned()
+    } else {
+        None
+    };
+    for child in &node.children {
+        if let Some(id) = find_last_bookmark_id_by_name(child, name) {
+            found = Some(id);
+        }
+    }
+    found
 }
 
 /// Resolve a range-paths segment to paragraph-level path and offsets.
@@ -1661,6 +1796,38 @@ fn add_paragraph(
         para.children.push(ppr);
     }
 
+    // Paragraph format revisions are represented by a pPrChange snapshot, not
+    // by wrapping the paragraph content.  A newly added paragraph has no prior
+    // pPr state, so its snapshot is an empty <w:pPr/>.
+    if properties
+        .get("revision.type")
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("format"))
+    {
+        let spec = run_revision_spec(dom, properties)?.ok_or_else(|| {
+            HandlerError::InvalidArgument("revision.type=format is required".to_string())
+        })?;
+        let ppr_index = para
+            .children
+            .iter()
+            .position(|child| child.element_type == WordElementType::ParagraphProperties)
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "revision.type=format requires at least one supported paragraph-format property"
+                        .to_string(),
+                )
+            })?;
+        let mut change = WordNode::new(WordElementType::Unknown("pPrChange".to_string()));
+        change.attributes.insert("id".to_string(), spec.id);
+        change.attributes.insert("author".to_string(), spec.author);
+        if let Some(date) = spec.date {
+            change.attributes.insert("date".to_string(), date);
+        }
+        change
+            .children
+            .push(WordNode::new(WordElementType::ParagraphProperties));
+        para.children[ppr_index].children.push(change);
+    }
+
     // If "text" property is provided, add a run with that text
     if let Some(text) = properties.get("text") {
         let mut run = WordNode::new(WordElementType::Run);
@@ -1687,6 +1854,60 @@ fn add_paragraph(
         }
         run.children.push(text_node);
         para.children.push(run);
+    }
+
+    if let Some(spec) = paragraph_mark_revision_spec(dom, properties)? {
+        let ppr_index = para
+            .children
+            .iter()
+            .position(|child| child.element_type == WordElementType::ParagraphProperties)
+            .unwrap_or_else(|| {
+                para.children
+                    .insert(0, WordNode::new(WordElementType::ParagraphProperties));
+                0
+            });
+        let mark_rpr_index = para.children[ppr_index]
+            .children
+            .iter()
+            .position(|child| child.element_type == WordElementType::RunProperties)
+            .unwrap_or_else(|| {
+                para.children[ppr_index]
+                    .children
+                    .push(WordNode::new(WordElementType::RunProperties));
+                para.children[ppr_index].children.len() - 1
+            });
+        let mut marker = WordNode::new(WordElementType::Unknown(spec.kind.clone()));
+        marker.attributes.insert("id".to_string(), spec.id.clone());
+        marker
+            .attributes
+            .insert("author".to_string(), spec.author.clone());
+        if let Some(date) = &spec.date {
+            marker.attributes.insert("date".to_string(), date.clone());
+        }
+        para.children[ppr_index].children[mark_rpr_index]
+            .children
+            .push(marker);
+
+        // A paragraph insertion marks both the paragraph break and its newly
+        // authored run content.  Use a distinct run revision id so synthetic
+        // `/revision[@id=…]` addressing remains unambiguous.
+        if spec.kind == "ins" {
+            let mut content_spec = spec.clone();
+            content_spec.id = next_revision_id_after(dom, &spec.id);
+            let run_indices: Vec<_> = para
+                .children
+                .iter()
+                .enumerate()
+                .filter_map(|(index, child)| {
+                    (child.element_type == WordElementType::Run).then_some(index)
+                })
+                .collect();
+            for index in run_indices.into_iter().rev() {
+                let run = para.children.remove(index);
+                para.children
+                    .splice(index..index, wrap_run_in_revision(run, &content_spec));
+            }
+        }
     }
 
     // Get body and determine insertion index
@@ -1732,6 +1953,372 @@ fn add_paragraph(
     Ok(format!("/body/p[{}]", new_para_idx))
 }
 
+/// Expand a pragmatic Markdown subset into editable native Word paragraphs.
+/// The emitted nodes deliberately use the ordinary paragraph/run model so all
+/// existing `get`, `set`, `query`, revision, and batch operations keep working
+/// on the result. Rich inline/table support can layer on top of this parser.
+fn add_markdown(
+    dom: &mut WordDom,
+    parent: &str,
+    position: InsertPosition,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    if parent != "/body" {
+        return Err(HandlerError::InvalidPath(
+            "markdown can only be added under /body".to_string(),
+        ));
+    }
+    let source = if let Some(source) = properties
+        .get("markdown")
+        .or_else(|| properties.get("text"))
+        .or_else(|| properties.get("md"))
+        .cloned()
+    {
+        source
+    } else if let Some(path) = properties.get("src").or_else(|| properties.get("path")) {
+        std::fs::read_to_string(path).map_err(|error| {
+            HandlerError::OperationFailed(format!("read markdown source '{}': {}", path, error))
+        })?
+    } else {
+        return Err(HandlerError::InvalidArgument(
+            "markdown requires markdown=TEXT (or text=/md=, or src=PATH)".to_string(),
+        ));
+    };
+    let blocks = parse_markdown_blocks(&source);
+    if blocks.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "markdown source contains no editable blocks".to_string(),
+        ));
+    }
+    let first_is_table = matches!(blocks.first(), Some(MarkdownBlock::Table(_)));
+    let paragraphs: Vec<_> = blocks
+        .into_iter()
+        .map(|block| markdown_block_node(&block))
+        .collect();
+    let body_idx = dom
+        .root
+        .children
+        .iter()
+        .position(|child| child.element_type == WordElementType::Body)
+        .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
+    let existing: Vec<_> = dom.root.children[body_idx]
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, child)| child.element_type.is_body_child().then_some(index))
+        .collect();
+    let insert_at = match position {
+        InsertPosition::AtIndex(index) if index < existing.len() => existing[index],
+        _ => dom.root.children[body_idx].children.len(),
+    };
+    let before_paragraphs = dom.root.children[body_idx].children[..insert_at]
+        .iter()
+        .filter(|child| child.element_type == WordElementType::Paragraph)
+        .count();
+    let before_tables = dom.root.children[body_idx].children[..insert_at]
+        .iter()
+        .filter(|child| child.element_type == WordElementType::Table)
+        .count();
+    dom.root.children[body_idx]
+        .children
+        .splice(insert_at..insert_at, paragraphs);
+    if first_is_table {
+        Ok(format!("/body/tbl[{}]", before_tables + 1))
+    } else {
+        Ok(format!("/body/p[{}]", before_paragraphs + 1))
+    }
+}
+
+enum MarkdownBlock {
+    Heading(u8, String),
+    Paragraph(String),
+    ListItem {
+        ordered: bool,
+        ordinal: usize,
+        text: String,
+    },
+    Code(String),
+    Quote(String),
+    Rule,
+    Table(Vec<Vec<String>>),
+}
+
+fn parse_markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
+    let mut blocks = Vec::new();
+    let mut paragraph = Vec::new();
+    let mut code_lines = Vec::new();
+    let mut in_code = false;
+    let flush_paragraph = |paragraph: &mut Vec<String>, blocks: &mut Vec<MarkdownBlock>| {
+        if !paragraph.is_empty() {
+            blocks.push(MarkdownBlock::Paragraph(paragraph.join(" ")));
+            paragraph.clear();
+        }
+    };
+    let lines: Vec<_> = source.lines().collect();
+    let mut line_index = 0;
+    while line_index < lines.len() {
+        let raw_line = lines[line_index];
+        let line = raw_line.trim_end();
+        let trimmed = line.trim_start();
+        if is_markdown_table_row(trimmed)
+            && lines
+                .get(line_index + 1)
+                .is_some_and(|separator| is_markdown_table_separator(separator.trim()))
+        {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            let mut rows = vec![parse_markdown_table_row(trimmed)];
+            line_index += 2;
+            while line_index < lines.len() && is_markdown_table_row(lines[line_index].trim()) {
+                rows.push(parse_markdown_table_row(lines[line_index].trim()));
+                line_index += 1;
+            }
+            blocks.push(MarkdownBlock::Table(rows));
+            continue;
+        }
+        if line.trim_start().starts_with("```") {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            if in_code {
+                blocks.push(MarkdownBlock::Code(code_lines.join("\n")));
+                code_lines.clear();
+            }
+            in_code = !in_code;
+            line_index += 1;
+            continue;
+        }
+        if in_code {
+            code_lines.push(raw_line.to_string());
+            line_index += 1;
+            continue;
+        }
+        if line.trim().is_empty() {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            line_index += 1;
+            continue;
+        }
+        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::Heading(
+                hashes as u8,
+                trimmed[hashes + 1..].to_string(),
+            ));
+        } else if let Some(text) = trimmed.strip_prefix("> ") {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::Quote(text.to_string()));
+        } else if matches!(trimmed, "---" | "***" | "___") {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::Rule);
+        } else if let Some(text) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("+ "))
+        {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::ListItem {
+                ordered: false,
+                ordinal: 1,
+                text: text.to_string(),
+            });
+        } else if let Some((number, text)) = markdown_ordered_item(trimmed) {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::ListItem {
+                ordered: true,
+                ordinal: number,
+                text: text.to_string(),
+            });
+        } else {
+            paragraph.push(trimmed.to_string());
+        }
+        line_index += 1;
+    }
+    if in_code {
+        blocks.push(MarkdownBlock::Code(code_lines.join("\n")));
+    }
+    flush_paragraph(&mut paragraph, &mut blocks);
+    blocks
+}
+
+fn is_markdown_table_row(line: &str) -> bool {
+    line.matches('|').count() >= 2
+}
+
+fn is_markdown_table_separator(line: &str) -> bool {
+    let cells = parse_markdown_table_row(line);
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let core = cell.trim().trim_matches(':');
+            core.len() >= 3 && core.chars().all(|character| character == '-')
+        })
+}
+
+fn parse_markdown_table_row(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
+}
+
+fn markdown_ordered_item(line: &str) -> Option<(usize, &str)> {
+    let marker = line.find(". ")?;
+    let ordinal = line[..marker].parse().ok()?;
+    Some((ordinal, &line[marker + 2..]))
+}
+
+fn markdown_block_node(block: &MarkdownBlock) -> WordNode {
+    if let MarkdownBlock::Table(rows) = block {
+        return markdown_table(rows);
+    }
+    markdown_paragraph(block)
+}
+
+fn markdown_paragraph(block: &MarkdownBlock) -> WordNode {
+    let para_id = crate::helpers::generate_para_id();
+    let mut paragraph =
+        WordNode::new(WordElementType::Paragraph).with_attribute("paraId", &para_id);
+    let (text, style, run_props) = match block {
+        MarkdownBlock::Heading(level, text) => (
+            text.clone(),
+            Some(format!("Heading{}", level)),
+            HashMap::new(),
+        ),
+        MarkdownBlock::Paragraph(text) => (text.clone(), None, HashMap::new()),
+        MarkdownBlock::ListItem {
+            ordered,
+            ordinal,
+            text,
+        } => (
+            if *ordered {
+                format!("{}. {}", ordinal, text)
+            } else {
+                format!("• {}", text)
+            },
+            None,
+            HashMap::new(),
+        ),
+        MarkdownBlock::Code(text) => {
+            let mut props = HashMap::new();
+            props.insert("font".to_string(), "Consolas".to_string());
+            (text.clone(), None, props)
+        }
+        MarkdownBlock::Quote(text) => (format!("“{}”", text), None, HashMap::new()),
+        MarkdownBlock::Rule => ("────────────────────".to_string(), None, HashMap::new()),
+        MarkdownBlock::Table(_) => unreachable!("tables are handled by markdown_block_node"),
+    };
+    if let Some(style) = style {
+        paragraph.children.push(
+            WordNode::new(WordElementType::ParagraphProperties).with_children(vec![WordNode::new(
+                WordElementType::Unknown("pStyle".to_string()),
+            )
+            .with_attribute("val", &style)]),
+        );
+    }
+    paragraph
+        .children
+        .extend(markdown_inline_runs(&text, &run_props));
+    paragraph
+}
+
+fn markdown_table(rows: &[Vec<String>]) -> WordNode {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut table = WordNode::new(WordElementType::Table);
+    for (row_index, row) in rows.iter().enumerate() {
+        let mut table_row = WordNode::new(WordElementType::TableRow);
+        for column in 0..columns {
+            let text = row.get(column).map(String::as_str).unwrap_or("");
+            let mut paragraph = WordNode::new(WordElementType::Paragraph)
+                .with_attribute("paraId", crate::helpers::generate_para_id());
+            let mut props = HashMap::new();
+            if row_index == 0 {
+                props.insert("bold".to_string(), "true".to_string());
+            }
+            paragraph
+                .children
+                .extend(markdown_inline_runs(text, &props));
+            table_row
+                .children
+                .push(WordNode::new(WordElementType::TableCell).with_children(vec![paragraph]));
+        }
+        table.children.push(table_row);
+    }
+    table
+}
+
+/// Parse the common non-nesting inline Markdown markers into independently
+/// editable Word runs. Escaped or unmatched markers intentionally remain
+/// literal text, matching Markdown's conservative fallback behaviour.
+fn markdown_inline_runs(text: &str, base_props: &HashMap<String, String>) -> Vec<WordNode> {
+    let mut runs = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        let candidates = [
+            ("**", "bold"),
+            ("~~", "strike"),
+            ("`", "code"),
+            ("*", "italic"),
+        ];
+        let next = candidates
+            .iter()
+            .filter_map(|(marker, kind)| {
+                remaining.find(marker).map(|index| (index, *marker, *kind))
+            })
+            .min_by_key(|(index, _, _)| *index);
+        let Some((start, marker, kind)) = next else {
+            runs.push(markdown_text_run(remaining, base_props));
+            break;
+        };
+        if start > 0 {
+            runs.push(markdown_text_run(&remaining[..start], base_props));
+        }
+        let inner_start = start + marker.len();
+        let Some(close_relative) = remaining[inner_start..].find(marker) else {
+            runs.push(markdown_text_run(&remaining[start..], base_props));
+            break;
+        };
+        let end = inner_start + close_relative;
+        if end == inner_start {
+            runs.push(markdown_text_run(&remaining[..inner_start], base_props));
+            remaining = &remaining[inner_start..];
+            continue;
+        }
+        let mut props = base_props.clone();
+        match kind {
+            "bold" => {
+                props.insert("bold".to_string(), "true".to_string());
+            }
+            "italic" => {
+                props.insert("italic".to_string(), "true".to_string());
+            }
+            "strike" => {
+                props.insert("strike".to_string(), "true".to_string());
+            }
+            "code" => {
+                props.insert("font".to_string(), "Consolas".to_string());
+            }
+            _ => {}
+        }
+        runs.push(markdown_text_run(&remaining[inner_start..end], &props));
+        remaining = &remaining[end + marker.len()..];
+    }
+    runs
+}
+
+fn markdown_text_run(text: &str, props: &HashMap<String, String>) -> WordNode {
+    let mut run = WordNode::new(WordElementType::Run);
+    if let Some(rpr) = crate::helpers::build_run_properties(props) {
+        run.children.push(rpr);
+    }
+    let mut text_node = WordNode::new(WordElementType::Text).with_text(text);
+    if text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace) {
+        text_node
+            .attributes
+            .insert("xml:space".to_string(), "preserve".to_string());
+        text_node.preserve_space = true;
+    }
+    run.children.push(text_node);
+    run
+}
+
 /// Add a run to a paragraph.
 fn add_run(
     dom: &mut WordDom,
@@ -1745,15 +2332,18 @@ fn add_run(
         para.runs().len()
     };
 
+    let revision = run_revision_spec(dom, properties)?;
+
     // Build the run node
     let mut run = WordNode::new(WordElementType::Run);
 
     let run_props: HashMap<String, String> = properties
         .iter()
-        .filter(|(k, _)| k.as_str() != "text")
+        .filter(|(k, _)| k.as_str() != "text" && !k.starts_with("revision."))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    if let Some(rpr) = crate::helpers::build_run_properties(&run_props) {
+    let built_run_properties = crate::helpers::build_run_properties(&run_props);
+    if let Some(rpr) = built_run_properties.clone() {
         run.children.push(rpr);
     }
 
@@ -1767,6 +2357,27 @@ fn add_run(
         }
         run.children.push(text_node);
     }
+
+    let inserted_type = revision
+        .as_ref()
+        .filter(|spec| spec.kind != "format")
+        .map(|spec| spec.element_type.clone());
+    let inserted = if let Some(spec) = revision {
+        if spec.kind == "format" {
+            if built_run_properties.is_none() {
+                return Err(HandlerError::InvalidArgument(
+                    "revision.type=format requires at least one supported run-format property"
+                        .to_string(),
+                ));
+            }
+            add_run_format_revision(&mut run, &spec);
+            vec![run]
+        } else {
+            wrap_run_in_revision(run, &spec)
+        }
+    } else {
+        vec![run]
+    };
 
     // Now get mutable access
     let para = navigate_to_element_mut(dom, parent)?;
@@ -1788,14 +2399,531 @@ fn add_run(
             } else {
                 para.children.len()
             };
-            para.children.insert(real_idx, run);
+            para.children.splice(real_idx..real_idx, inserted);
         }
         None => {
-            para.children.push(run);
+            para.children.extend(inserted);
         }
     }
 
-    Ok(format!("{}/r[{}]", parent, existing_run_count + 1))
+    if let Some(element_type) = inserted_type {
+        let name = element_type.to_path_name();
+        let index = para
+            .children
+            .iter()
+            .filter(|child| child.element_type == element_type)
+            .count();
+        Ok(format!("{}/{}[{}]", parent, name, index))
+    } else {
+        Ok(format!("{}/r[{}]", parent, existing_run_count + 1))
+    }
+}
+
+#[derive(Clone)]
+struct RunRevisionSpec {
+    kind: String,
+    element_type: WordElementType,
+    id: String,
+    author: String,
+    date: Option<String>,
+}
+
+fn run_revision_spec(
+    dom: &WordDom,
+    properties: &HashMap<String, String>,
+) -> Result<Option<RunRevisionSpec>, HandlerError> {
+    if properties.contains_key("revision.action") {
+        return Err(HandlerError::InvalidArgument(
+            "revision.action targets an existing revision; use set instead of add run".to_string(),
+        ));
+    }
+    let has_metadata = ["revision.author", "revision.date", "revision.id"]
+        .iter()
+        .any(|key| properties.contains_key(*key));
+    let Some(kind) = properties
+        .get("revision.type")
+        .map(|kind| kind.to_ascii_lowercase())
+        .or_else(|| has_metadata.then(|| "ins".to_string()))
+    else {
+        return Ok(None);
+    };
+    let element_type = match kind.as_str() {
+        "ins" => WordElementType::Unknown("ins".to_string()),
+        "del" => WordElementType::Unknown("del".to_string()),
+        "moveto" => WordElementType::MoveTo,
+        "movefrom" => WordElementType::MoveFrom,
+        "format" => WordElementType::RunProperties,
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "revision.type must be ins, del, moveTo, moveFrom, or format (got '{}')",
+                kind
+            )));
+        }
+    };
+    let id = match properties.get("revision.id").cloned() {
+        Some(id) => id,
+        None if kind == "moveto" || kind == "movefrom" => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "revision.type={} requires an explicit revision.id so the move pair can be linked",
+                kind
+            )));
+        }
+        None => next_revision_id(&dom.root),
+    };
+    id.parse::<u32>().map_err(|_| {
+        HandlerError::InvalidArgument(format!(
+            "revision.id must be a non-negative integer (got '{}')",
+            id
+        ))
+    })?;
+    Ok(Some(RunRevisionSpec {
+        kind,
+        element_type,
+        id,
+        author: properties
+            .get("revision.author")
+            .cloned()
+            .unwrap_or_else(|| "OfficeCLI".to_string()),
+        date: properties.get("revision.date").cloned(),
+    }))
+}
+
+fn paragraph_mark_revision_spec(
+    dom: &WordDom,
+    properties: &HashMap<String, String>,
+) -> Result<Option<RunRevisionSpec>, HandlerError> {
+    let has_metadata = ["revision.author", "revision.date", "revision.id"]
+        .iter()
+        .any(|key| properties.contains_key(*key));
+    let Some(raw_kind) = properties
+        .get("revision.type")
+        .map(|value| value.to_ascii_lowercase())
+        .or_else(|| has_metadata.then(|| "ins".to_string()))
+    else {
+        return Ok(None);
+    };
+    if raw_kind == "format" {
+        return Ok(None);
+    }
+    let kind = match raw_kind.as_str() {
+        "ins" | "paramarkins" | "paragraphmarkinsertion" => "ins",
+        "del" | "paramarkdel" | "paragraphmarkdeletion" => "del",
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "paragraph revision.type must be ins, del, paraMarkIns, paraMarkDel, or format (got '{}')",
+                raw_kind
+            )))
+        }
+    };
+    let mut normalized = properties.clone();
+    normalized.insert("revision.type".to_string(), kind.to_string());
+    let mut spec = run_revision_spec(dom, &normalized)?.ok_or_else(|| {
+        HandlerError::InvalidArgument("paragraph revision requires revision metadata".to_string())
+    })?;
+    spec.kind = kind.to_string();
+    spec.element_type = WordElementType::Unknown(kind.to_string());
+    Ok(Some(spec))
+}
+
+fn next_revision_id_after(dom: &WordDom, reserved: &str) -> String {
+    let candidate = next_revision_id(&dom.root);
+    if candidate != reserved {
+        return candidate;
+    }
+    reserved
+        .parse::<u32>()
+        .ok()
+        .and_then(|id| id.checked_add(1))
+        .unwrap_or(1)
+        .to_string()
+}
+
+fn add_run_format_revision(run: &mut WordNode, spec: &RunRevisionSpec) {
+    let rpr = run
+        .children
+        .iter_mut()
+        .find(|child| child.element_type == WordElementType::RunProperties)
+        .expect("format revision requires run properties");
+    let mut change = WordNode::new(WordElementType::Unknown("rPrChange".to_string()));
+    change.attributes.insert("id".to_string(), spec.id.clone());
+    change
+        .attributes
+        .insert("author".to_string(), spec.author.clone());
+    if let Some(date) = &spec.date {
+        change.attributes.insert("date".to_string(), date.clone());
+    }
+    change
+        .children
+        .push(WordNode::new(WordElementType::RunProperties));
+    rpr.children.push(change);
+}
+
+/// Snapshot the property container that a `*PrChange` marker will preserve.
+/// OOXML defines format revisions not only for runs, but also for paragraphs,
+/// tables, rows and cells.  Keep this adjacent to the run revision helpers so
+/// creation and later reject share the same pre-change representation.
+pub(crate) fn format_revision_snapshot(
+    dom: &WordDom,
+    path: &str,
+) -> Result<WordNode, HandlerError> {
+    let host = navigate_to_element(dom, path)?;
+    let property_type = format_revision_property_type(&host.element_type).ok_or_else(|| {
+        HandlerError::InvalidPath(
+            "revision.type=format can target only run, paragraph, table, row, or cell paths"
+                .to_string(),
+        )
+    })?;
+    Ok(host
+        .children
+        .iter()
+        .find(|child| child.element_type == property_type)
+        .cloned()
+        .unwrap_or_else(|| WordNode::new(property_type)))
+}
+
+/// Add the correct OOXML `*PrChange` marker after a regular property mutation.
+/// The caller captures `snapshot` before applying the mutation, allowing a
+/// later `revision.action=reject` to restore the original property container.
+pub(crate) fn mark_existing_format_revision(
+    dom: &mut WordDom,
+    path: &str,
+    properties: &HashMap<String, String>,
+    snapshot: WordNode,
+) -> Result<(), HandlerError> {
+    let spec = run_revision_spec(dom, properties)?.ok_or_else(|| {
+        HandlerError::InvalidArgument("set revision requires revision.type=format".to_string())
+    })?;
+    if spec.kind != "format" {
+        return Err(HandlerError::InvalidArgument(
+            "expected revision.type=format".to_string(),
+        ));
+    }
+    let host = navigate_to_element_mut(dom, path)?;
+    let property_type = format_revision_property_type(&host.element_type).ok_or_else(|| {
+        HandlerError::InvalidPath(
+            "revision.type=format can target only run, paragraph, table, row, or cell paths"
+                .to_string(),
+        )
+    })?;
+    let change_name = format_revision_change_name(&property_type).expect("known property type");
+    let properties_index = host
+        .children
+        .iter()
+        .position(|child| child.element_type == property_type)
+        .unwrap_or_else(|| {
+            host.children.insert(0, WordNode::new(property_type));
+            0
+        });
+    let property_node = &mut host.children[properties_index];
+    if property_node.children.iter().any(|child| {
+        matches!(&child.element_type, WordElementType::Unknown(name) if name == change_name)
+    }) {
+        return Err(HandlerError::InvalidArgument(format!(
+            "element already has a pending {}; accept or reject it first",
+            change_name
+        )));
+    }
+    let mut change = WordNode::new(WordElementType::Unknown(change_name.to_string()));
+    change.attributes.insert("id".to_string(), spec.id);
+    change.attributes.insert("author".to_string(), spec.author);
+    if let Some(date) = spec.date {
+        change.attributes.insert("date".to_string(), date);
+    }
+    change.children.push(snapshot);
+    property_node.children.push(change);
+    Ok(())
+}
+
+fn format_revision_property_type(host_type: &WordElementType) -> Option<WordElementType> {
+    match host_type {
+        WordElementType::Run => Some(WordElementType::RunProperties),
+        WordElementType::Paragraph => Some(WordElementType::ParagraphProperties),
+        WordElementType::Table => Some(WordElementType::TableProperties),
+        WordElementType::TableRow => Some(WordElementType::TableRowProperties),
+        WordElementType::TableCell => Some(WordElementType::TableCellProperties),
+        _ => None,
+    }
+}
+
+fn format_revision_change_name(property_type: &WordElementType) -> Option<&'static str> {
+    match property_type {
+        WordElementType::RunProperties => Some("rPrChange"),
+        WordElementType::ParagraphProperties => Some("pPrChange"),
+        WordElementType::TableProperties => Some("tblPrChange"),
+        WordElementType::TableRowProperties => Some("trPrChange"),
+        WordElementType::TableCellProperties => Some("tcPrChange"),
+        _ => None,
+    }
+}
+
+fn wrap_run_in_revision(mut run: WordNode, spec: &RunRevisionSpec) -> Vec<WordNode> {
+    if spec.kind == "del" {
+        convert_run_text_to_deleted(&mut run);
+    }
+    let mut wrapper = WordNode::new(spec.element_type.clone());
+    wrapper.attributes.insert("id".to_string(), spec.id.clone());
+    wrapper
+        .attributes
+        .insert("author".to_string(), spec.author.clone());
+    if let Some(date) = spec.date.clone() {
+        wrapper.attributes.insert("date".to_string(), date);
+    }
+    wrapper.children.push(run);
+    if !spec.is_move() {
+        return vec![wrapper];
+    }
+    let (start_type, end_type) = if spec.kind == "movefrom" {
+        (
+            WordElementType::MoveFromRangeStart,
+            WordElementType::MoveFromRangeEnd,
+        )
+    } else {
+        (
+            WordElementType::MoveToRangeStart,
+            WordElementType::MoveToRangeEnd,
+        )
+    };
+    let mut start = WordNode::new(start_type);
+    start.attributes.insert("id".to_string(), spec.id.clone());
+    start
+        .attributes
+        .insert("author".to_string(), spec.author.clone());
+    start
+        .attributes
+        .insert("name".to_string(), format!("Move_{}", spec.id));
+    if let Some(date) = spec.date.clone() {
+        start.attributes.insert("date".to_string(), date);
+    }
+    let mut end = WordNode::new(end_type);
+    end.attributes.insert("id".to_string(), spec.id.clone());
+    vec![start, wrapper, end]
+}
+
+/// Apply an insertion/deletion/move revision wrapper to an existing direct
+/// run. This is the `set <run> revision.type=…` counterpart of add-run.
+pub(crate) fn wrap_existing_run_revision(
+    dom: &mut WordDom,
+    path: &str,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    if !properties.contains_key("revision.type") {
+        return Err(HandlerError::InvalidArgument(
+            "set run revision requires revision.type".to_string(),
+        ));
+    }
+    if properties.keys().any(|key| !key.starts_with("revision.")) {
+        return Err(HandlerError::UnsupportedProperty(
+            "set run revision.type cannot be mixed with regular properties yet".to_string(),
+        ));
+    }
+    let spec = run_revision_spec(dom, properties)?.ok_or_else(|| {
+        HandlerError::InvalidArgument("set run revision requires revision.type".to_string())
+    })?;
+    if spec.kind == "format" {
+        return Err(HandlerError::UnsupportedProperty(
+            "set run revision.type=format requires a before-format snapshot and is not yet supported"
+                .to_string(),
+        ));
+    }
+    let segments = parse_path(path)?;
+    let last = segments
+        .last()
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    if last.name == "tr" {
+        if !matches!(spec.kind.as_str(), "ins" | "del") {
+            return Err(HandlerError::InvalidPath(
+                "revision.type on a row supports only ins or del".to_string(),
+            ));
+        }
+        let row = navigate_to_element_mut(dom, path)?;
+        if row.element_type != WordElementType::TableRow {
+            return Err(HandlerError::InvalidPath(path.to_string()));
+        }
+        let tr_pr_index = row
+            .children
+            .iter()
+            .position(|child| child.element_type == WordElementType::TableRowProperties)
+            .unwrap_or_else(|| {
+                row.children
+                    .insert(0, WordNode::new(WordElementType::TableRowProperties));
+                0
+            });
+        let tr_pr = &mut row.children[tr_pr_index];
+        if tr_pr.children.iter().any(|child| {
+            matches!(&child.element_type, WordElementType::Unknown(name) if name == "ins" || name == "del")
+        }) {
+            return Err(HandlerError::InvalidArgument(
+                "row already has a row-level track-change marker; accept or reject it first"
+                    .to_string(),
+            ));
+        }
+        let mut marker = WordNode::new(WordElementType::Unknown(spec.kind));
+        marker.attributes.insert("id".to_string(), spec.id);
+        marker.attributes.insert("author".to_string(), spec.author);
+        if let Some(date) = spec.date {
+            marker.attributes.insert("date".to_string(), date);
+        }
+        tr_pr.children.push(marker);
+        return Ok(Vec::new());
+    }
+    if matches!(last.name.as_str(), "tc" | "cell") {
+        if !matches!(spec.kind.as_str(), "ins" | "del") {
+            return Err(HandlerError::InvalidPath(
+                "revision.type on a cell supports only ins or del".to_string(),
+            ));
+        }
+        let cell = navigate_to_element_mut(dom, path)?;
+        if cell.element_type != WordElementType::TableCell {
+            return Err(HandlerError::InvalidPath(path.to_string()));
+        }
+        let tc_pr_index = cell
+            .children
+            .iter()
+            .position(|child| child.element_type == WordElementType::TableCellProperties)
+            .unwrap_or_else(|| {
+                cell.children
+                    .insert(0, WordNode::new(WordElementType::TableCellProperties));
+                0
+            });
+        let tc_pr = &mut cell.children[tc_pr_index];
+        if tc_pr.children.iter().any(|child| {
+            matches!(&child.element_type, WordElementType::Unknown(name) if name == "cellIns" || name == "cellDel")
+        }) {
+            return Err(HandlerError::InvalidArgument(
+                "cell already has a cell-level track-change marker; accept or reject it first"
+                    .to_string(),
+            ));
+        }
+        let marker_name = if spec.kind == "ins" {
+            "cellIns"
+        } else {
+            "cellDel"
+        };
+        let mut marker = WordNode::new(WordElementType::Unknown(marker_name.to_string()));
+        marker.attributes.insert("id".to_string(), spec.id);
+        marker.attributes.insert("author".to_string(), spec.author);
+        if let Some(date) = spec.date {
+            marker.attributes.insert("date".to_string(), date);
+        }
+        tc_pr.children.push(marker);
+        return Ok(Vec::new());
+    }
+    if last.name != "r" {
+        return Err(HandlerError::InvalidPath(
+            "revision.type can target a run path, or a row/cell path for ins/del".to_string(),
+        ));
+    }
+    let parent = parent_path(path).ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    let parent_node = navigate_to_element_mut(dom, &parent)?;
+    let matches: Vec<usize> = parent_node
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.element_type == WordElementType::Run)
+        .map(|(index, _)| index)
+        .collect();
+    let run_index = last.index.unwrap_or(1);
+    if run_index == 0 || run_index > matches.len() {
+        return Err(HandlerError::PathNotFound(path.to_string()));
+    }
+    let child_index = matches[run_index - 1];
+    let run = parent_node.children.remove(child_index);
+    parent_node
+        .children
+        .splice(child_index..child_index, wrap_run_in_revision(run, &spec));
+    Ok(Vec::new())
+}
+
+fn row_revision_spec(
+    dom: &WordDom,
+    properties: &HashMap<String, String>,
+) -> Result<Option<RunRevisionSpec>, HandlerError> {
+    let has_metadata = ["revision.author", "revision.date", "revision.id"]
+        .iter()
+        .any(|key| properties.contains_key(*key));
+    if !properties.contains_key("revision.type") && !has_metadata {
+        return Ok(None);
+    }
+    let spec = run_revision_spec(dom, properties)?.ok_or_else(|| {
+        HandlerError::InvalidArgument("row revision requires revision metadata".to_string())
+    })?;
+    if !matches!(spec.kind.as_str(), "ins" | "del") {
+        return Err(HandlerError::InvalidArgument(
+            "row revision.type must be ins or del".to_string(),
+        ));
+    }
+    Ok(Some(spec))
+}
+
+fn cell_revision_spec(
+    dom: &WordDom,
+    properties: &HashMap<String, String>,
+) -> Result<Option<RunRevisionSpec>, HandlerError> {
+    let has_metadata = ["revision.author", "revision.date", "revision.id"]
+        .iter()
+        .any(|key| properties.contains_key(*key));
+    if !properties.contains_key("revision.type") && !has_metadata {
+        return Ok(None);
+    }
+    let spec = run_revision_spec(dom, properties)?.ok_or_else(|| {
+        HandlerError::InvalidArgument("cell revision requires revision metadata".to_string())
+    })?;
+    if spec.kind != "ins" {
+        return Err(HandlerError::InvalidArgument(
+            "new cell revision.type must be ins".to_string(),
+        ));
+    }
+    Ok(Some(spec))
+}
+
+impl RunRevisionSpec {
+    fn is_move(&self) -> bool {
+        self.kind == "movefrom" || self.kind == "moveto"
+    }
+}
+
+pub(crate) fn next_revision_id(node: &WordNode) -> String {
+    fn visit(node: &WordNode, max: &mut u32) {
+        let is_revision = match &node.element_type {
+            WordElementType::MoveFrom | WordElementType::MoveTo => true,
+            WordElementType::Unknown(name) => matches!(
+                name.as_str(),
+                "ins"
+                    | "del"
+                    | "rPrChange"
+                    | "pPrChange"
+                    | "tblPrChange"
+                    | "trPrChange"
+                    | "tcPrChange"
+                    | "cellIns"
+                    | "cellDel"
+            ),
+            _ => false,
+        };
+        if is_revision {
+            if let Some(id) = node
+                .attributes
+                .get("id")
+                .and_then(|id| id.parse::<u32>().ok())
+            {
+                *max = (*max).max(id);
+            }
+        }
+        for child in &node.children {
+            visit(child, max);
+        }
+    }
+    let mut max = 0;
+    visit(node, &mut max);
+    (max + 1).to_string()
+}
+
+fn convert_run_text_to_deleted(run: &mut WordNode) {
+    for child in &mut run.children {
+        if child.element_type == WordElementType::Text {
+            child.element_type = WordElementType::Unknown("delText".to_string());
+        }
+    }
 }
 
 /// Add an empty table to the body.
@@ -1948,8 +3076,8 @@ fn add_table(
 fn add_table_row(
     dom: &mut WordDom,
     parent: &str,
-    _position: InsertPosition,
-    _properties: &HashMap<String, String>,
+    position: InsertPosition,
+    properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
     // First check table structure (immutable)
     let col_count = {
@@ -1974,7 +3102,18 @@ fn add_table_row(
                 .with_children(vec![WordNode::new(WordElementType::Paragraph)]),
         );
     }
-    let row = WordNode::new(WordElementType::TableRow).with_children(cells);
+    let mut row = WordNode::new(WordElementType::TableRow).with_children(cells);
+    if let Some(spec) = row_revision_spec(dom, properties)? {
+        let mut tr_pr = WordNode::new(WordElementType::TableRowProperties);
+        let mut marker = WordNode::new(WordElementType::Unknown(spec.kind));
+        marker.attributes.insert("id".to_string(), spec.id);
+        marker.attributes.insert("author".to_string(), spec.author);
+        if let Some(date) = spec.date {
+            marker.attributes.insert("date".to_string(), date);
+        }
+        tr_pr.children.push(marker);
+        row.children.insert(0, tr_pr);
+    }
 
     // Now get mutable access
     let table = navigate_to_element_mut(dom, parent)?;
@@ -1987,7 +3126,7 @@ fn add_table_row(
         .map(|(i, _)| i)
         .collect();
 
-    let insert_idx = resolve_insert_index_simple(&InsertPosition::Append, existing_rows.len());
+    let insert_idx = resolve_insert_index_simple(&position, existing_rows.len());
 
     match insert_idx {
         Some(idx) => {
@@ -2018,6 +3157,7 @@ fn add_table_cell(
     position: InsertPosition,
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
+    let cell_revision = cell_revision_spec(dom, properties)?;
     let mut para = WordNode::new(WordElementType::Paragraph);
     if let Some(text) = properties.get("text") {
         let run = WordNode::new(WordElementType::Run)
@@ -2025,7 +3165,18 @@ fn add_table_cell(
         para.children.push(run);
     }
 
-    let cell = WordNode::new(WordElementType::TableCell).with_children(vec![para]);
+    let mut cell = WordNode::new(WordElementType::TableCell).with_children(vec![para]);
+    if let Some(spec) = cell_revision {
+        let mut tc_pr = WordNode::new(WordElementType::TableCellProperties);
+        let mut marker = WordNode::new(WordElementType::Unknown("cellIns".to_string()));
+        marker.attributes.insert("id".to_string(), spec.id);
+        marker.attributes.insert("author".to_string(), spec.author);
+        if let Some(date) = spec.date {
+            marker.attributes.insert("date".to_string(), date);
+        }
+        tc_pr.children.push(marker);
+        cell.children.insert(0, tc_pr);
+    }
 
     let row = navigate_to_element_mut(dom, parent)?;
 
@@ -2281,6 +3432,111 @@ fn add_tab(
     ))
 }
 
+/// Add a paragraph tab stop (`w:pPr/w:tabs/w:tab`).  This is deliberately
+/// distinct from the Rust extension above, which emits an inline tab character
+/// when called as `add tab` without tab-stop properties.
+fn add_tab_stop(
+    dom: &mut WordDom,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let pos = properties
+        .get("pos")
+        .or_else(|| properties.get("position"))
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(
+                "tabstop requires 'pos' property (e.g. pos=9360 or pos=6cm)".to_string(),
+            )
+        })?;
+    let pos = parse_signed_twips(pos)?;
+    let val = properties
+        .get("val")
+        .or_else(|| properties.get("type"))
+        .map(|value| value.to_lowercase())
+        .unwrap_or_else(|| "left".to_string());
+    if !matches!(
+        val.as_str(),
+        "left" | "center" | "right" | "decimal" | "bar" | "clear" | "num" | "start" | "end"
+    ) {
+        return Err(HandlerError::InvalidArgument(format!(
+            "invalid tab val '{}'; valid: left, center, right, decimal, bar, clear, num, start, end",
+            val
+        )));
+    }
+    let leader = properties.get("leader").map(|value| value.to_lowercase());
+    if let Some(leader) = &leader {
+        if !matches!(
+            leader.as_str(),
+            "none" | "dot" | "heavy" | "hyphen" | "middledot" | "underscore"
+        ) {
+            return Err(HandlerError::InvalidArgument(format!(
+                "invalid tab leader '{}'; valid: none, dot, heavy, hyphen, middleDot, underscore",
+                leader
+            )));
+        }
+    }
+
+    let paragraph = navigate_to_element_mut(dom, parent)?;
+    if paragraph.element_type != WordElementType::Paragraph {
+        return Err(HandlerError::InvalidArgument(format!(
+            "tabstop parent must be a paragraph, got '{}'",
+            paragraph.element_type.to_path_name()
+        )));
+    }
+    let ppr_index = paragraph
+        .children
+        .iter()
+        .position(|child| child.element_type == WordElementType::ParagraphProperties)
+        .unwrap_or_else(|| {
+            paragraph
+                .children
+                .insert(0, WordNode::new(WordElementType::ParagraphProperties));
+            0
+        });
+    let ppr = &mut paragraph.children[ppr_index];
+    let tabs_index = ppr
+        .children
+        .iter()
+        .position(
+            |child| matches!(&child.element_type, WordElementType::Unknown(name) if name == "tabs"),
+        )
+        .unwrap_or_else(|| {
+            ppr.children
+                .push(WordNode::new(WordElementType::Unknown("tabs".to_string())));
+            ppr.children.len() - 1
+        });
+    let tabs = &mut ppr.children[tabs_index];
+    let mut tab = WordNode::new(WordElementType::TabStop);
+    tab.attributes.insert("pos".to_string(), pos.to_string());
+    tab.attributes.insert("val".to_string(), val);
+    if let Some(leader) = leader {
+        tab.attributes.insert("leader".to_string(), leader);
+    }
+    tabs.children.push(tab);
+    Ok(format!("{}/tab[{}]", parent, tabs.children.len()))
+}
+
+pub(crate) fn parse_signed_twips(value: &str) -> Result<i64, HandlerError> {
+    if let Ok(twips) = value.parse::<i64>() {
+        return Ok(twips);
+    }
+    let parsed = if let Some(value) = value.strip_suffix("in") {
+        value.parse::<f64>().ok().map(|value| value * 1440.0)
+    } else if let Some(value) = value.strip_suffix("cm") {
+        value.parse::<f64>().ok().map(|value| value * 567.0)
+    } else if let Some(value) = value.strip_suffix("pt") {
+        value.parse::<f64>().ok().map(|value| value * 20.0)
+    } else {
+        None
+    };
+    parsed.map(|twips| twips.round() as i64).ok_or_else(|| {
+        HandlerError::InvalidArgument(format!(
+            "invalid tab position '{}'; use signed twips or a cm/in/pt value",
+            value
+        ))
+    })
+}
+
 /// Add a section break. Properties: orientation, pageWidth, pageHeight, margins
 fn add_section_break(
     dom: &mut WordDom,
@@ -2506,4 +3762,113 @@ fn add_sdt_run(
             .filter(|c| c.element_type == WordElementType::Sdt)
             .count()
     ))
+}
+
+#[cfg(test)]
+mod bookmark_end_tests {
+    use super::*;
+
+    fn document_with_bookmark_start() -> WordDom {
+        let start = WordNode::new(WordElementType::BookmarkStart)
+            .with_attribute("id", "7")
+            .with_attribute("name", "section");
+        let paragraph = WordNode::new(WordElementType::Paragraph).with_children(vec![start]);
+        WordDom::new(WordNode::new(WordElementType::Document).with_children(vec![
+            WordNode::new(WordElementType::Body).with_children(vec![paragraph]),
+        ]))
+    }
+
+    #[test]
+    fn standalone_bookmark_end_uses_explicit_id_or_existing_name() {
+        let mut by_id = document_with_bookmark_start();
+        let mut properties = HashMap::new();
+        properties.insert("id".to_string(), "9".to_string());
+        assert_eq!(
+            add_element(
+                &mut by_id,
+                "/body/p[1]",
+                "bookmarkEnd",
+                InsertPosition::Append,
+                &properties,
+                None,
+            )
+            .unwrap(),
+            "/body/p[1]/bookmarkEnd[@id=9]"
+        );
+
+        let mut by_name = document_with_bookmark_start();
+        let mut properties = HashMap::new();
+        properties.insert("name".to_string(), "section".to_string());
+        add_element(
+            &mut by_name,
+            "/body/p[1]",
+            "bookmarkEnd",
+            InsertPosition::Append,
+            &properties,
+            None,
+        )
+        .unwrap();
+        let paragraph = navigate_to_element(&by_name, "/body/p[1]").unwrap();
+        assert_eq!(
+            paragraph.children[1].element_type,
+            WordElementType::BookmarkEnd
+        );
+        assert_eq!(
+            paragraph.children[1].attributes.get("id"),
+            Some(&"7".to_string())
+        );
+    }
+
+    #[test]
+    fn tabstop_uses_paragraph_properties_without_replacing_inline_tab() {
+        let mut dom = WordDom::new(WordNode::new(WordElementType::Document).with_children(vec![
+                WordNode::new(WordElementType::Body).with_children(vec![
+                    WordNode::new(WordElementType::Paragraph),
+                ]),
+            ]));
+        let mut tabstop = HashMap::new();
+        tabstop.insert("pos".to_string(), "-1cm".to_string());
+        tabstop.insert("val".to_string(), "right".to_string());
+        tabstop.insert("leader".to_string(), "middleDot".to_string());
+        assert_eq!(
+            add_element(
+                &mut dom,
+                "/body/p[1]",
+                "tabstop",
+                InsertPosition::Append,
+                &tabstop,
+                None,
+            )
+            .unwrap(),
+            "/body/p[1]/tab[1]"
+        );
+        let paragraph = navigate_to_element(&dom, "/body/p[1]").unwrap();
+        let ppr = &paragraph.children[0];
+        let tab = &ppr.children[0].children[0];
+        assert_eq!(tab.attributes.get("pos"), Some(&"-567".to_string()));
+        assert_eq!(tab.attributes.get("leader"), Some(&"middledot".to_string()));
+
+        add_element(
+            &mut dom,
+            "/body/p[1]",
+            "tab",
+            InsertPosition::Append,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert!(paragraph_has_inline_tab(
+            navigate_to_element(&dom, "/body/p[1]").unwrap()
+        ));
+    }
+
+    fn paragraph_has_inline_tab(paragraph: &WordNode) -> bool {
+        paragraph.children.iter().any(|child| {
+            child.element_type == WordElementType::Run
+                && child
+                    .children
+                    .iter()
+                    .any(|child| child.element_type == WordElementType::Tab)
+        })
+    }
 }

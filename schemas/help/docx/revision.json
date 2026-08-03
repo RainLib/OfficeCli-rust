@@ -1,0 +1,22 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "revision",
+  "elementAliases": ["ins", "del", "moveTo", "moveFrom"],
+  "parent": "paragraph|run|table|row|cell",
+  "operations": { "add": false, "set": true, "get": true, "query": true, "remove": false },
+  "paths": {
+    "stable": ["/revision[@id=N]", "/revision[@id=N][@type=TYPE]"],
+    "positional": ["/revision[N]", "/body/p[N]/ins[M]", "/body/p[N]/del[M]"]
+  },
+  "note": "Existing w:ins/w:del/w:moveFrom/w:moveTo, paragraph-mark pPr/rPr ins/del, row-level trPr ins/del, cellIns/cellDel and supported *PrChange markers can be queried through synthetic /revision paths. revision.action=accept|reject supports synthetic and native marker paths; paragraph-mark actions join adjacent paragraphs where OOXML requires it, while row/cell actions remove the enclosing row/cell. add run creates ins/del/moveFrom/moveTo/format revisions; add paragraph supports ins/del/paraMarkIns/paraMarkDel/format; add row supports ins/del and add cell supports ins. set revision.type=format supports existing run, paragraph, table, row and cell paths and snapshots the former property container for reject; set row and cell support ins/del. set with find= supports literal/regex tracked replacement and literal/regex format revisions across consecutive ordinary runs, splitting exactly at the match boundary; a match that enters or crosses a hyperlink, field, drawing or non-text-run boundary fails explicitly. Move sides require the same revision.id and emit Word-compatible range markers.",
+  "properties": {
+    "type": { "type": "enum", "values": ["ins", "del", "moveTo", "moveFrom", "format"], "add": false, "set": false, "get": true, "enforcement": "report" },
+    "text": { "type": "string", "add": false, "set": false, "get": true, "enforcement": "report" },
+    "author": { "type": "string", "add": false, "set": false, "get": true, "enforcement": "report" },
+    "date": { "type": "string", "add": false, "set": false, "get": true, "enforcement": "report" },
+    "id": { "type": "int", "add": false, "set": false, "get": true, "enforcement": "report" },
+    "nativePath": { "type": "string", "add": false, "set": false, "get": true, "enforcement": "report" },
+    "action": { "type": "enum", "values": ["accept", "reject"], "add": false, "set": true, "get": false, "enforcement": "strict" }
+  }
+}

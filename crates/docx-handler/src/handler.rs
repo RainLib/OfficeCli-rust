@@ -10,6 +10,7 @@ use crate::mutations::{self, move_element, remove_element, set_properties, swap_
 use crate::navigation::{navigate_to_element, navigate_to_element_mut, parse_path};
 use crate::query::query_elements;
 use crate::raw::read_raw;
+use crate::revision;
 use crate::text_offset::extract_text_with_offsets;
 use crate::view::*;
 
@@ -103,7 +104,16 @@ impl WordHandler {
         for item in items {
             if matches!(
                 item.element_type.as_str(),
-                "image" | "drawing" | "picture" | "img" | "chart" | "chartSpace"
+                "image"
+                    | "drawing"
+                    | "picture"
+                    | "img"
+                    | "chart"
+                    | "chartSpace"
+                    | "shape"
+                    | "sp"
+                    | "textbox"
+                    | "txbx"
             ) {
                 results.push(Err(format!(
                     "batch add fast path does not support part-aware element type: {}",
@@ -328,6 +338,42 @@ impl DocumentHandler for WordHandler {
     }
 
     fn get(&self, path: &str, depth: usize) -> Result<DocumentNode, HandlerError> {
+        if path.starts_with("/revision") {
+            let dom = self.parse_dom()?;
+            return revision::get_revision(&dom, path);
+        }
+        if path == "/comments" || path.starts_with("/comments/") {
+            let package = self.package.borrow();
+            if path == "/comments" {
+                let comments = mutations::list_comments(&package)?;
+                let mut root = DocumentNode::new("/comments", "comments");
+                if depth > 0 {
+                    root =
+                        root.with_children(comments.iter().map(comment_to_document_node).collect());
+                }
+                return Ok(root);
+            }
+            if path.contains("]/") {
+                return mutations::get_comment_body_element(&package, path, depth);
+            }
+            return Ok(comment_to_document_node(&mutations::get_comment(
+                &package, path,
+            )?));
+        }
+        if path == "/numbering" || path.starts_with("/numbering/") {
+            let package = self.package.borrow();
+            return get_numbering_node(&package, path, depth);
+        }
+        if let Some((paragraph_path, tab_index)) = parse_tabstop_path(path) {
+            let dom = self.parse_dom()?;
+            return tabstop_to_document_node(&dom, path, &paragraph_path, tab_index);
+        }
+        if mutations::is_drawing_shape_path(path) {
+            return mutations::get_drawing_shape(&self.package.borrow(), path);
+        }
+        if mutations::is_drawing_group_path(path) {
+            return mutations::get_drawing_group(&self.package.borrow(), path);
+        }
         let dom = self.parse_dom()?;
 
         // Special case: root path "/" returns the document structure
@@ -400,6 +446,14 @@ impl DocumentHandler for WordHandler {
         }
 
         doc_node.child_count = node.children.len();
+
+        // Preserve readback for OOXML markers represented as generic DOM
+        // nodes (permission ranges and similar structural extensions).
+        if matches!(&node.element_type, WordElementType::Unknown(_)) {
+            for (key, value) in &node.attributes {
+                doc_node = doc_node.with_format(key, serde_json::Value::String(value.clone()));
+            }
+        }
 
         // Add format properties for paragraphs
         if node.element_type == WordElementType::Paragraph {
@@ -481,8 +535,61 @@ impl DocumentHandler for WordHandler {
     }
 
     fn query(&self, selector: &str) -> Result<Vec<DocumentNode>, HandlerError> {
+        let parsed = Selector::parse(selector)
+            .map_err(|e| HandlerError::InvalidArgument(format!("invalid selector: {}", e)))?;
+        if matches!(parsed.element_type.as_deref(), Some("comment" | "comments")) {
+            let package = self.package.borrow();
+            return Ok(mutations::list_comments(&package)?
+                .iter()
+                .filter(|comment| comment_matches_selector(comment, selector, &parsed))
+                .map(comment_to_document_node)
+                .collect());
+        }
+        if matches!(parsed.element_type.as_deref(), Some("revision")) {
+            let dom = self.parse_dom()?;
+            return Ok(revision::query_revisions(&dom, &parsed));
+        }
+        if matches!(
+            parsed.element_type.as_deref(),
+            Some("abstractNum" | "abstractnum" | "num")
+        ) {
+            let package = self.package.borrow();
+            let root = get_numbering_node(&package, "/numbering", 1)?;
+            let wanted_type = parsed.element_type.as_deref().unwrap();
+            let wanted_type = if wanted_type.eq_ignore_ascii_case("abstractnum") {
+                "abstractNum"
+            } else {
+                wanted_type
+            };
+            return Ok(root
+                .children
+                .into_iter()
+                .filter(|node| node.element_type == wanted_type)
+                .filter(|node| {
+                    parsed.attributes.iter().all(|(key, value)| {
+                        (key == "id" || key == "numId" || key == "abstractNumId")
+                            && node
+                                .format
+                                .get(key)
+                                .and_then(|value| value.as_ref())
+                                .and_then(|value| value.as_str())
+                                == Some(value)
+                    })
+                })
+                .collect());
+        }
         let dom = self.parse_dom()?;
-        query_elements(&dom, selector)
+        let mut results = query_elements(&dom, selector)?;
+        if matches!(
+            parsed.element_type.as_deref(),
+            Some("p" | "paragraph" | "r" | "run")
+        ) {
+            results.extend(mutations::query_comment_body_elements(
+                &self.package.borrow(),
+                selector,
+            )?);
+        }
+        Ok(results)
     }
 
     fn set(
@@ -505,6 +612,39 @@ impl DocumentHandler for WordHandler {
         // separate parts (word/styles.xml, comments.xml, footnotes.xml,
         // endnotes.xml). These need raw-package access, not the WordDom.
         let path_lc = path.trim().to_lowercase();
+        if properties.contains_key("revision.action") {
+            let mut dom = self.parse_dom()?;
+            let result = revision::apply_revision_action(&mut dom, path, properties)?;
+            self.write_dom(&dom)?;
+            return Ok(result);
+        }
+        if properties.contains_key("revision.type") && !properties.contains_key("find") {
+            let mut dom = self.parse_dom()?;
+            if properties
+                .get("revision.type")
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("format"))
+            {
+                let snapshot = crate::add::format_revision_snapshot(&dom, path)?;
+                let regular_properties: HashMap<String, String> = properties
+                    .iter()
+                    .filter(|(key, _)| !key.starts_with("revision."))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                if regular_properties.is_empty() {
+                    return Err(HandlerError::InvalidArgument(
+                        "revision.type=format requires at least one regular format property"
+                            .to_string(),
+                    ));
+                }
+                let result = set_properties(&mut dom, path, &regular_properties)?;
+                crate::add::mark_existing_format_revision(&mut dom, path, properties, snapshot)?;
+                self.write_dom(&dom)?;
+                return Ok(result);
+            }
+            let result = crate::add::wrap_existing_run_revision(&mut dom, path, properties)?;
+            self.write_dom(&dom)?;
+            return Ok(result);
+        }
         if path_lc.starts_with("/styles") {
             return mutations::set_style_on_part(&mut self.package.borrow_mut(), path, properties);
         }
@@ -513,6 +653,20 @@ impl DocumentHandler for WordHandler {
         }
         if path_lc.starts_with("/settings") {
             return mutations::set_settings_on_part(&mut self.package.borrow_mut(), properties);
+        }
+        if path_lc.starts_with("/numbering/") {
+            if parse_numbering_level_path(path).is_some() {
+                return mutations::set_numbering_level(
+                    &mut self.package.borrow_mut(),
+                    path,
+                    properties,
+                );
+            }
+            return mutations::set_numbering_definition(
+                &mut self.package.borrow_mut(),
+                path,
+                properties,
+            );
         }
         if path_lc.starts_with("/comments") || path_lc.contains("/comment[") {
             return mutations::set_comment_on_part(
@@ -537,6 +691,19 @@ impl DocumentHandler for WordHandler {
                 path,
                 properties,
             );
+        }
+        if mutations::is_drawing_shape_path(path) {
+            return mutations::set_drawing_shape(&mut self.package.borrow_mut(), path, properties);
+        }
+        if mutations::is_drawing_group_path(path) {
+            return mutations::set_drawing_group(&mut self.package.borrow_mut(), path, properties);
+        }
+        if let Some((paragraph_path, tab_index)) = parse_tabstop_path(path) {
+            let mut dom = self.parse_dom()?;
+            let unsupported =
+                set_tabstop_properties(&mut dom, &paragraph_path, tab_index, properties)?;
+            self.write_dom(&dom)?;
+            return Ok(unsupported);
         }
 
         let mut dom = self.parse_dom()?;
@@ -582,6 +749,45 @@ impl DocumentHandler for WordHandler {
                 properties,
             );
         }
+        if matches!(element_type, "shape" | "sp" | "textbox" | "txbx") {
+            return mutations::add_drawing_shape_part_aware(
+                &mut self.package.borrow_mut(),
+                parent,
+                element_type,
+                properties,
+            );
+        }
+        if matches!(element_type, "diagram" | "flowchart") {
+            return mutations::add_diagram_part_aware(
+                &mut self.package.borrow_mut(),
+                parent,
+                properties,
+            );
+        }
+        if matches!(element_type, "comment" | "comments") {
+            return mutations::add_comment_part_aware(
+                &mut self.package.borrow_mut(),
+                parent,
+                properties,
+            );
+        }
+        if parent.starts_with("/comments/comment[") {
+            return mutations::add_comment_body_element(
+                &mut self.package.borrow_mut(),
+                parent,
+                element_type,
+                position,
+                properties,
+            );
+        }
+        if matches!(element_type, "abstractNum" | "abstractnum" | "num") {
+            return mutations::add_numbering_definition(
+                &mut self.package.borrow_mut(),
+                parent,
+                element_type,
+                properties,
+            );
+        }
         let mut dom = self.parse_dom()?;
         let new_path = add_element(&mut dom, parent, element_type, position, properties, wrap)?;
         self.write_dom(&dom)?;
@@ -595,6 +801,28 @@ impl DocumentHandler for WordHandler {
             ));
         }
         handler_common::ensure_scoped(path, "remove")?;
+        if path.starts_with("/comments/") {
+            if path.contains("]/") {
+                mutations::remove_comment_body_element(&mut self.package.borrow_mut(), path)?;
+                return Ok(Some(path.to_string()));
+            }
+            mutations::remove_comment_part_aware(&mut self.package.borrow_mut(), path)?;
+            return Ok(None);
+        }
+        if mutations::is_drawing_shape_path(path) {
+            mutations::remove_drawing_shape(&mut self.package.borrow_mut(), path)?;
+            return Ok(Some(path.to_string()));
+        }
+        if mutations::is_drawing_group_path(path) {
+            mutations::remove_drawing_group(&mut self.package.borrow_mut(), path)?;
+            return Ok(Some(path.to_string()));
+        }
+        if let Some((paragraph_path, tab_index)) = parse_tabstop_path(path) {
+            let mut dom = self.parse_dom()?;
+            remove_tabstop(&mut dom, &paragraph_path, tab_index)?;
+            self.write_dom(&dom)?;
+            return Ok(Some(path.to_string()));
+        }
         let mut dom = self.parse_dom()?;
         let result = remove_element(&mut dom, path)?;
         self.write_dom(&dom)?;
@@ -671,7 +899,7 @@ impl DocumentHandler for WordHandler {
 
     fn raw(&self, part_path: &str, opts: RawOptions) -> Result<String, HandlerError> {
         let package = self.package.borrow();
-        read_raw(&package, part_path, opts)
+        read_raw(&package, normalize_docx_part_path(part_path), opts)
     }
 
     fn raw_set(
@@ -687,7 +915,27 @@ impl DocumentHandler for WordHandler {
             ));
         }
         let mut package = self.package.borrow_mut();
-        crate::raw::apply_raw_set(&mut package, part_path, xpath, action, xml)
+        if part_path.eq_ignore_ascii_case("/commentsExtended") {
+            if !action.eq_ignore_ascii_case("replace") {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "/commentsExtended supports only the 'replace' action (got '{action}')"
+                )));
+            }
+            let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {
+                HandlerError::InvalidArgument("/commentsExtended replace requires XML".to_string())
+            })?;
+            mutations::prepare_comments_extended_raw_replace(&mut package)?;
+            return package
+                .write_part_xml("word/commentsExtended.xml", replacement)
+                .map_err(|error| HandlerError::SaveError(error.to_string()));
+        }
+        crate::raw::apply_raw_set(
+            &mut package,
+            normalize_docx_part_path(part_path),
+            xpath,
+            action,
+            xml,
+        )
     }
 
     fn add_part(
@@ -779,12 +1027,25 @@ impl DocumentHandler for WordHandler {
         path: &str,
         dest: &str,
     ) -> Result<Option<BinaryInfo>, HandlerError> {
+        // Resolve a node's relationship first.  This is the normal CLI path
+        // (for example `/body/p[1]/drawing[1]`); `/image[N]` remains a
+        // compatibility shorthand for callers that enumerate media directly.
+        let relationship_id = if path.starts_with("/image[") || path.contains("image") {
+            None
+        } else {
+            let dom = self.parse_dom()?;
+            let node = navigate_to_element(&dom, path)?;
+            find_binary_relationship_id(node)
+        };
+
         // Resolve path to a part in the package (e.g. images are in word/media/)
         let pkg = self.package.borrow();
         let content_types = pkg.content_types();
 
         // Search for media parts matching the path hint
-        let media_path: Option<String> = if path.starts_with("/image") || path.contains("image") {
+        let media_path: Option<String> = if let Some(rel_id) = relationship_id {
+            resolve_document_relationship_target(&pkg, &rel_id)
+        } else if path.starts_with("/image") || path.contains("image") {
             // Try to find an image part in word/media/
             let parts = pkg.list_parts();
             // If path is like /image[N], find the Nth image
@@ -861,6 +1122,408 @@ impl DocumentHandler for WordHandler {
         let dom = self.parse_dom()?;
         extract_text_with_offsets(&dom)
     }
+}
+
+/// C# batch resources address a few Word package parts by logical names.
+/// Keep the physical part path accepted too, while accepting the logical names
+/// makes a commentsExtended round-trip portable across both implementations.
+fn normalize_docx_part_path(part_path: &str) -> &str {
+    match part_path {
+        "/comments" => "word/comments.xml",
+        "/commentsExtended" => "word/commentsExtended.xml",
+        _ => part_path,
+    }
+}
+
+/// Find the relationship id backing a picture/OLE/media descendant.  Parsed
+/// DOM attributes retain their local name, so both `r:embed` and `r:id` are
+/// represented as `embed`/`id` respectively.
+fn find_binary_relationship_id(node: &WordNode) -> Option<String> {
+    node.attributes
+        .get("embed")
+        .or_else(|| node.attributes.get("id"))
+        .filter(|value| value.starts_with("rId"))
+        .cloned()
+        .or_else(|| node.children.iter().find_map(find_binary_relationship_id))
+}
+
+/// Resolve a document.xml relationship to its package part.  OOXML targets
+/// are relative to `word/document.xml`, hence `media/image1.png` becomes
+/// `word/media/image1.png`.
+fn resolve_document_relationship_target(package: &OxmlPackage, rel_id: &str) -> Option<String> {
+    let rels = package.read_part_xml("word/_rels/document.xml.rels").ok()?;
+    let marker = format!("Id=\"{}\"", rel_id);
+    let relation_start = rels.find(&marker)?;
+    let relation = &rels[rels[..relation_start].rfind("<Relationship")?..];
+    let target_marker = "Target=\"";
+    let target_start = relation.find(target_marker)? + target_marker.len();
+    let target_end = relation[target_start..].find('"')? + target_start;
+    let target = &relation[target_start..target_end];
+    let normalized = target.trim_start_matches('/');
+    let part_path = if normalized.starts_with("word/") {
+        normalized.to_string()
+    } else {
+        format!("word/{}", normalized)
+    };
+    package.has_part(&part_path).then_some(part_path)
+}
+
+/// C# exposes paragraph tab stops through a flat path even though OOXML stores
+/// them below `w:pPr/w:tabs`.  Keep that public path stable while retaining
+/// the standard OOXML nesting internally.
+fn parse_tabstop_path(path: &str) -> Option<(String, usize)> {
+    let (paragraph_path, index) = path.rsplit_once("/tab[")?;
+    let index = index.strip_suffix(']')?.parse::<usize>().ok()?;
+    (index > 0 && paragraph_path.contains("/p[")).then(|| (paragraph_path.to_string(), index))
+}
+
+fn get_numbering_node(
+    package: &OxmlPackage,
+    path: &str,
+    depth: usize,
+) -> Result<DocumentNode, HandlerError> {
+    let xml = package
+        .read_part_xml("word/numbering.xml")
+        .map_err(|_| HandlerError::PathNotFound("numbering definition not found".to_string()))?;
+    let document = roxmltree::Document::parse(&xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid numbering.xml: {}", error))
+    })?;
+    if let Some((abstract_id, level)) = parse_numbering_level_path(path) {
+        let level_node = document
+            .root_element()
+            .children()
+            .find(|node| {
+                node.has_tag_name((W_NS, "abstractNum"))
+                    && node.attribute((W_NS, "abstractNumId")) == Some(abstract_id.as_str())
+            })
+            .and_then(|abstract_num| {
+                abstract_num.children().find(|node| {
+                    node.has_tag_name((W_NS, "lvl"))
+                        && node.attribute((W_NS, "ilvl")) == Some(level.as_str())
+                })
+            })
+            .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+        let mut result =
+            DocumentNode::new(path, "level").with_format("ilvl", serde_json::Value::String(level));
+        if let Some(format) = level_node
+            .children()
+            .find(|node| node.has_tag_name((W_NS, "numFmt")))
+            .and_then(|node| node.attribute((W_NS, "val")))
+        {
+            result = result.with_format("format", serde_json::Value::String(format.to_string()));
+        }
+        if let Some(text) = level_node
+            .children()
+            .find(|node| node.has_tag_name((W_NS, "lvlText")))
+            .and_then(|node| node.attribute((W_NS, "val")))
+        {
+            result = result.with_format("text", serde_json::Value::String(text.to_string()));
+        }
+        return Ok(result);
+    }
+    let defs: Vec<DocumentNode> = document
+        .root_element()
+        .children()
+        .filter(|node| node.is_element())
+        .filter_map(|node| match node.tag_name().name() {
+            "abstractNum" => node.attribute((W_NS, "abstractNumId")).map(|id| {
+                DocumentNode::new(
+                    &format!("/numbering/abstractNum[@id={}]", id),
+                    "abstractNum",
+                )
+                .with_format("id", serde_json::Value::String(id.to_string()))
+                .with_format(
+                    "levelCount",
+                    serde_json::Value::from(
+                        node.children()
+                            .filter(|child| child.has_tag_name("lvl"))
+                            .count(),
+                    ),
+                )
+            }),
+            "num" => node.attribute((W_NS, "numId")).map(|id| {
+                let mut item = DocumentNode::new(&format!("/numbering/num[@id={}]", id), "num")
+                    .with_format("id", serde_json::Value::String(id.to_string()))
+                    .with_format("numId", serde_json::Value::String(id.to_string()));
+                if let Some(abstract_id) = node
+                    .children()
+                    .find(|child| child.has_tag_name("abstractNumId"))
+                    .and_then(|child| child.attribute((W_NS, "val")))
+                {
+                    item = item.with_format(
+                        "abstractNumId",
+                        serde_json::Value::String(abstract_id.to_string()),
+                    );
+                }
+                for override_node in node
+                    .children()
+                    .filter(|child| child.has_tag_name("lvlOverride"))
+                {
+                    if let (Some(level), Some(start)) = (
+                        override_node.attribute((W_NS, "ilvl")),
+                        override_node
+                            .children()
+                            .find(|child| child.has_tag_name("startOverride"))
+                            .and_then(|child| child.attribute((W_NS, "val"))),
+                    ) {
+                        item = item.with_format(
+                            &format!("startOverride.{}", level),
+                            serde_json::Value::String(start.to_string()),
+                        );
+                    }
+                }
+                item
+            }),
+            _ => None,
+        })
+        .collect();
+    if path == "/numbering" {
+        let mut root = DocumentNode::new("/numbering", "numbering");
+        if depth > 0 {
+            root = root.with_children(defs);
+        }
+        return Ok(root);
+    }
+    defs.into_iter()
+        .find(|item| item.path == path)
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))
+}
+
+fn parse_numbering_level_path(path: &str) -> Option<(String, String)> {
+    let remaining = path.strip_prefix("/numbering/abstractNum[@id=")?;
+    let (id, remaining) = remaining.split_once("]/level[")?;
+    let level = remaining.strip_suffix(']')?;
+    (level
+        .parse::<u8>()
+        .ok()
+        .filter(|level| *level <= 8)
+        .is_some())
+    .then(|| (id.to_string(), level.to_string()))
+}
+
+fn tabstop_to_document_node(
+    dom: &WordDom,
+    path: &str,
+    paragraph_path: &str,
+    index: usize,
+) -> Result<DocumentNode, HandlerError> {
+    let paragraph = navigate_to_element(dom, paragraph_path)?;
+    if paragraph.element_type != WordElementType::Paragraph {
+        return Err(HandlerError::PathNotFound(format!(
+            "tab stop parent '{}' is not a paragraph",
+            paragraph_path
+        )));
+    }
+    let tab = paragraph
+        .children
+        .iter()
+        .find(|child| child.element_type == WordElementType::ParagraphProperties)
+        .and_then(|ppr| {
+            ppr.children.iter().find(|child| {
+                matches!(&child.element_type, WordElementType::Unknown(name) if name == "tabs")
+            })
+        })
+        .and_then(|tabs| {
+            tabs.children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::TabStop)
+                .nth(index - 1)
+        })
+        .ok_or_else(|| HandlerError::PathNotFound(format!("tab stop '{}' not found", path)))?;
+
+    let mut node = DocumentNode::new(path, "tab");
+    for key in ["pos", "val", "leader"] {
+        if let Some(value) = tab.attributes.get(key) {
+            node = node.with_format(key, serde_json::Value::String(value.clone()));
+        }
+    }
+    Ok(node)
+}
+
+fn tabstop_mut<'a>(
+    dom: &'a mut WordDom,
+    paragraph_path: &str,
+    index: usize,
+) -> Result<&'a mut WordNode, HandlerError> {
+    let paragraph = navigate_to_element_mut(dom, paragraph_path)?;
+    let ppr = paragraph
+        .children
+        .iter_mut()
+        .find(|child| child.element_type == WordElementType::ParagraphProperties)
+        .ok_or_else(|| HandlerError::PathNotFound("paragraph has no tab stops".to_string()))?;
+    let tabs = ppr
+        .children
+        .iter_mut()
+        .find(
+            |child| matches!(&child.element_type, WordElementType::Unknown(name) if name == "tabs"),
+        )
+        .ok_or_else(|| HandlerError::PathNotFound("paragraph has no tab stops".to_string()))?;
+    tabs.children
+        .iter_mut()
+        .filter(|child| child.element_type == WordElementType::TabStop)
+        .nth(index - 1)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("tab stop {} not found", index)))
+}
+
+fn set_tabstop_properties(
+    dom: &mut WordDom,
+    paragraph_path: &str,
+    index: usize,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let tab = tabstop_mut(dom, paragraph_path, index)?;
+    let mut unsupported = Vec::new();
+    for (key, value) in properties {
+        match key.as_str() {
+            "pos" | "position" => {
+                tab.attributes.insert(
+                    "pos".to_string(),
+                    crate::add::parse_signed_twips(value)?.to_string(),
+                );
+            }
+            "val" | "type" => {
+                let value = value.to_lowercase();
+                if !matches!(
+                    value.as_str(),
+                    "left"
+                        | "center"
+                        | "right"
+                        | "decimal"
+                        | "bar"
+                        | "clear"
+                        | "num"
+                        | "start"
+                        | "end"
+                ) {
+                    return Err(HandlerError::InvalidArgument(format!(
+                        "invalid tab val '{}'",
+                        value
+                    )));
+                }
+                tab.attributes.insert("val".to_string(), value);
+            }
+            "leader" => {
+                let value = value.to_lowercase();
+                if !matches!(
+                    value.as_str(),
+                    "none" | "dot" | "heavy" | "hyphen" | "middledot" | "underscore"
+                ) {
+                    return Err(HandlerError::InvalidArgument(format!(
+                        "invalid tab leader '{}'",
+                        value
+                    )));
+                }
+                tab.attributes.insert("leader".to_string(), value);
+            }
+            _ => unsupported.push(key.clone()),
+        }
+    }
+    Ok(unsupported)
+}
+
+fn remove_tabstop(
+    dom: &mut WordDom,
+    paragraph_path: &str,
+    index: usize,
+) -> Result<(), HandlerError> {
+    let paragraph = navigate_to_element_mut(dom, paragraph_path)?;
+    let ppr = paragraph
+        .children
+        .iter_mut()
+        .find(|child| child.element_type == WordElementType::ParagraphProperties)
+        .ok_or_else(|| HandlerError::PathNotFound("paragraph has no tab stops".to_string()))?;
+    let tabs = ppr
+        .children
+        .iter_mut()
+        .find(
+            |child| matches!(&child.element_type, WordElementType::Unknown(name) if name == "tabs"),
+        )
+        .ok_or_else(|| HandlerError::PathNotFound("paragraph has no tab stops".to_string()))?;
+    let child_index = tabs
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.element_type == WordElementType::TabStop)
+        .nth(index - 1)
+        .map(|(index, _)| index)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("tab stop {} not found", index)))?;
+    tabs.children.remove(child_index);
+    Ok(())
+}
+
+fn comment_to_document_node(comment: &mutations::DocxComment) -> DocumentNode {
+    let mut node = DocumentNode::new(
+        &format!("/comments/comment[@commentId={}]", comment.id),
+        "comment",
+    )
+    .with_text(&comment.text)
+    .with_preview(&comment.text)
+    .with_format("id", serde_json::Value::String(comment.id.clone()));
+    if let Some(author) = &comment.author {
+        node = node.with_format("author", serde_json::Value::String(author.clone()));
+    }
+    if let Some(initials) = &comment.initials {
+        node = node.with_format("initials", serde_json::Value::String(initials.clone()));
+    }
+    if let Some(date) = &comment.date {
+        node = node.with_format("date", serde_json::Value::String(date.clone()));
+    }
+    if let Some(anchor) = &comment.anchor {
+        node = node.with_format("anchoredTo", serde_json::Value::String(anchor.clone()));
+    }
+    if let Some(parent_id) = &comment.parent_id {
+        node = node.with_format("parentId", serde_json::Value::String(parent_id.clone()));
+    }
+    node = node.with_format("done", serde_json::Value::Bool(comment.done));
+    node
+}
+
+fn comment_matches_selector(
+    comment: &mutations::DocxComment,
+    raw_selector: &str,
+    selector: &Selector,
+) -> bool {
+    let mut values = HashMap::new();
+    values.insert("id", comment.id.as_str());
+    values.insert("commentId", comment.id.as_str());
+    if let Some(author) = &comment.author {
+        values.insert("author", author.as_str());
+    }
+    if let Some(initials) = &comment.initials {
+        values.insert("initials", initials.as_str());
+    }
+    if let Some(date) = &comment.date {
+        values.insert("date", date.as_str());
+    }
+    let done = if comment.done { "true" } else { "false" };
+    values.insert("done", done);
+    values.insert("resolved", done);
+    if let Some(parent_id) = &comment.parent_id {
+        values.insert("parentId", parent_id.as_str());
+    }
+    for (key, value) in &selector.attributes {
+        if values.get(key.as_str()).copied() != Some(value.as_str()) {
+            return false;
+        }
+    }
+    for filter in &selector.style_shorthands {
+        if let Some((key, value)) = filter.split_once('=') {
+            if values.get(key).copied() != Some(value) {
+                return false;
+            }
+        }
+    }
+    if let Some(needle) = raw_selector
+        .split(":contains(")
+        .nth(1)
+        .and_then(|tail| tail.strip_suffix(')'))
+    {
+        let needle = needle.trim_matches(|c| c == '\'' || c == '"');
+        if !comment.text.contains(needle) {
+            return false;
+        }
+    }
+    true
 }
 
 fn apply_docx_range_highlights(
@@ -1500,7 +2163,7 @@ fn merge_run_properties(run: &mut WordNode, format_props: &HashMap<String, Strin
 // XML Parsing: Parse document.xml into WordDom tree using roxmltree
 // ============================================================
 
-fn parse_document_xml(xml: &str) -> Result<WordDom, HandlerError> {
+pub(crate) fn parse_document_xml(xml: &str) -> Result<WordDom, HandlerError> {
     let doc = roxmltree::Document::parse(xml)
         .map_err(|e| HandlerError::OperationFailed(format!("XML parse error: {}", e)))?;
 
@@ -1515,7 +2178,15 @@ fn build_node_from_roxmltree(node: roxmltree::Node) -> WordNode {
     let ns = node.tag_name().namespace().unwrap_or("");
 
     let element_type = if ns == W_NS || ns.is_empty() {
-        WordElementType::from_local_name(local_name)
+        if local_name == "tab"
+            && node
+                .parent()
+                .is_some_and(|parent| parent.tag_name().name() == "tabs")
+        {
+            WordElementType::TabStop
+        } else {
+            WordElementType::from_local_name(local_name)
+        }
     } else if local_name == "inline"
         && ns.starts_with("http://schemas.openxmlformats.org/drawingml")
     {
@@ -1596,7 +2267,7 @@ fn build_node_from_roxmltree(node: roxmltree::Node) -> WordNode {
 // XML Serialization: Serialize WordDom back to XML string
 // ============================================================
 
-fn serialize_dom(dom: &WordDom) -> String {
+pub(crate) fn serialize_dom(dom: &WordDom) -> String {
     let mut output =
         String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
     serialize_node_to_string(&mut output, &dom.root, true);

@@ -250,6 +250,11 @@ pub fn resolve_element_type_from_name(name: &str) -> WordElementType {
 /// Check if a node matches the target type and optional attribute filter.
 fn element_matches_type(node: &WordNode, target: &WordElementType, seg: &PathSegment) -> bool {
     if node.element_type != *target {
+        if matches!(target, WordElementType::Tab)
+            && matches!(node.element_type, WordElementType::TabStop)
+        {
+            return true;
+        }
         // Also match Unknown by name
         if let WordElementType::Unknown(ref name) = node.element_type {
             if name != &seg.name {

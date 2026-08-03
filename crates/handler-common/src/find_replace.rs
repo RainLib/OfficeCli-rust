@@ -33,15 +33,32 @@ pub struct FindReplaceOptions {
 
 /// Find all byte offsets where `find` occurs in `text`, honoring case sensitivity.
 pub fn find_all_offsets(text: &str, find: &str, opts: &FindReplaceOptions) -> Vec<usize> {
+    find_all_spans(text, find, opts)
+        .into_iter()
+        .map(|(start, _)| start)
+        .collect()
+}
+
+/// Find complete byte spans for every match. Unlike `find_all_offsets`, this
+/// preserves the end boundary required by structure-aware editors that split
+/// runs before replacing or tracking a match.
+pub fn find_all_spans(text: &str, find: &str, opts: &FindReplaceOptions) -> Vec<(usize, usize)> {
     if find.is_empty() {
         return Vec::new();
     }
 
     if opts.use_regex {
-        return find_all_offsets_regex(text, find, opts).unwrap_or_default();
+        return compile_find_regex(find, opts)
+            .map(|regex| {
+                regex
+                    .find_iter(text)
+                    .map(|m| (m.start(), m.end()))
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
-    let mut offsets = Vec::new();
+    let mut spans = Vec::new();
 
     if opts.case_insensitive {
         let text_lower = text.to_lowercase();
@@ -50,7 +67,7 @@ pub fn find_all_offsets(text: &str, find: &str, opts: &FindReplaceOptions) -> Ve
         while let Some(pos) = text_lower[start..].find(&find_lower) {
             let abs = start + pos;
             if !opts.whole_word || is_word_boundary(text, abs, abs + find.len()) {
-                offsets.push(abs);
+                spans.push((abs, abs + find.len()));
             }
             start = abs + find.len();
             if start >= text.len() {
@@ -62,7 +79,7 @@ pub fn find_all_offsets(text: &str, find: &str, opts: &FindReplaceOptions) -> Ve
         while let Some(pos) = text[start..].find(find) {
             let abs = start + pos;
             if !opts.whole_word || is_word_boundary(text, abs, abs + find.len()) {
-                offsets.push(abs);
+                spans.push((abs, abs + find.len()));
             }
             start = abs + find.len();
             if start >= text.len() {
@@ -70,7 +87,43 @@ pub fn find_all_offsets(text: &str, find: &str, opts: &FindReplaceOptions) -> Ve
             }
         }
     }
-    offsets
+    spans
+}
+
+/// Return each non-empty match together with the text that should replace it.
+/// Regex replacements expand `$1`, `${name}`, and `$$` against that individual
+/// match, which structure-aware handlers need when they emit one OOXML change
+/// record per match rather than replacing a whole string at once.
+pub fn find_all_replacements(
+    text: &str,
+    find: &str,
+    replace: &str,
+    opts: &FindReplaceOptions,
+) -> Result<Vec<(usize, usize, String)>, regex::Error> {
+    if find.is_empty() {
+        return Ok(Vec::new());
+    }
+    let max = opts.max_replacements.unwrap_or(usize::MAX);
+    if opts.use_regex {
+        let regex = compile_find_regex(find, opts)?;
+        return Ok(regex
+            .captures_iter(text)
+            .filter_map(|captures| {
+                let matched = captures.get(0)?;
+                (matched.start() < matched.end()).then(|| {
+                    let mut expanded = String::new();
+                    expand_replacement(&captures, replace, &mut expanded);
+                    (matched.start(), matched.end(), expanded)
+                })
+            })
+            .take(max)
+            .collect());
+    }
+    Ok(find_all_spans(text, find, opts)
+        .into_iter()
+        .take(max)
+        .map(|(start, end)| (start, end, replace.to_string()))
+        .collect())
 }
 
 /// Compile `find` as a regex with the given options. Returns the compiled regex
@@ -84,17 +137,6 @@ pub fn compile_find_regex(find: &str, opts: &FindReplaceOptions) -> Result<Regex
     RegexBuilder::new(&pattern)
         .case_insensitive(opts.case_insensitive)
         .build()
-}
-
-/// Regex variant of `find_all_offsets`. Returns byte offsets of the start of each
-/// match. Errors surface as None so callers can fall back to the literal path.
-fn find_all_offsets_regex(
-    text: &str,
-    find: &str,
-    opts: &FindReplaceOptions,
-) -> Result<Vec<usize>, regex::Error> {
-    let re = compile_find_regex(find, opts)?;
-    Ok(re.find_iter(text).map(|m| m.start()).collect())
 }
 
 /// Check if the byte range [start, end) is surrounded by word boundaries
@@ -326,6 +368,34 @@ mod tests {
         assert_eq!(offsets, vec![0, 12]);
         let offsets = find_all_offsets(text, "world", &opts);
         assert_eq!(offsets, vec![6, 18]);
+    }
+
+    #[test]
+    fn test_find_all_spans_literal_and_regex() {
+        assert_eq!(
+            find_all_spans("pre old post old", "old", &FindReplaceOptions::default()),
+            vec![(4, 7), (13, 16)]
+        );
+        let regex = FindReplaceOptions {
+            use_regex: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            find_all_spans("a1b22", "[0-9]+", &regex),
+            vec![(1, 2), (3, 5)]
+        );
+    }
+
+    #[test]
+    fn test_find_all_replacements_expands_regex_captures() {
+        let opts = FindReplaceOptions {
+            use_regex: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            find_all_replacements("item-42", r"(\w+)-(\d+)", "$2:$1", &opts).unwrap(),
+            vec![(0, 7, "42:item".to_string())]
+        );
     }
 
     #[test]

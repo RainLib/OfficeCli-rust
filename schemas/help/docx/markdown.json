@@ -1,0 +1,32 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "markdown",
+  "elementAliases": ["md"],
+  "parent": "body",
+  "operations": { "add": true, "set": false, "get": false, "query": false, "remove": false },
+  "paths": { "positional": ["/body"] },
+  "note": "Expands Markdown into ordinary editable Word paragraphs, runs and tables; add returns the first emitted block path. Implemented blocks: ATX headings, blank-line paragraphs, unordered and ordered list items, blockquotes, thematic breaks, fenced code blocks and GFM pipe tables. Inline **bold**, *italic*, ~~strike~~ and `code` become independently editable runs. The generated nodes can be addressed with normal /body/p[N] and /body/tbl[N] paths. Links/images and nested inline forms remain pending.",
+  "properties": {
+    "markdown": {
+      "type": "string",
+      "description": "Markdown source text. Aliases: text, md. Use literal newlines between blocks.",
+      "aliases": ["text", "md"],
+      "add": true,
+      "set": false,
+      "get": false,
+      "examples": ["--prop markdown=$'# Title\\n\\n- one\\n- two'"],
+      "enforcement": "report"
+    },
+    "src": {
+      "type": "string",
+      "description": "Path to a UTF-8 Markdown source file. Alias: path.",
+      "aliases": ["path"],
+      "add": true,
+      "set": false,
+      "get": false,
+      "examples": ["--prop src=README.md"],
+      "enforcement": "report"
+    }
+  }
+}

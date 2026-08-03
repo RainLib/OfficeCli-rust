@@ -1,0 +1,28 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "bookmarkEnd",
+  "parent": "body|paragraph|table-cell",
+  "operations": { "add": true, "set": false, "get": true, "query": true, "remove": true },
+  "paths": {
+    "stable": ["/bookmarkEnd[@id=N]"],
+    "positional": ["/bookmarkEnd[N]", "/body/p[N]/bookmarkEnd[M]"]
+  },
+  "note": "Standalone bookmark close marker (<w:bookmarkEnd w:id=N>). Use add bookmark for the usual paired start/end operation; add bookmarkEnd only when an independently placed end marker is required.",
+  "properties": {
+    "id": {
+      "type": "number",
+      "description": "Bookmark id to close. Required unless name is supplied.",
+      "add": true,
+      "get": true,
+      "enforcement": "strict"
+    },
+    "name": {
+      "type": "string",
+      "description": "Resolve the id from the last matching bookmarkStart. Ignored when id is supplied.",
+      "add": true,
+      "get": false,
+      "enforcement": "strict"
+    }
+  }
+}

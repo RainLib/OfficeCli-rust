@@ -17,12 +17,29 @@ pub fn query_elements(
         .body()
         .ok_or_else(|| HandlerError::OperationFailed("body element not found".to_string()))?;
 
+    Ok(query_subtree_with_selector(body, &selector, "/body"))
+}
+
+/// Query a WordprocessingML subtree that lives outside document.xml (for
+/// example a comment body) using the same selector matcher as the main body.
+pub fn query_subtree(
+    root: &crate::dom_types::WordNode,
+    selector_str: &str,
+    path_prefix: &str,
+) -> Result<Vec<DocumentNode>, HandlerError> {
+    let selector = Selector::parse(selector_str)
+        .map_err(|e| HandlerError::InvalidArgument(format!("invalid selector: {}", e)))?;
+    Ok(query_subtree_with_selector(root, &selector, path_prefix))
+}
+
+fn query_subtree_with_selector(
+    root: &crate::dom_types::WordNode,
+    selector: &Selector,
+    path_prefix: &str,
+) -> Vec<DocumentNode> {
     let mut results = Vec::new();
-
-    // Search through the entire body tree
-    walk_and_match(body, &selector, "/body", &mut results, 0);
-
-    Ok(results)
+    walk_and_match(root, selector, path_prefix, &mut results, 0);
+    results
 }
 
 /// Walk the DOM tree and collect matching elements.

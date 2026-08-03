@@ -13,7 +13,7 @@
   "paths": {
     "positional": ["/body/p[N]/ins[M]", "/body/p[N]/del[M]"]
   },
-  "note": "Raw revision element. Type selector routes to w:ins / w:del / w:moveTo / w:moveFrom. Tracked revisions are authored by Word itself (File -> Options -> Track Changes). CLI exposes read-only access: use `query revision` or `get /body/p[N]/ins[M]`. Handler also accepts bulk aliases (trackedchanges, acceptallchanges, rejectallchanges, acceptchanges, rejectchanges) for read/query.",
+  "note": "Legacy raw-marker schema retained for Rust compatibility. Prefer revision.json: it documents synthetic `query revision`, stable /revision paths and revision.action=accept|reject. Native marker paths such as /body/p[N]/ins[M] remain supported.",
   "properties": {
     "type": {
       "type": "enum",

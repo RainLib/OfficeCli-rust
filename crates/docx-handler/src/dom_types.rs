@@ -9,7 +9,8 @@ pub enum WordElementType {
     Run,                 // w:r
     Text,                // w:t
     Break,               // w:br
-    Tab,                 // w:tab
+    Tab,                 // inline w:tab in a run
+    TabStop,             // w:tab below w:pPr/w:tabs
     ParagraphMark,       // w:pPr placeholder
     RunProperties,       // w:rPr
     ParagraphProperties, // w:pPr
@@ -99,6 +100,7 @@ impl WordElementType {
             Self::Text => "t",
             Self::Break => "br",
             Self::Tab => "tab",
+            Self::TabStop => "tab",
             Self::ParagraphProperties => "pPr",
             Self::RunProperties => "rPr",
             Self::Table => "tbl",
@@ -149,6 +151,7 @@ impl WordElementType {
             Self::Drawing => "drawing",
             Self::Break => "br",
             Self::Tab => "tab",
+            Self::TabStop => "tab",
             Self::BookmarkStart => "bookmarkStart",
             Self::BookmarkEnd => "bookmarkEnd",
             Self::FootnoteReference => "footnoteRef",

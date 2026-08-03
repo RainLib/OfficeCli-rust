@@ -693,6 +693,39 @@
       "readback": "font family name",
       "enforcement": "report"
     },
+    "revision.type": {
+      "type": "enum",
+      "values": ["ins", "del", "moveTo", "moveFrom", "format"],
+      "description": "Create a tracked insertion, deletion, move source/destination, or run-format revision. move sides require the same explicit revision.id and emit paired range markers; format requires a supported run-format property.",
+      "add": true,
+      "set": false,
+      "get": false,
+      "enforcement": "strict"
+    },
+    "revision.author": {
+      "type": "string",
+      "description": "Tracked-change author for add run; defaults to OfficeCLI.",
+      "add": true,
+      "set": false,
+      "get": false,
+      "enforcement": "strict"
+    },
+    "revision.date": {
+      "type": "string",
+      "description": "Optional ISO-8601 timestamp written on an inserted or deleted run.",
+      "add": true,
+      "set": false,
+      "get": false,
+      "enforcement": "strict"
+    },
+    "revision.id": {
+      "type": "int",
+      "description": "Optional non-negative revision id; allocated automatically when omitted.",
+      "add": true,
+      "set": false,
+      "get": false,
+      "enforcement": "strict"
+    },
     "font.hAnsi": {
       "type": "string",
       "add": false,

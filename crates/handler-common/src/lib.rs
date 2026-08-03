@@ -21,8 +21,8 @@ pub use document_handler::{DocumentHandler, HandlerError, MergeResult};
 pub use document_issue::{DocumentIssue, IssueSeverity};
 pub use document_node::DocumentNode;
 pub use find_replace::{
-    extract_find_replace_props, find_all_offsets, find_replace_property_keys, replace_in_string,
-    FindReplaceOptions, FindReplaceResult,
+    extract_find_replace_props, find_all_offsets, find_all_replacements, find_all_spans,
+    find_replace_property_keys, replace_in_string, FindReplaceOptions, FindReplaceResult,
 };
 pub use insert_position::InsertPosition;
 pub use mutation_selector_guard::{ensure_scoped, ensure_scoped_or_known_global};

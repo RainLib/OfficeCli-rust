@@ -57,6 +57,7 @@ tempfile = "3"
 
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # Legacy Office format conversion
 office_oxide = { version = "0.1.2" }

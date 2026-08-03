@@ -1,0 +1,22 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "textbox",
+  "elementAliases": ["txbx"],
+  "parent": "body",
+  "operations": {"add": true, "set": true, "get": true, "query": false, "remove": true},
+  "paths": {"positional": ["/body/textbox[N]"]},
+  "note": "Floating DrawingML text box (wps:wsp with wps:txbx). Text is supplied at Add time. Get reads text, geometry and dimensions. Set shares the editable shape-property surface; to change body text or anchor settings, remove and add a replacement text box.",
+  "properties": {
+    "text": {"type": "string", "description": "Initial text in the box body.", "add": true, "examples": ["--properties text=Sidebar"]},
+    "geometry": {"type": "string", "aliases": ["shape", "preset"], "default": "rect", "add": true, "set": true},
+    "width": {"type": "length", "add": true, "set": true, "examples": ["--properties width=6cm"]},
+    "height": {"type": "length", "add": true, "set": true, "examples": ["--properties height=3cm"]},
+    "fill": {"type": "color", "aliases": ["fillcolor"], "add": true, "set": true},
+    "line": {"type": "string", "description": "Outline STYLE;SIZE;COLOR, or none.", "add": true, "set": true},
+    "wrap": {"type": "enum", "values": ["square", "none", "tight", "through", "topAndBottom", "behind", "front"], "default": "square", "add": true},
+    "anchor.x": {"type": "length", "aliases": ["hposition"], "add": true},
+    "anchor.y": {"type": "length", "aliases": ["vposition"], "add": true},
+    "alt": {"type": "string", "aliases": ["name"], "add": true}
+  }
+}

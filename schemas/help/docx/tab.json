@@ -1,0 +1,38 @@
+{
+  "$schema": "../_schema.json",
+  "format": "docx",
+  "element": "tab",
+  "elementAliases": ["tabstop"],
+  "parent": "paragraph",
+  "operations": { "add": true, "set": true, "get": true, "query": false, "remove": true },
+  "paths": { "positional": ["/body/p[N]/tab[K]", "/body/p[@paraId=X]/tab[K]"] },
+  "note": "Paragraph tab stop (w:tab inside w:pPr/w:tabs). `add tabstop` is explicit; `add tab` with pos, val, leader, or position also creates a tab stop. Rust retains its existing no-property `add tab` behavior for creating an inline tab character.",
+  "properties": {
+    "pos": {
+      "type": "length",
+      "aliases": ["position"],
+      "description": "Required tab stop position; accepts signed twips or cm/in/pt values.",
+      "add": true,
+      "set": true,
+      "get": true,
+      "enforcement": "strict"
+    },
+    "val": {
+      "type": "enum",
+      "aliases": ["type"],
+      "values": ["left", "center", "right", "decimal", "bar", "clear", "num", "start", "end"],
+      "add": true,
+      "set": true,
+      "get": true,
+      "enforcement": "strict"
+    },
+    "leader": {
+      "type": "enum",
+      "values": ["none", "dot", "heavy", "hyphen", "middleDot", "underscore"],
+      "add": true,
+      "set": true,
+      "get": true,
+      "enforcement": "strict"
+    }
+  }
+}

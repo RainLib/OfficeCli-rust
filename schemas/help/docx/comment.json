@@ -16,13 +16,17 @@
   },
   "paths": {
     "stable": [
-      "/comments/comment[@commentId=N]"
+      "/comments/comment[@commentId=N]",
+      "/comments/comment[@commentId=N]/p[N]",
+      "/comments/comment[@commentId=N]/p[N]/r[N]"
     ],
     "positional": [
-      "/comments/comment[N]"
+      "/comments/comment[N]",
+      "/comments/comment[N]/p[N]",
+      "/comments/comment[N]/p[N]/r[N]"
     ]
   },
-  "note": "Comments live in WordprocessingCommentsPart. Anchor: CommentRangeStart/End surround the target run or paragraph; CommentReference marks the inline anchor.",
+  "note": "Comments live in WordprocessingCommentsPart. Anchor: CommentRangeStart/End surround the target run or paragraph; CommentReference marks the inline anchor. Comment p/r paths support get, path-scoped set, add paragraph/run and remove paragraph/run. Global paragraph/run selectors also include matching comment-body nodes and return stable comment paths. Use raw /commentsExtended (or word/commentsExtended.xml) to preserve modern reply/resolved metadata.",
   "extends": [
     "_shared/comment",
     "_shared/comment.docx-pptx"
@@ -57,6 +61,46 @@
         "--prop runStart=2"
       ],
       "readback": "n/a (encoded inline; surfaces via anchoredTo path)",
+      "enforcement": "report"
+    },
+    "range": {
+      "type": "bool",
+      "description": "Whether the comment spans a range (default true). Pass range=false or pointRef=true for a zero-width reference-only comment; range=none creates only the comment definition for raw/dump replay.",
+      "aliases": ["pointRef", "pointref"],
+      "add": true,
+      "set": false,
+      "get": false,
+      "examples": [
+        "--prop range=false",
+        "--prop pointRef=true"
+      ],
+      "readback": "n/a (encoded inline)",
+      "enforcement": "report"
+    },
+    "parentId": {
+      "type": "number",
+      "description": "w:id of the comment this one replies to. Stored as w15:paraIdParent in word/commentsExtended.xml.",
+      "aliases": ["parentid"],
+      "add": true,
+      "set": false,
+      "get": true,
+      "examples": [
+        "--prop parentId=1"
+      ],
+      "readback": "parent comment w:id (replies only)",
+      "enforcement": "report"
+    },
+    "done": {
+      "type": "bool",
+      "description": "Resolved state, stored as w15:done in word/commentsExtended.xml.",
+      "aliases": ["resolved"],
+      "add": true,
+      "set": true,
+      "get": true,
+      "examples": [
+        "--prop done=true"
+      ],
+      "readback": "true|false",
       "enforcement": "report"
     }
   }
