@@ -14,7 +14,11 @@ pub struct AddCommand {
 
     /// Element type to add
     #[arg(long)]
-    pub type_name: String,
+    pub type_name: Option<String>,
+
+    /// Copy from an existing element path instead of creating a new element.
+    #[arg(long)]
+    pub from: Option<String>,
 
     /// Position: index number, "after:/path", or "before:/path"
     #[arg(long)]
@@ -44,18 +48,36 @@ pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, Handl
     let position = parse_position(cmd.position.as_deref());
     let mut properties = parse_properties(&cmd.properties);
 
+    if cmd.type_name.is_none() && cmd.from.is_none() {
+        return Err(HandlerError::InvalidArgument(
+            "Either --type-name or --from must be specified.".to_string(),
+        ));
+    }
+    if cmd.from.is_some() && (!cmd.properties.is_empty() || cmd.range_paths.is_some()) {
+        return Err(HandlerError::InvalidArgument(
+            "--properties cannot be combined with --from; use `set` on the copied path to modify properties."
+                .to_string(),
+        ));
+    }
+
     // Merge range_paths into properties (same pattern as set command)
     if let Some(rp) = &cmd.range_paths {
         properties.insert("range_paths".to_string(), rp.clone());
     }
 
-    let new_path = handler.add(
-        &cmd.parent,
-        &cmd.type_name,
-        position,
-        &properties,
-        cmd.wrap.as_deref(),
-    )?;
+    let (new_path, message) = if let Some(source) = cmd.from.as_deref() {
+        let path = handler.copy_from(source, &cmd.parent, position)?;
+        (path.clone(), format!("Copied to {}", path))
+    } else {
+        let path = handler.add(
+            &cmd.parent,
+            cmd.type_name.as_deref().expect("validated above"),
+            position,
+            &properties,
+            cmd.wrap.as_deref(),
+        )?;
+        (path.clone(), format!("Created: {}", path))
+    };
     handler.save()?;
 
     let offset_map = if cmd.emit_map {
@@ -65,7 +87,7 @@ pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, Handl
     };
 
     match format {
-        OutputFormat::Text => Ok(format!("Created: {}", new_path)),
+        OutputFormat::Text => Ok(message.clone()),
         OutputFormat::Json => {
             let mut extensions = serde_json::Map::new();
             extensions.insert(
@@ -75,10 +97,7 @@ pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, Handl
             if let Some(map) = offset_map {
                 extensions.insert("offset_map".to_string(), map);
             }
-            Ok(crate::commands::json_text_envelope(
-                &format!("Created: {}", new_path),
-                extensions,
-            ))
+            Ok(crate::commands::json_text_envelope(&message, extensions))
         }
     }
 }

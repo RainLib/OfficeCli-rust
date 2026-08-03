@@ -4986,6 +4986,52 @@ fn test_query_text_empty_result_prints_csharp_help_hint() {
 }
 
 #[test]
+fn test_add_from_copies_existing_element_with_csharp_message() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("add_from.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=Source",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["add", &p, "--parent", "/body", "--from", "/body/p[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Copied to /body/p[3]"));
+    officecli()
+        .args(["view", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Source\nSource"));
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--from",
+            "/body/p[2]",
+            "--properties",
+            "text=ignored",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be combined with --from"));
+}
+
+#[test]
 fn test_validate_uses_csharp_judgment_exit_and_streams() {
     let tmp = temp_dir();
     let path = tmp.path().join("validate_judgment.docx");
