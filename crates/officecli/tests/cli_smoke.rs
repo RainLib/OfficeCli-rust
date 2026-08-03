@@ -761,6 +761,54 @@ fn test_docx_numbering_level_add_replaces_matching_ilvl() {
 }
 
 #[test]
+fn test_docx_numbering_level_remove_only_drops_target_level() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_numbering_level_remove.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "abstractNum",
+            "--properties",
+            "id=3",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["remove", &p, "/numbering/abstractNum[@id=3]/level[2]"])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "get",
+            &p,
+            "/numbering/abstractNum[@id=3]/level[2]",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    officecli()
+        .args([
+            "get",
+            &p,
+            "/numbering/abstractNum[@id=3]/level[1]",
+            "--json",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_docx_num_start_overrides_round_trip() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_num_start_overrides.docx");

@@ -162,6 +162,24 @@ pub fn add_numbering_level(
     ))
 }
 
+/// Remove one level definition without touching its containing template or
+/// numbering instances.  A `w:num` may legitimately keep pointing at the
+/// template; Word then applies its normal fallback for that missing level.
+pub fn remove_numbering_level(package: &mut OxmlPackage, path: &str) -> Result<(), HandlerError> {
+    let (abstract_num_id, level) = parse_numbering_level_path(path)?;
+    let xml = package
+        .read_part_xml(DOCX_NUMBERING_PART)
+        .map_err(|_| HandlerError::PathNotFound("numbering definition not found".to_string()))?;
+    let (abstract_start, abstract_end) = numbering_abstract_bounds(&xml, abstract_num_id)?;
+    let (start, end) = numbering_level_bounds(&xml, abstract_start, abstract_end, level)?
+        .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let mut updated = xml;
+    updated.replace_range(start..end, "");
+    package
+        .write_part_xml(DOCX_NUMBERING_PART, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
+}
+
 /// Update a numbering instance's template reference without permitting a
 /// dangling `w:abstractNumId` pointer.
 pub fn set_numbering_definition(
@@ -303,6 +321,16 @@ fn parse_level_index(value: &str, property: &str) -> Result<u8, HandlerError> {
         )));
     }
     Ok(level)
+}
+
+fn parse_numbering_level_path(path: &str) -> Result<(&str, u8), HandlerError> {
+    let (abstract_num_id, level) = path
+        .strip_prefix("/numbering/abstractNum[@id=")
+        .and_then(|value| value.split_once("]/level["))
+        .and_then(|(id, level)| level.strip_suffix(']').map(|level| (id, level)))
+        .ok_or_else(|| HandlerError::InvalidPath(path.to_string()))?;
+    parse_numbering_id(abstract_num_id)?;
+    Ok((abstract_num_id, parse_level_index(level, "level")?))
 }
 
 fn numbering_abstract_bounds(xml: &str, id: &str) -> Result<(usize, usize), HandlerError> {

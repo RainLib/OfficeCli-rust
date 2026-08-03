@@ -5,7 +5,7 @@
   "elementAliases": ["lvl"],
   "parent": "abstractNum",
   "addParent": "/numbering/abstractNum[@id=N]",
-  "operations": { "add": true, "set": true, "get": true, "query": false, "remove": false },
+  "operations": { "add": true, "set": true, "get": true, "query": false, "remove": true },
   "paths": { "stable": ["/numbering/abstractNum[@id=N]/level[L]"] },
   "note": "A zero-based numbering level L (0..8) under an abstractNum. Add requires ilvl and replaces an existing level with the same ilvl in place; get returns ilvl, format and text.",
   "properties": {
