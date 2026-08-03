@@ -38,13 +38,26 @@ pub fn handle_dump(
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if extension.eq_ignore_ascii_case("docx") && path.as_deref().unwrap_or("/") == "/" {
+        if extension.eq_ignore_ascii_case("docx") {
+            let logical_path = path.as_deref().unwrap_or("/");
+            let (part, xpath) = match logical_path {
+                "/" | "/document" => ("word/document.xml", "/w:document"),
+                "/styles" => ("word/styles.xml", "/w:styles"),
+                "/settings" => ("word/settings.xml", "/w:settings"),
+                "/numbering" => ("word/numbering.xml", "/w:numbering"),
+                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /styles, /settings, and /numbering; use --dom for other subtrees".to_string())),
+            };
+            let replay_part = if logical_path == "/" {
+                "/document"
+            } else {
+                logical_path
+            };
             let handler = crate::open_handler(&cmd.file, false)?;
-            let xml = handler.raw("word/document.xml", handler_common::RawOptions::default())?;
+            let xml = handler.raw(part, handler_common::RawOptions::default())?;
             let xml = oxml::xml_util::strip_prolog(&xml).to_string();
             let output = serde_json::to_string(&vec![
                 serde_json::json!({"command":"meta","dumpVersion":2}),
-                serde_json::json!({"command":"raw-set","part":"/document","xpath":"/w:document","action":"replace","xml":xml}),
+                serde_json::json!({"command":"raw-set","part":replay_part,"xpath":xpath,"action":"replace","xml":xml}),
             ]).map_err(HandlerError::JsonError)?;
             if let Some(path) = cmd.out.filter(|path| path != "-") {
                 std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
