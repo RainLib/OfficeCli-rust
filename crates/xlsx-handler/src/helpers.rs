@@ -105,7 +105,7 @@ pub fn resolve_raw_part_path(
     }
 
     if let Some((sheet_name, suffix)) = alias.rsplit_once('/') {
-        let sheet_part = sheet_part_by_name(package, sheet_name)?;
+        let sheet_part = sheet_part_by_alias(package, sheet_name)?;
         if suffix == "drawing" {
             return drawing_part_for_sheet(package, &sheet_part);
         }
@@ -120,12 +120,35 @@ pub fn resolve_raw_part_path(
         return chart_part_globally(package, chart_index);
     }
 
-    sheet_part_by_name(package, alias).map_err(|_| {
+    sheet_part_by_alias(package, alias).map_err(|_| {
         HandlerError::PathNotFound(format!(
             "unknown XLSX raw part '{}'; use /workbook, /styles, /sharedStrings, /theme, /<SheetName>, /<SheetName>/drawing, /<SheetName>/chart[N], /chart[N], or a zip-internal .xml path",
             part_path
         ))
     })
+}
+
+fn sheet_part_by_alias(package: &OxmlPackage, alias: &str) -> Result<String, HandlerError> {
+    if let Some(index) = alias
+        .strip_prefix("sheet[")
+        .and_then(|value| value.strip_suffix(']'))
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return sheet_part_by_index(package, index);
+    }
+    sheet_part_by_name(package, alias)
+}
+
+fn sheet_part_by_index(package: &OxmlPackage, index: usize) -> Result<String, HandlerError> {
+    if index == 0 {
+        return Err(HandlerError::PathNotFound("sheet[0]".to_string()));
+    }
+    let sheets = parse_workbook(package).map_err(HandlerError::OperationFailed)?;
+    sheets
+        .into_iter()
+        .nth(index - 1)
+        .map(|(_, path, _)| path)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet[{}]", index)))
 }
 
 fn sheet_part_by_name(package: &OxmlPackage, sheet_name: &str) -> Result<String, HandlerError> {

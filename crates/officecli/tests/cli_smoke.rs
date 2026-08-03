@@ -3877,6 +3877,11 @@ fn test_xlsx_raw_and_raw_set_accept_csharp_semantic_sheet_paths() {
         .success()
         .stdout(predicate::str::contains("worksheet"));
     officecli()
+        .args(["raw", &p, "/sheet[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("worksheet"));
+    officecli()
         .args([
             "raw-set",
             &p,
@@ -3895,6 +3900,48 @@ fn test_xlsx_raw_and_raw_set_accept_csharp_semantic_sheet_paths() {
         .assert()
         .success()
         .stdout(predicate::str::contains("codeName=\"SemanticRaw\""));
+}
+
+#[test]
+fn test_dump_xlsx_accepts_csharp_positional_sheet_path() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_sheet_index_source.xlsx");
+    let target = tmp.path().join("dump_sheet_index_target.xlsx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &source_path,
+            "/Sheet1/A1",
+            "value=Indexed sheet replay",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/sheet[1]"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &target_path, "/Sheet1/A1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Indexed sheet replay"));
 }
 
 #[test]
