@@ -97,6 +97,7 @@ struct AppState {
     registry: Arc<Mutex<HashMap<String, Arc<ActiveDocument>>>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     marks: Arc<Mutex<HashMap<String, Vec<MarkEntry>>>>,
+    selections: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 /// One advisory mark attached to a DOM path. `find`, `color`, `note`,
@@ -273,6 +274,7 @@ async fn run_host_server(
         registry: registry.clone(),
         shutdown_tx: shutdown_tx.clone(),
         marks: Arc::new(Mutex::new(HashMap::new())),
+        selections: Arc::new(Mutex::new(HashMap::new())),
     });
 
     register_document(&state, initial_id, initial_file)
@@ -291,6 +293,7 @@ async fn run_host_server(
         .route("/{id}/mark", post(handle_mark))
         .route("/{id}/unmark", post(handle_unmark))
         .route("/{id}/marks", get(handle_marks))
+        .route("/{id}/selection", get(handle_selection).post(set_selection))
         .route("/{id}/goto", post(handle_goto))
         .route("/{id}/view", get(handle_view))
         .route("/{id}/get", get(handle_get))
@@ -975,6 +978,47 @@ async fn handle_marks(
     .into_response()
 }
 
+#[derive(Deserialize)]
+struct SelectionRequest {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+async fn handle_selection(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Err(response) = get_doc(&state, &id).await {
+        return response.into_response();
+    }
+    let paths = state
+        .selections
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .unwrap_or_default();
+    Json(ApiResponse::ok(serde_json::json!({"paths": paths}))).into_response()
+}
+
+async fn set_selection(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(request): Json<SelectionRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = get_doc(&state, &id).await {
+        return response.into_response();
+    }
+    let paths = request
+        .paths
+        .into_iter()
+        .filter(|path| path.starts_with('/'))
+        .take(10_000)
+        .collect::<Vec<_>>();
+    state.selections.lock().await.insert(id, paths.clone());
+    Json(ApiResponse::ok(serde_json::json!({"paths": paths}))).into_response()
+}
+
 // ─── POST /:id/goto — Scroll to an element ─────────────────────────────
 
 #[derive(Deserialize)]
@@ -1289,6 +1333,23 @@ fn inject_live_reload(html: &str) -> String {
     let script = r#"
 <script>
 (function() {
+  const selected = new Set();
+  function publishSelection() {
+    fetch(window.location.pathname.replace(/\/$/, '') + '/selection', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paths: [...selected]})
+    }).catch(() => {});
+  }
+  document.addEventListener('click', function(event) {
+    const target = event.target.closest('[data-path]');
+    if (!target) { if (!event.metaKey && !event.ctrlKey && !event.shiftKey) { selected.clear(); publishSelection(); } return; }
+    const path = target.getAttribute('data-path');
+    if (!path) return;
+    if (!event.metaKey && !event.ctrlKey && !event.shiftKey) selected.clear();
+    if (selected.has(path) && (event.metaKey || event.ctrlKey)) selected.delete(path); else selected.add(path);
+    document.querySelectorAll('[data-path]').forEach(el => el.style.outline = selected.has(el.getAttribute('data-path')) ? '2px solid #2f80ed' : '');
+    publishSelection();
+  });
   const ssePath = window.location.pathname.endsWith('/') ? 'sse' : window.location.pathname + '/sse';
   const es = new EventSource(ssePath);
   es.onmessage = function(ev) {

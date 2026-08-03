@@ -21,12 +21,49 @@ pub struct GetCommand {
     /// Extract the node's backing binary payload (picture, OLE, or media) to this file
     #[arg(long)]
     pub save: Option<String>,
+
+    /// Watch server port used only with the `selected` pseudo-path.
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    /// Watch document id used only with the `selected` pseudo-path.
+    #[arg(long)]
+    pub id: Option<String>,
 }
 
 pub fn handle_get(cmd: GetCommand, format: OutputFormat) -> Result<String, HandlerError> {
-    let handler = crate::open_handler(&cmd.file, false)?;
     let path = cmd.path.as_deref().unwrap_or("/");
     let depth = cmd.depth.min(MAX_GET_DEPTH);
+    if path.eq_ignore_ascii_case("selected") {
+        let id = cmd
+            .id
+            .unwrap_or_else(|| crate::commands::default_id(&cmd.file));
+        let selection = crate::commands::get_json(
+            crate::commands::resolve_port(cmd.port),
+            &format!("/{id}/selection"),
+        )?;
+        let paths = selection
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("invalid watch selection response".to_string())
+            })?;
+        let handler = crate::open_handler(&cmd.file, false)?;
+        let nodes = paths
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|path| handler.get(path, depth).ok())
+            .collect::<Vec<_>>();
+        return match format {
+            OutputFormat::Text => nodes
+                .iter()
+                .map(|node| format_node_text(node, depth))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|items| items.join("\n")),
+            OutputFormat::Json => serde_json::to_string_pretty(&nodes).map_err(HandlerError::from),
+        };
+    }
+    let handler = crate::open_handler(&cmd.file, false)?;
     let mut node = handler.get(path, depth)?;
 
     if let Some(save_path) = cmd.save.as_deref() {
