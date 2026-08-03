@@ -317,6 +317,23 @@ fn test_create_locale_applies_theme_fonts_to_xlsx_and_pptx() {
 }
 
 #[test]
+fn test_create_infers_non_western_locale_from_unix_environment() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("inferred.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &p])
+        .env("LC_ALL", "ja_JP.UTF-8")
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "/styles"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("游明朝"));
+}
+
+#[test]
 fn test_create_xlsx() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_create.xlsx");

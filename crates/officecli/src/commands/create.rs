@@ -29,6 +29,7 @@ pub fn handle_create(
     _format: handler_common::OutputFormat,
 ) -> Result<String, HandlerError> {
     let mut output_file = cmd.file;
+    let locale = effective_locale(cmd.locale.as_deref());
     let ext = cmd.format.unwrap_or_else(|| {
         std::path::Path::new(&output_file)
             .extension()
@@ -49,9 +50,9 @@ pub fn handle_create(
     }
 
     let result = match ext.as_str() {
-        "docx" => create_blank_docx_with_locale(&output_file, cmd.minimal, cmd.locale.as_deref())?,
-        "xlsx" => create_blank_xlsx_with_locale(&output_file, cmd.locale.as_deref())?,
-        "pptx" => create_blank_pptx_with_locale(&output_file, cmd.locale.as_deref())?,
+        "docx" => create_blank_docx_with_locale(&output_file, cmd.minimal, locale.as_deref())?,
+        "xlsx" => create_blank_xlsx_with_locale(&output_file, locale.as_deref())?,
+        "pptx" => create_blank_pptx_with_locale(&output_file, locale.as_deref())?,
         "pdf" => create_blank_pdf(&output_file)?,
         other => {
             return Err(HandlerError::UnsupportedMode(format!(
@@ -62,6 +63,37 @@ pub fn handle_create(
     };
 
     Ok(result)
+}
+
+fn effective_locale(explicit: Option<&str>) -> Option<String> {
+    let value = explicit.map(ToOwned::to_owned).or_else(|| {
+        std::env::var("LC_ALL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var("LANG").ok())
+    })?;
+    let locale = value
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .replace('_', "-");
+    let language = locale
+        .split('-')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if locale.is_empty()
+        || matches!(locale.to_ascii_lowercase().as_str(), "c" | "posix")
+        || (explicit.is_none()
+            && matches!(
+                language.as_str(),
+                "en" | "fr" | "de" | "es" | "it" | "pt" | "nl" | "ru" | "pl"
+            ))
+    {
+        None
+    } else {
+        Some(locale)
+    }
 }
 
 pub(crate) fn create_blank_docx(path: &str) -> Result<String, HandlerError> {
