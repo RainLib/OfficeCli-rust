@@ -272,6 +272,36 @@ fn test_create_xlsx() {
 }
 
 #[test]
+fn test_import_accepts_csharp_positional_source_file() {
+    let tmp = temp_dir();
+    let workbook = tmp.path().join("import_target.xlsx");
+    let source = tmp.path().join("input.csv");
+    let workbook_path = workbook.to_string_lossy().to_string();
+    let source_path = source.to_string_lossy().to_string();
+    std::fs::write(&source, "Name,Score\nAda,100\n").unwrap();
+
+    officecli()
+        .args(["create", &workbook_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "import",
+            &workbook_path,
+            "/Sheet1",
+            &source_path,
+            "--header",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &workbook_path, "/Sheet1/A2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ada"));
+}
+
+#[test]
 fn test_create_pptx() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_create.pptx");

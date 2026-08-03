@@ -11,6 +11,9 @@ pub struct ImportCommand {
     /// Sheet path (e.g. /Sheet1)
     pub parent_path: String,
 
+    /// Source CSV/TSV file to import (C#-compatible positional form).
+    pub source_file: Option<String>,
+
     /// Source CSV/TSV file to import
     #[arg(long, short)]
     pub file_source: Option<String>,
@@ -44,6 +47,12 @@ pub fn handle_import(
     }
 
     // Read CSV content
+    if cmd.source_file.is_some() && cmd.file_source.is_some() {
+        return Err(HandlerError::InvalidArgument(
+            "Use either positional source-file or --file, not both.".to_string(),
+        ));
+    }
+    let source_path = cmd.file_source.as_deref().or(cmd.source_file.as_deref());
     let csv_content = if cmd.stdin {
         use std::io::Read;
         let mut content = String::new();
@@ -51,7 +60,10 @@ pub fn handle_import(
             .read_to_string(&mut content)
             .map_err(|e| HandlerError::OperationFailed(format!("Failed to read stdin: {}", e)))?;
         content
-    } else if let Some(source_path) = &cmd.file_source {
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&content)
+            .to_string()
+    } else if let Some(source_path) = source_path {
         std::fs::read_to_string(source_path).map_err(|e| {
             HandlerError::OperationFailed(format!(
                 "Failed to read source file '{}': {}",
@@ -76,7 +88,7 @@ pub fn handle_import(
                 )))
             }
         }
-    } else if let Some(source_path) = &cmd.file_source {
+    } else if let Some(source_path) = source_path {
         let ext = source_path.rsplit('.').next().unwrap_or("").to_lowercase();
         if ext == "tsv" || ext == "tab" {
             '\t'
