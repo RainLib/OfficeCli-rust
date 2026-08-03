@@ -1,6 +1,3 @@
-use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
-use quick_xml::Writer;
-use std::io::Cursor;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -37,14 +34,14 @@ pub fn find_elements_by_xpath(xml: &str, xpath: &str) -> Result<Vec<String>, Xml
     let segments = parse_xpath_segments(xpath)?;
     let matched = walk_xpath(&doc, &segments)?;
 
-    let mut results = Vec::new();
-    for node in &matched {
-        let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_node(&mut writer, node);
-        let result = writer.into_inner().into_inner();
-        results.push(String::from_utf8_lossy(&result).to_string());
-    }
-    Ok(results)
+    Ok(matched
+        .iter()
+        // Preserve the source fragment rather than reserializing the XML
+        // node: OOXML fragments commonly rely on namespace prefixes declared
+        // by an ancestor, and callers can safely splice these back into that
+        // original document.
+        .map(|node| xml[node.range()].to_string())
+        .collect())
 }
 
 /// XPath segment: name + optional index + optional attribute filter.
@@ -200,31 +197,6 @@ fn matches_segment(node: roxmltree::Node, segment: &XPathSegment) -> bool {
     }
 
     true
-}
-
-fn write_node(writer: &mut Writer<Cursor<Vec<u8>>>, node: &roxmltree::Node) {
-    if node.is_element() {
-        let tag = node.tag_name().name();
-        let mut elem = BytesStart::new(tag);
-
-        for attr in node.attributes() {
-            elem.push_attribute((attr.name(), attr.value()));
-        }
-
-        if node.children().next().is_none() {
-            writer.write_event(Event::Empty(elem)).ok();
-        } else {
-            writer.write_event(Event::Start(elem)).ok();
-            for child in node.children() {
-                write_node(writer, &child);
-            }
-            writer.write_event(Event::End(BytesEnd::new(tag))).ok();
-        }
-    } else if node.is_text() {
-        writer
-            .write_event(Event::Text(BytesText::new(node.text().unwrap_or(""))))
-            .ok();
-    }
 }
 
 /// Apply an XPath action to XML.
@@ -526,6 +498,13 @@ mod tests {
         let by_index = find_elements_by_xpath(sample(), "/root/item[1]").unwrap();
         assert_eq!(by_index.len(), 1);
         assert!(by_index[0].contains("one"));
+    }
+
+    #[test]
+    fn find_preserves_source_namespace_prefixes() {
+        let xml = r#"<w:document xmlns:w="urn:word"><w:body><w:p>text</w:p></w:body></w:document>"#;
+        let hits = find_elements_by_xpath(xml, "/w:document/w:body").unwrap();
+        assert_eq!(hits, vec!["<w:body><w:p>text</w:p></w:body>"]);
     }
 
     #[test]

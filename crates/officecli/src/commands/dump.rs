@@ -40,12 +40,32 @@ pub fn handle_dump(
             .unwrap_or_default();
         if extension.eq_ignore_ascii_case("docx") {
             let logical_path = path.as_deref().unwrap_or("/");
+            if logical_path == "/body" {
+                let handler = crate::open_handler(&cmd.file, false)?;
+                let document =
+                    handler.raw("word/document.xml", handler_common::RawOptions::default())?;
+                let body = oxml::xml_util::find_elements_by_xpath(&document, "/w:document/w:body")
+                    .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| HandlerError::PathNotFound("/body".to_string()))?;
+                let output = serde_json::to_string(&vec![
+                    serde_json::json!({"command":"meta","dumpVersion":2}),
+                    serde_json::json!({"command":"raw-set","part":"/document","xpath":"/w:document/w:body","action":"replace","xml":body}),
+                ]).map_err(HandlerError::JsonError)?;
+                if let Some(path) = cmd.out.filter(|path| path != "-") {
+                    std::fs::write(&path, format!("{}\n", output))
+                        .map_err(HandlerError::IoError)?;
+                    return Ok(path);
+                }
+                return Ok(output);
+            }
             let (part, xpath) = match logical_path {
                 "/" | "/document" => ("word/document.xml", "/w:document"),
                 "/styles" => ("word/styles.xml", "/w:styles"),
                 "/settings" => ("word/settings.xml", "/w:settings"),
                 "/numbering" => ("word/numbering.xml", "/w:numbering"),
-                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /styles, /settings, and /numbering; use --dom for other subtrees".to_string())),
+                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /styles, /settings, and /numbering; use --dom for other subtrees".to_string())),
             };
             let replay_part = if logical_path == "/" {
                 "/document"

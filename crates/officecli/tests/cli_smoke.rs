@@ -3666,6 +3666,51 @@ fn test_dump_docx_styles_replays_semantic_part() {
 }
 
 #[test]
+fn test_dump_docx_body_subtree_replays_into_fresh_document() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_body_source.docx");
+    let target = tmp.path().join("dump_body_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &source_path,
+            "/body",
+            "--type",
+            "p",
+            "--prop",
+            "text=Body replay",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/body"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &target_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Body replay"));
+}
+
+#[test]
 fn test_dump_xlsx_batch_replays_into_fresh_workbook() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_source.xlsx");
