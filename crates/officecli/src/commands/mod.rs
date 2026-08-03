@@ -36,7 +36,23 @@ pub use format_handler_session::FormatHandlerProxy;
 pub use plugin_process::resolve_format_handler;
 
 use clap::Args;
-use handler_common::{DocumentHandler, HandlerError};
+use handler_common::{DocumentHandler, DocumentNode, HandlerError};
+
+/// Serialize read-only node results using the C# CLI's stable JSON contract.
+///
+/// `get`, `get selected`, and `query` deliberately share this shape so an
+/// automation can always read paths from `.data.results`, regardless of
+/// whether it requested one node or many.
+pub fn nodes_json_envelope(nodes: &[DocumentNode]) -> Result<String, HandlerError> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "success": true,
+        "data": {
+            "matches": nodes.len(),
+            "results": nodes,
+        }
+    }))
+    .map_err(HandlerError::from)
+}
 
 /// Build a JSON value of the handler's current text+offset map.
 ///

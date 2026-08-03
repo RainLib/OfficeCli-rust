@@ -60,7 +60,7 @@ pub fn handle_get(cmd: GetCommand, format: OutputFormat) -> Result<String, Handl
                 .map(|node| format_node_text(node, depth))
                 .collect::<Result<Vec<_>, _>>()
                 .map(|items| items.join("\n")),
-            OutputFormat::Json => serde_json::to_string_pretty(&nodes).map_err(HandlerError::from),
+            OutputFormat::Json => crate::commands::nodes_json_envelope(&nodes),
         };
     }
     let handler = crate::open_handler(&cmd.file, false)?;
@@ -104,7 +104,7 @@ pub fn handle_get(cmd: GetCommand, format: OutputFormat) -> Result<String, Handl
 
     match format {
         OutputFormat::Text => format_node_text(&node, depth),
-        OutputFormat::Json => Ok(serde_json::to_string_pretty(&node)?),
+        OutputFormat::Json => crate::commands::nodes_json_envelope(&[node]),
     }
 }
 

@@ -23,6 +23,6 @@ pub fn handle_query(cmd: QueryCommand, format: OutputFormat) -> Result<String, H
                 .collect();
             Ok(lines.join("\n"))
         }
-        OutputFormat::Json => Ok(serde_json::to_string_pretty(&nodes)?),
+        OutputFormat::Json => crate::commands::nodes_json_envelope(&nodes),
     }
 }

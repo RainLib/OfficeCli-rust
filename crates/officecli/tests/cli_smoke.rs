@@ -4728,3 +4728,38 @@ fn test_move_paragraph() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_get_and_query_json_use_csharp_node_envelope() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("node_envelope.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+
+    let get_output = officecli()
+        .args(["--json", "get", &p, "/body/p[1]"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let get_json: serde_json::Value = serde_json::from_slice(&get_output).unwrap();
+    assert_eq!(get_json["success"], true);
+    assert_eq!(get_json["data"]["matches"], 1);
+    assert_eq!(get_json["data"]["results"].as_array().unwrap().len(), 1);
+    assert_eq!(get_json["data"]["results"][0]["path"], "/body/p[1]");
+
+    let query_output = officecli()
+        .args(["--json", "query", &p, "paragraph"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let query_json: serde_json::Value = serde_json::from_slice(&query_output).unwrap();
+    let results = query_json["data"]["results"].as_array().unwrap();
+    assert_eq!(query_json["success"], true);
+    assert_eq!(query_json["data"]["matches"], results.len());
+    assert!(results.iter().any(|node| node["path"] == "/body/p[1]"));
+}
