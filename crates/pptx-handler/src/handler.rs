@@ -90,6 +90,9 @@ impl DocumentHandler for PptxHandler {
     }
 
     fn get(&self, path: &str, depth: usize) -> Result<DocumentNode, HandlerError> {
+        if matches!(path, "/presentation") {
+            return crate::presentation::get(&self.package.borrow(), depth);
+        }
         if path.contains("/br[") || path.contains("/linebreak[") {
             return crate::linebreak::get_linebreak(&self.package.borrow(), path);
         }
@@ -133,6 +136,8 @@ impl DocumentHandler for PptxHandler {
                 properties,
                 &segments,
             )
+        } else if matches!(path, "/" | "" | "/presentation") {
+            crate::presentation::set(&mut self.package.borrow_mut(), properties)
         } else if path.to_ascii_lowercase().contains("/moderncomment[") {
             crate::add::set_modern_comment(&mut self.package.borrow_mut(), path, properties)
         } else if path.to_ascii_lowercase().contains("/comment[") {

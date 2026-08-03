@@ -5,6 +5,7 @@ pub mod html_preview;
 pub mod linebreak;
 pub mod mutations;
 pub mod navigation;
+pub mod presentation;
 pub mod query;
 pub mod raw;
 pub mod svg_preview;

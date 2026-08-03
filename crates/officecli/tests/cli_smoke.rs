@@ -3555,6 +3555,61 @@ fn test_pptx_add_slide() {
 }
 
 #[test]
+fn test_pptx_presentation_settings_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_pptx_presentation_settings.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/presentation",
+            "firstSlideNum=4",
+            "rtl=true",
+            "compatMode=true",
+            "removePersonalInfo=true",
+            "print.what=handouts",
+            "print.colorMode=grayscale",
+            "print.hiddenSlides=true",
+            "show.loop=true",
+            "show.narration=false",
+            "show.animation=true",
+            "show.useTimings=false",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/presentation"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""firstSlideNum": "4""#))
+        .stdout(predicate::str::contains(r#""direction": "rtl""#))
+        .stdout(predicate::str::contains(r#""print.what": "handouts1""#))
+        .stdout(predicate::str::contains(r#""show.narration": false"#));
+    officecli()
+        .args(["raw", &p, "ppt/presProps.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<p:prnPr"))
+        .stdout(predicate::str::contains(r#"prnWhat="handouts1""#))
+        .stdout(predicate::str::contains(r#"clr="gray""#))
+        .stdout(predicate::str::contains(r#"hiddenSlides="1""#))
+        .stdout(predicate::str::contains("<p:showPr"))
+        .stdout(predicate::str::contains(r#"loop="1""#))
+        .stdout(predicate::str::contains(r#"showNarration="0""#))
+        .stdout(predicate::str::contains(r#"showAnimation="1""#))
+        .stdout(predicate::str::contains(r#"useTimings="0""#));
+    officecli()
+        .args(["raw", &p, "ppt/_rels/presentation.xml.rels"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("relationships/presProps"));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
 fn test_pptx_linebreak_add_get_remove_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_pptx_linebreak.pptx");
