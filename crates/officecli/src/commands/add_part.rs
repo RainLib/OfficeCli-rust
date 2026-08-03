@@ -16,7 +16,7 @@ pub struct AddPartCommand {
     pub parent: String,
 
     /// Part type to create. Word: chart, header, footer. PPT/Excel: chart
-    #[arg(long)]
+    #[arg(long, alias = "type")]
     pub part_type: String,
 }
 
@@ -32,13 +32,11 @@ pub fn handle_add_part(cmd: AddPartCommand, format: OutputFormat) -> Result<Stri
 
     match format {
         OutputFormat::Json => {
-            let result = serde_json::json!({
-                "relId": rel_id,
-                "partPath": part_path,
-                "type": cmd.part_type,
-                "message": message,
-            });
-            Ok(result.to_string())
+            let mut extensions = serde_json::Map::new();
+            extensions.insert("relId".to_string(), serde_json::Value::String(rel_id));
+            extensions.insert("partPath".to_string(), serde_json::Value::String(part_path));
+            extensions.insert("type".to_string(), serde_json::Value::String(cmd.part_type));
+            Ok(crate::commands::json_text_envelope(&message, extensions))
         }
         OutputFormat::Text => Ok(message),
     }

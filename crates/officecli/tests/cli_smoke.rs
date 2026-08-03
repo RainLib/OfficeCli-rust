@@ -4555,6 +4555,22 @@ fn test_raw_set_docx() {
         .success();
 }
 
+#[test]
+fn test_add_part_accepts_csharp_type_and_json_envelope() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_add_part.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["--json", "add-part", &p, "/", "--type", "header"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"success\": true"))
+        .stdout(predicate::str::contains("\"relId\""))
+        .stdout(predicate::str::contains("Created header part"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Batch — run multiple operations
 // ═══════════════════════════════════════════════════════════════════════
