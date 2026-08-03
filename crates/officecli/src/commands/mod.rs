@@ -62,6 +62,26 @@ pub fn json_data_envelope(data: serde_json::Value, success: bool) -> String {
     .expect("JSON envelope contains only serializable values")
 }
 
+/// C# `WrapEnvelopeText` with optional Rust-only structured extensions.
+pub fn json_text_envelope(
+    message: &str,
+    extensions: serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("success".to_string(), serde_json::Value::Bool(true));
+    envelope.insert(
+        "data".to_string(),
+        serde_json::Value::String(message.to_string()),
+    );
+    envelope.insert(
+        "message".to_string(),
+        serde_json::Value::String(message.to_string()),
+    );
+    envelope.extend(extensions);
+    serde_json::to_string_pretty(&serde_json::Value::Object(envelope))
+        .expect("JSON envelope contains only serializable values")
+}
+
 /// Add the C# success envelope to a command result unless it already has one.
 ///
 /// Handlers may return structured JSON or a plain-text status. The latter uses

@@ -4920,7 +4920,9 @@ fn test_json_envelopes_wrap_writes_and_failures() {
         .clone();
     let add_json: serde_json::Value = serde_json::from_slice(&add_output).unwrap();
     assert_eq!(add_json["success"], true);
-    assert_eq!(add_json["data"]["path"], "/body/p[2]");
+    assert_eq!(add_json["data"], "Created: /body/p[2]");
+    assert_eq!(add_json["message"], "Created: /body/p[2]");
+    assert_eq!(add_json["path"], "/body/p[2]");
 
     let error_output = officecli()
         .args(["--json", "get", &p, "/body/p[999]"])

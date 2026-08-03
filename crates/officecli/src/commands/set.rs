@@ -173,14 +173,16 @@ pub fn handle_set(cmd: SetCommand, format: OutputFormat) -> Result<String, Handl
             }
         }
         OutputFormat::Json => {
-            let mut out = serde_json::json!({
-                "result": "OK",
-                "unsupported": unsupported
-            });
+            let mut extensions = serde_json::Map::new();
+            extensions.insert(
+                "result".to_string(),
+                serde_json::Value::String("OK".to_string()),
+            );
+            extensions.insert("unsupported".to_string(), serde_json::json!(unsupported));
             if let Some(map) = offset_map {
-                out["offset_map"] = map;
+                extensions.insert("offset_map".to_string(), map);
             }
-            Ok(out.to_string())
+            Ok(crate::commands::json_text_envelope("OK", extensions))
         }
     }
 }

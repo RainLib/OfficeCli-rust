@@ -67,11 +67,18 @@ pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, Handl
     match format {
         OutputFormat::Text => Ok(format!("Created: {}", new_path)),
         OutputFormat::Json => {
-            let mut out = serde_json::json!({ "path": new_path });
+            let mut extensions = serde_json::Map::new();
+            extensions.insert(
+                "path".to_string(),
+                serde_json::Value::String(new_path.clone()),
+            );
             if let Some(map) = offset_map {
-                out["offset_map"] = map;
+                extensions.insert("offset_map".to_string(), map);
             }
-            Ok(out.to_string())
+            Ok(crate::commands::json_text_envelope(
+                &format!("Created: {}", new_path),
+                extensions,
+            ))
         }
     }
 }
