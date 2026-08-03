@@ -333,7 +333,8 @@ pub use view::handle_view;
 
 /// Handle `mark` command — attach advisory mark to element via watch
 pub fn handle_mark(cmd: MarkCommand, json: bool) -> Result<String, HandlerError> {
-    let mut entry = serde_json::json!({ "path": cmd.path });
+    let requested_path = cmd.path.clone();
+    let mut entry = serde_json::json!({ "path": requested_path });
     if let Some(props) = &cmd.prop {
         let mut find = None;
         let mut color = None;
@@ -362,9 +363,33 @@ pub fn handle_mark(cmd: MarkCommand, json: bool) -> Result<String, HandlerError>
     }
     let port = resolve_port(cmd.port);
     let id = cmd.id.clone().unwrap_or_else(|| default_id(&cmd.file));
-    let result = post_json(port, &format!("/{}/mark", id), &entry)?;
+    let paths = if requested_path.eq_ignore_ascii_case("selected") {
+        get_json(port, &format!("/{id}/selection"))?
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("invalid watch selection response".to_string())
+            })?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        vec![requested_path.clone()]
+    };
+    if paths.is_empty() {
+        return Err(HandlerError::OperationFailed(
+            "no elements are currently selected".to_string(),
+        ));
+    }
+    let mut results = Vec::new();
+    for path in paths {
+        entry["path"] = serde_json::Value::String(path);
+        results.push(post_json(port, &format!("/{id}/mark"), &entry)?);
+    }
+    let result = results.last().cloned().unwrap_or_default();
     if json {
-        Ok(result.to_string())
+        Ok(serde_json::json!({"marked": results}).to_string())
     } else {
         let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let total = result
@@ -373,7 +398,7 @@ pub fn handle_mark(cmd: MarkCommand, json: bool) -> Result<String, HandlerError>
             .unwrap_or(0);
         Ok(format!(
             "Marked {} (id={}, {} marks total on this document)",
-            cmd.path, id, total
+            requested_path, id, total
         ))
     }
 }
