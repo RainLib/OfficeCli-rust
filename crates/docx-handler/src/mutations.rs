@@ -1043,7 +1043,8 @@ fn build_numbering_level(
     }
     if let Some(value) = properties.get("suff") {
         let suffix = match value.to_ascii_lowercase().as_str() {
-            "tab" | "space" | "nothing" | "none" => value,
+            "tab" | "space" | "nothing" => value.as_str(),
+            "none" => "nothing",
             _ => {
                 return Err(HandlerError::InvalidArgument(format!(
                     "invalid suff '{}': tab, space, or nothing expected",
@@ -1136,9 +1137,18 @@ fn build_numbering_level(
         ));
     }
     if let Some(value) = properties.get("size").filter(|value| !value.is_empty()) {
-        let points = value.parse::<f64>().map_err(|_| {
-            HandlerError::InvalidArgument(format!("size must be a point value (got '{}')", value))
-        })?;
+        let points = value
+            .trim()
+            .strip_suffix("pt")
+            .or_else(|| value.trim().strip_suffix("PT"))
+            .unwrap_or(value.trim())
+            .parse::<f64>()
+            .map_err(|_| {
+                HandlerError::InvalidArgument(format!(
+                    "size must be a point value (got '{}')",
+                    value
+                ))
+            })?;
         if !points.is_finite() {
             return Err(HandlerError::InvalidArgument(
                 "size must be finite".to_string(),
@@ -1167,40 +1177,9 @@ fn next_numbering_id(xml: &str, attr: &str) -> i32 {
         + 1
 }
 fn build_abstract_num(id: i32, props: &HashMap<String, String>) -> Result<String, HandlerError> {
-    let format = props
-        .get("format")
-        .or_else(|| props.get("fmt"))
-        .or_else(|| props.get("numFmt"))
-        .map(String::as_str)
-        .unwrap_or("decimal");
-    let text = props
-        .get("text")
-        .or_else(|| props.get("lvlText"))
-        .cloned()
-        .unwrap_or_else(|| {
-            if format == "bullet" {
-                "•".into()
-            } else {
-                "%1.".into()
-            }
-        });
     let mut levels = String::new();
     for level in 0..9 {
-        let f = props
-            .get(&format!("level{}.format", level))
-            .map(String::as_str)
-            .unwrap_or(format);
-        let t = props
-            .get(&format!("level{}.text", level))
-            .cloned()
-            .unwrap_or_else(|| {
-                if level == 0 {
-                    text.clone()
-                } else {
-                    format!("%{}. ", level + 1).trim().to_string()
-                }
-            });
-        levels.push_str(&format!("<w:lvl w:ilvl=\"{}\"><w:start w:val=\"1\"/><w:numFmt w:val=\"{}\"/><w:lvlText w:val=\"{}\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"{}\" w:hanging=\"360\"/></w:pPr></w:lvl>",level,escape_attr(f),escape_attr(&t),(level+1)*720));
+        levels.push_str(&build_abstract_num_level(level, props)?);
     }
     let multi_level_type = normalize_multi_level_type(
         props
@@ -1223,6 +1202,132 @@ fn build_abstract_num(id: i32, props: &HashMap<String, String>) -> Result<String
         "<w:abstractNum w:abstractNumId=\"{}\">{}{}</w:abstractNum>",
         id, header, levels
     ))
+}
+
+/// Build one of the nine default template levels.  C# populates all nine
+/// levels when creating an abstractNum and accepts `levelN.*` properties for
+/// the same values accepted by standalone `add lvl`; keeping that behavior
+/// here makes auto-created `num` templates and explicit abstractNum creation
+/// equivalent.
+fn build_abstract_num_level(
+    level: u8,
+    props: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let prefix = format!("level{level}.");
+    let top_format = prop_alias(props, &["format", "fmt", "numFmt"]);
+    let level_format = prefixed_prop_alias(props, &prefix, &["format", "fmt", "numFmt"]);
+    let format = if level == 0 {
+        top_format.or(level_format)
+    } else {
+        level_format.or(top_format)
+    }
+    .unwrap_or(match level % 3 {
+        0 => "decimal",
+        1 => "lowerLetter",
+        _ => "lowerRoman",
+    });
+    let format = match format.to_ascii_lowercase().as_str() {
+        "unordered" | "ul" => "bullet",
+        _ => format,
+    };
+    let is_bullet = format.eq_ignore_ascii_case("bullet");
+    let text = prefixed_prop_alias(props, &prefix, &["text", "lvlText"])
+        .or_else(|| {
+            (level == 0)
+                .then(|| prop_alias(props, &["text", "lvlText"]))
+                .flatten()
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if is_bullet {
+                ["•", "◦", "▪"][level as usize % 3].to_string()
+            } else {
+                format!("%{}.", level + 1)
+            }
+        });
+
+    let mut level_props = HashMap::new();
+    level_props.insert("format".to_string(), format.to_string());
+    level_props.insert("text".to_string(), text);
+    level_props.insert(
+        "start".to_string(),
+        if level == 0 {
+            props.get("start").map(String::as_str)
+        } else {
+            None
+        }
+        .or_else(|| prefixed_prop_alias(props, &prefix, &["start"]))
+        .unwrap_or("1")
+        .to_string(),
+    );
+    level_props.insert(
+        "justification".to_string(),
+        prefixed_prop_alias(props, &prefix, &["justification", "jc", "lvlJc"])
+            .unwrap_or("left")
+            .to_string(),
+    );
+    level_props.insert(
+        "indent".to_string(),
+        if level == 0 {
+            props.get("indent").map(String::as_str)
+        } else {
+            None
+        }
+        .or_else(|| prefixed_prop_alias(props, &prefix, &["indent"]))
+        .unwrap_or(match level {
+            0 => "720",
+            1 => "1440",
+            2 => "2160",
+            3 => "2880",
+            4 => "3600",
+            5 => "4320",
+            6 => "5040",
+            7 => "5760",
+            _ => "6480",
+        })
+        .to_string(),
+    );
+    level_props.insert(
+        "hanging".to_string(),
+        prefixed_prop_alias(props, &prefix, &["hanging"])
+            .unwrap_or("360")
+            .to_string(),
+    );
+
+    for property in [
+        "suff",
+        "lvlRestart",
+        "isLgl",
+        "direction",
+        "dir",
+        "bidi",
+        "font",
+        "size",
+        "color",
+        "bold",
+        "italic",
+    ] {
+        if let Some(value) = prefixed_prop_alias(props, &prefix, &[property]) {
+            level_props.insert(property.to_string(), value.to_string());
+        }
+    }
+    build_numbering_level(level, &level_props)
+}
+
+fn prop_alias<'a>(props: &'a HashMap<String, String>, aliases: &[&str]) -> Option<&'a str> {
+    aliases
+        .iter()
+        .find_map(|alias| props.get(*alias).map(String::as_str))
+}
+
+fn prefixed_prop_alias<'a>(
+    props: &'a HashMap<String, String>,
+    prefix: &str,
+    aliases: &[&str],
+) -> Option<&'a str> {
+    aliases
+        .iter()
+        .find_map(|alias| props.get(&format!("{prefix}{alias}")).map(String::as_str))
 }
 
 /// Update template-scoped properties while retaining every level child in its

@@ -688,6 +688,63 @@ fn test_docx_num_format_auto_creates_numbering_template() {
 }
 
 #[test]
+fn test_docx_abstract_num_level_properties_seed_all_template_levels() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_abstract_num_level_properties.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "abstractNum",
+            "--properties",
+            "id=6",
+            "format=decimal",
+            "start=3",
+            "indent=900",
+            "level1.numFmt=upperRoman",
+            "level1.lvlText=%1.%2)",
+            "level1.start=4",
+            "level1.suff=space",
+            "level1.jc=center",
+            "level1.indent=1800",
+            "level1.hanging=480",
+            "level1.direction=rtl",
+            "level1.font=Symbol",
+            "level1.size=12pt",
+            "level1.color=#336699",
+            "level1.bold=true",
+            "level1.italic=true",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "word/numbering.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "<w:lvl w:ilvl=\"0\"><w:start w:val=\"3\"/><w:numFmt w:val=\"decimal\"/>",
+        ))
+        .stdout(predicate::str::contains("<w:ind w:left=\"900\" w:hanging=\"360\"/>"))
+        .stdout(predicate::str::contains(
+            "<w:lvl w:ilvl=\"1\"><w:start w:val=\"4\"/><w:numFmt w:val=\"upperRoman\"/><w:suff w:val=\"space\"/><w:lvlText w:val=\"%1.%2)\"/><w:lvlJc w:val=\"center\"/>",
+        ))
+        .stdout(predicate::str::contains("<w:bidi/><w:ind w:left=\"1800\" w:hanging=\"480\"/>"))
+        .stdout(predicate::str::contains("w:ascii=\"Symbol\""))
+        .stdout(predicate::str::contains("<w:sz w:val=\"24\"/>"))
+        .stdout(predicate::str::contains("<w:color w:val=\"336699\"/>"));
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_numbering_level_set.docx");
