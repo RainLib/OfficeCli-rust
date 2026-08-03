@@ -310,7 +310,25 @@ impl DocumentHandler for ExcelHandler {
             ));
         }
         let mut pkg = self.package.borrow_mut();
-        let resolved = crate::helpers::resolve_raw_part_path(&pkg, part_path)?;
+        let resolved = match crate::helpers::resolve_raw_part_path(&pkg, part_path) {
+            Ok(path) => path,
+            Err(HandlerError::PathNotFound(_))
+                if is_missing_worksheet_replacement(part_path, xpath, action) =>
+            {
+                let name = part_path.trim_matches('/');
+                let mut properties = HashMap::new();
+                properties.insert("name".to_string(), name.to_string());
+                crate::add::add_element(
+                    &mut pkg,
+                    "/",
+                    "sheet",
+                    handler_common::InsertPosition::Append,
+                    &properties,
+                )?;
+                crate::helpers::resolve_raw_part_path(&pkg, part_path)?
+            }
+            Err(error) => return Err(error),
+        };
         raw::raw_set(&mut pkg, &resolved, xpath, action, xml)
     }
 
@@ -409,4 +427,21 @@ impl DocumentHandler for ExcelHandler {
         let pkg = self.package.borrow();
         text_offset::build_text_offset_map_internal(&pkg)
     }
+}
+
+fn is_missing_worksheet_replacement(part_path: &str, xpath: &str, action: &str) -> bool {
+    let name = part_path.trim_matches('/');
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.starts_with("sheet[")
+        && !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "workbook" | "styles" | "sharedstrings" | "theme"
+        )
+        && xpath
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.rsplit(':').next() == Some("worksheet"))
+        && action.eq_ignore_ascii_case("replace")
 }
