@@ -22,7 +22,8 @@ pub fn handle_raw_set(cmd: RawSetCommand, _format: OutputFormat) -> Result<Strin
     let xpath = resolve_required_option("--xpath", cmd.xpath, cmd.xpath_legacy)?;
     let action = resolve_required_option("--action", cmd.action, cmd.action_legacy)?;
     let handler = crate::open_handler(&cmd.file, true)?;
-    handler.raw_set(&cmd.part_path, &xpath, &action, cmd.xml.as_deref())?;
+    let part_path = super::raw::normalize_logical_part_path(&cmd.file, &cmd.part_path);
+    handler.raw_set(&part_path, &xpath, &action, cmd.xml.as_deref())?;
     handler.save()?;
     Ok("OK".to_string())
 }

@@ -282,7 +282,8 @@ impl DocumentHandler for ExcelHandler {
 
     fn raw(&self, part_path: &str, _opts: RawOptions) -> Result<String, HandlerError> {
         let pkg = self.package.borrow();
-        pkg.read_part_xml(part_path)
+        let resolved = crate::helpers::resolve_raw_part_path(&pkg, part_path)?;
+        pkg.read_part_xml(&resolved)
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))
     }
 
@@ -299,7 +300,8 @@ impl DocumentHandler for ExcelHandler {
             ));
         }
         let mut pkg = self.package.borrow_mut();
-        raw::raw_set(&mut pkg, part_path, xpath, action, xml)
+        let resolved = crate::helpers::resolve_raw_part_path(&pkg, part_path)?;
+        raw::raw_set(&mut pkg, &resolved, xpath, action, xml)
     }
 
     fn add_part(

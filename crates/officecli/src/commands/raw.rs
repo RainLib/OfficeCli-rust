@@ -28,7 +28,7 @@ pub fn handle_raw(cmd: RawCommand, _format: OutputFormat) -> Result<String, Hand
     handler.raw(&part_path, opts)
 }
 
-fn normalize_logical_part_path(file: &str, part: &str) -> String {
+pub(crate) fn normalize_logical_part_path(file: &str, part: &str) -> String {
     let extension = std::path::Path::new(file)
         .extension()
         .and_then(|value| value.to_str())

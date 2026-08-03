@@ -3542,6 +3542,44 @@ fn test_raw_accepts_csharp_default_part_and_row_options() {
         .success();
 }
 
+#[test]
+fn test_xlsx_raw_and_raw_set_accept_csharp_semantic_sheet_paths() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("raw_semantic.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["raw", &p, "/workbook"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("workbook"));
+    officecli()
+        .args(["raw", &p, "/Sheet1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("worksheet"));
+    officecli()
+        .args([
+            "raw-set",
+            &p,
+            "/Sheet1",
+            "--xpath",
+            "/worksheet",
+            "--action",
+            "setattr",
+            "--xml",
+            "codeName=SemanticRaw",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "/Sheet1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codeName=\"SemanticRaw\""));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Extract-text — pull plain text
 // ═══════════════════════════════════════════════════════════════════════

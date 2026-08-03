@@ -1,6 +1,7 @@
 /// Parsing helpers for xlsx OOXML parts.
 use crate::dom_types::*;
 use crate::formula;
+use handler_common::HandlerError;
 use oxml::OxmlPackage;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -72,6 +73,43 @@ pub fn parse_workbook(package: &OxmlPackage) -> Result<Vec<(String, String, Stri
     }
 
     Ok(sheets)
+}
+
+/// Resolve a C# OfficeCLI raw-layer semantic path to an OOXML part path.
+///
+/// Paths ending in `.xml` or `.rels` are handled literally, matching the C#
+/// command's zip-URI convention.  The remaining aliases deliberately use the
+/// workbook relationship table instead of assuming `sheetN.xml`: worksheet
+/// filenames are not stable after a workbook has been edited by Excel.
+pub fn resolve_raw_part_path(
+    package: &OxmlPackage,
+    part_path: &str,
+) -> Result<String, HandlerError> {
+    let literal_path = part_path.trim_start_matches('/');
+    if literal_path.ends_with(".xml") || literal_path.ends_with(".rels") {
+        return Ok(literal_path.to_string());
+    }
+
+    let alias = part_path.trim_matches('/');
+    match alias.to_ascii_lowercase().as_str() {
+        "" | "workbook" => return Ok("xl/workbook.xml".to_string()),
+        "styles" => return Ok("xl/styles.xml".to_string()),
+        "sharedstrings" => return Ok("xl/sharedStrings.xml".to_string()),
+        "theme" => return Ok("xl/theme/theme1.xml".to_string()),
+        _ => {}
+    }
+
+    let sheets = parse_workbook(package).map_err(HandlerError::OperationFailed)?;
+    sheets
+        .into_iter()
+        .find(|(name, _, _)| name == alias)
+        .map(|(_, path, _)| path)
+        .ok_or_else(|| {
+            HandlerError::PathNotFound(format!(
+                "unknown XLSX raw part '{}'; use /workbook, /styles, /sharedStrings, /theme, /<SheetName>, or a zip-internal .xml path",
+                part_path
+            ))
+        })
 }
 
 /// Parse the shared strings table from xl/sharedStrings.xml.
