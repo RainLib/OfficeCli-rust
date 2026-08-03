@@ -50,8 +50,8 @@ pub fn handle_create(
 
     let result = match ext.as_str() {
         "docx" => create_blank_docx_with_locale(&output_file, cmd.minimal, cmd.locale.as_deref())?,
-        "xlsx" => create_blank_xlsx(&output_file)?,
-        "pptx" => create_blank_pptx(&output_file)?,
+        "xlsx" => create_blank_xlsx_with_locale(&output_file, cmd.locale.as_deref())?,
+        "pptx" => create_blank_pptx_with_locale(&output_file, cmd.locale.as_deref())?,
         "pdf" => create_blank_pdf(&output_file)?,
         other => {
             return Err(HandlerError::UnsupportedMode(format!(
@@ -247,6 +247,10 @@ fn locale_is_rtl(locale: &str) -> bool {
 }
 
 pub(crate) fn create_blank_xlsx(path: &str) -> Result<String, HandlerError> {
+    create_blank_xlsx_with_locale(path, None)
+}
+
+fn create_blank_xlsx_with_locale(path: &str, locale: Option<&str>) -> Result<String, HandlerError> {
     use oxml::OxmlPackage;
 
     let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -270,6 +274,7 @@ pub(crate) fn create_blank_xlsx(path: &str) -> Result<String, HandlerError> {
   <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
   <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
   <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
 </Types>"#;
 
     let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -282,6 +287,7 @@ pub(crate) fn create_blank_xlsx(path: &str) -> Result<String, HandlerError> {
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
 </Relationships>"#;
 
     let shared_strings = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -304,6 +310,7 @@ pub(crate) fn create_blank_xlsx(path: &str) -> Result<String, HandlerError> {
     pkg.add_part("xl/worksheets/sheet1.xml", sheet_xml.as_bytes());
     pkg.add_part("xl/sharedStrings.xml", shared_strings.as_bytes());
     pkg.add_part("xl/styles.xml", styles.as_bytes());
+    pkg.add_part("xl/theme/theme1.xml", default_theme_xml(locale).as_bytes());
 
     pkg.save_as(path)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
@@ -311,6 +318,10 @@ pub(crate) fn create_blank_xlsx(path: &str) -> Result<String, HandlerError> {
 }
 
 pub(crate) fn create_blank_pptx(path: &str) -> Result<String, HandlerError> {
+    create_blank_pptx_with_locale(path, None)
+}
+
+fn create_blank_pptx_with_locale(path: &str, locale: Option<&str>) -> Result<String, HandlerError> {
     use oxml::OxmlPackage;
 
     let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -360,8 +371,7 @@ pub(crate) fn create_blank_pptx(path: &str) -> Result<String, HandlerError> {
     // the same `/theme` and `defaultFont` commands C# supports on its richer
     // master/layout scaffold. Office accepts this standard relationship directly
     // from presentation.xml; imported decks may instead attach it to a master.
-    let theme_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
+    let theme_xml = default_theme_xml(locale);
 
     let mut pkg = OxmlPackage::create(path);
     pkg.add_part("[Content_Types].xml", content_types.as_bytes());
@@ -374,6 +384,17 @@ pub(crate) fn create_blank_pptx(path: &str) -> Result<String, HandlerError> {
     pkg.save_as(path)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     Ok(format!("Created blank PowerPoint presentation: {}", path))
+}
+
+fn default_theme_xml(locale: Option<&str>) -> String {
+    let (_, east_asia, complex_script) = locale_fonts(locale);
+    let east_asia = east_asia.unwrap_or("");
+    let complex_script = complex_script.unwrap_or("");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface="{}"/><a:cs typeface="{}"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface="{}"/><a:cs typeface="{}"/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#,
+        east_asia, complex_script, east_asia, complex_script
+    )
 }
 
 pub(crate) fn create_blank_pdf(path: &str) -> Result<String, HandlerError> {

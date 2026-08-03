@@ -299,6 +299,24 @@ fn test_create_docx_accepts_csharp_locale_fonts_and_rtl_defaults() {
 }
 
 #[test]
+fn test_create_locale_applies_theme_fonts_to_xlsx_and_pptx() {
+    let tmp = temp_dir();
+    for extension in ["xlsx", "pptx"] {
+        let path = tmp.path().join(format!("localized.{extension}"));
+        let p = path.to_string_lossy().to_string();
+        officecli()
+            .args(["create", &p, "--locale", "zh-CN"])
+            .assert()
+            .success();
+        officecli()
+            .args(["raw", &p, "/theme"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("等线"));
+    }
+}
+
+#[test]
 fn test_create_xlsx() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_create.xlsx");
