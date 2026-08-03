@@ -12,7 +12,7 @@
     "ilvl": { "type": "int", "add": true, "get": true, "enforcement": "strict" },
     "format": { "type": "string", "aliases": ["numFmt"], "add": true, "set": true, "get": true, "enforcement": "report" },
     "text": { "type": "string", "aliases": ["lvlText"], "add": true, "set": true, "get": true, "enforcement": "report" },
-    "start": { "type": "int", "add": true, "enforcement": "report" },
+    "start": { "type": "int", "add": true, "set": true, "get": true, "enforcement": "report" },
     "indent": { "type": "int", "add": true, "enforcement": "report" },
     "hanging": { "type": "int", "add": true, "enforcement": "report" },
     "justification": { "type": "enum", "values": ["left", "center", "right"], "aliases": ["jc"], "add": true, "enforcement": "report" },

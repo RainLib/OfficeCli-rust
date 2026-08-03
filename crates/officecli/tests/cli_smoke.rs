@@ -670,6 +670,7 @@ fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
             "/numbering/abstractNum[@id=4]/level[0]",
             "format=upperRoman",
             "text=%1)",
+            "start=7",
         ])
         .assert()
         .success();
@@ -693,7 +694,8 @@ fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"format\": \"upperRoman\""))
-        .stdout(predicate::str::contains("\"text\": \"%1)\""));
+        .stdout(predicate::str::contains("\"text\": \"%1)\""))
+        .stdout(predicate::str::contains("\"start\": \"7\""));
 }
 
 #[test]

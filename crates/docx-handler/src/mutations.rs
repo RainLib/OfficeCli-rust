@@ -284,16 +284,17 @@ pub fn set_numbering_level(
         .map(|n| start + n + 8)
         .ok_or_else(|| HandlerError::OperationFailed("invalid level".to_string()))?;
     let mut block = xml[start..end].to_string();
-    for (key, tag) in [("format", "numFmt"), ("text", "lvlText")] {
-        if let Some(value) = properties.get(key) {
-            let token = format!("<w:{} w:val=\"", tag);
-            let pos = block
-                .find(&token)
-                .ok_or_else(|| HandlerError::OperationFailed(format!("level missing {}", tag)))?
-                + token.len();
-            let close = block[pos..].find('"').map(|n| pos + n).unwrap();
-            block.replace_range(pos..close, &escape_attr(value));
-        }
+    if let Some(value) = properties.get("start") {
+        upsert_level_value(&mut block, "start", parse_numbering_id(value)?.to_string())?;
+    }
+    if let Some(value) = properties
+        .get("format")
+        .or_else(|| properties.get("numFmt"))
+    {
+        upsert_level_value(&mut block, "numFmt", escape_attr(value))?;
+    }
+    if let Some(value) = properties.get("text").or_else(|| properties.get("lvlText")) {
+        upsert_level_value(&mut block, "lvlText", escape_attr(value))?;
     }
     let mut updated = xml;
     updated.replace_range(start..end, &block);
@@ -302,9 +303,77 @@ pub fn set_numbering_level(
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     Ok(properties
         .keys()
-        .filter(|k| k.as_str() != "format" && k.as_str() != "text")
+        .filter(|k| {
+            !matches!(
+                k.as_str(),
+                "start" | "format" | "numFmt" | "text" | "lvlText"
+            )
+        })
         .cloned()
         .collect())
+}
+
+fn upsert_level_value(
+    block: &mut String,
+    tag: &str,
+    value: impl AsRef<str>,
+) -> Result<(), HandlerError> {
+    let marker = format!("<w:{} ", tag);
+    if let Some(start) = block.find(&marker) {
+        let value_marker = "w:val=\"";
+        let value_start = block[start..]
+            .find(value_marker)
+            .map(|offset| start + offset + value_marker.len())
+            .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {} element", tag)))?;
+        let value_end = block[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {} value", tag)))?;
+        block.replace_range(value_start..value_end, value.as_ref());
+        return Ok(());
+    }
+    let order = [
+        "start",
+        "numFmt",
+        "lvlRestart",
+        "isLgl",
+        "suff",
+        "lvlText",
+        "lvlJc",
+        "pPr",
+        "rPr",
+    ];
+    let current = order
+        .iter()
+        .position(|item| *item == tag)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("unknown level tag {}", tag)))?;
+    let mut insert_at = block
+        .find('>')
+        .ok_or_else(|| HandlerError::OperationFailed("invalid level opening tag".to_string()))?
+        + 1;
+    for previous in &order[..current] {
+        let previous_marker = format!("<w:{}", previous);
+        if let Some(start) = block.find(&previous_marker) {
+            let opening_end = block[start..]
+                .find('>')
+                .map(|offset| start + offset + 1)
+                .ok_or_else(|| HandlerError::OperationFailed("invalid level child".to_string()))?;
+            let end = if block[..opening_end].ends_with("/>") {
+                Some(opening_end)
+            } else {
+                block[start..]
+                    .find(&format!("</w:{}>", previous))
+                    .map(|offset| start + offset + previous.len() + 5)
+            }
+            .ok_or_else(|| HandlerError::OperationFailed("invalid level child".to_string()))?;
+            insert_at = end;
+        }
+    }
+    block.insert_str(
+        insert_at,
+        &format!("<w:{} w:val=\"{}\"/>", tag, value.as_ref()),
+    );
+    Ok(())
 }
 
 fn parse_numbering_id(value: &str) -> Result<i32, HandlerError> {

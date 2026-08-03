@@ -1230,6 +1230,13 @@ fn get_numbering_node(
         {
             result = result.with_format("text", serde_json::Value::String(text.to_string()));
         }
+        if let Some(start) = level_node
+            .children()
+            .find(|node| node.has_tag_name((W_NS, "start")))
+            .and_then(|node| node.attribute((W_NS, "val")))
+        {
+            result = result.with_format("start", serde_json::Value::String(start.to_string()));
+        }
         return Ok(result);
     }
     let defs: Vec<DocumentNode> = document
