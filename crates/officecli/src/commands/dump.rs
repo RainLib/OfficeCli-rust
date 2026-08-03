@@ -57,6 +57,30 @@ pub fn handle_dump(
             }
             return Ok(output);
         }
+        if extension.eq_ignore_ascii_case("pptx") && cmd.path.as_deref().unwrap_or("/") == "/" {
+            let handler = crate::open_handler(&cmd.file, false)?;
+            let root = handler.get("/", 1)?;
+            let mut items = vec![serde_json::json!({"command":"meta","dumpVersion":2})];
+            let presentation = handler.raw(
+                "ppt/presentation.xml",
+                handler_common::RawOptions::default(),
+            )?;
+            items.push(serde_json::json!({"command":"raw-set","part":"/presentation","xpath":"/presentation","action":"replace","xml":oxml::xml_util::strip_prolog(&presentation)}));
+            for slide in root
+                .children
+                .into_iter()
+                .filter(|node| node.path.starts_with("/slide["))
+            {
+                let xml = handler.raw(&slide.path, handler_common::RawOptions::default())?;
+                items.push(serde_json::json!({"command":"raw-set","part":slide.path,"xpath":"/sld","action":"replace","xml":oxml::xml_util::strip_prolog(&xml)}));
+            }
+            let output = serde_json::to_string(&items).map_err(HandlerError::JsonError)?;
+            if let Some(path) = cmd.out.filter(|path| path != "-") {
+                std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
+                return Ok(path);
+            }
+            return Ok(output);
+        }
         return Err(HandlerError::UnsupportedMode("replayable dump currently supports full .docx documents; use --dom for the Rust DOM export".to_string()));
     }
     let handler = crate::open_handler(&cmd.file, false)?;
