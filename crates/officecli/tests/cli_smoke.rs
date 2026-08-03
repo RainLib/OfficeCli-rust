@@ -3589,6 +3589,11 @@ fn test_pptx_presentation_settings_lifecycle() {
         .stdout(predicate::str::contains(r#""print.what": "handouts1""#))
         .stdout(predicate::str::contains(r#""show.narration": false"#));
     officecli()
+        .args(["--json", "get", &p, "/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""firstSlideNum": "4""#));
+    officecli()
         .args(["raw", &p, "ppt/presProps.xml"])
         .assert()
         .success()

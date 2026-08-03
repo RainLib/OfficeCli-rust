@@ -93,6 +93,12 @@ impl DocumentHandler for PptxHandler {
         if matches!(path, "/presentation") {
             return crate::presentation::get(&self.package.borrow(), depth);
         }
+        if path == "/" {
+            let mut root = crate::view::get_node(&self.package.borrow(), path, depth)?;
+            let settings = crate::presentation::get(&self.package.borrow(), 0)?;
+            root.format.extend(settings.format);
+            return Ok(root);
+        }
         if path.contains("/br[") || path.contains("/linebreak[") {
             return crate::linebreak::get_linebreak(&self.package.borrow(), path);
         }
