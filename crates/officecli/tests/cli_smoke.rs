@@ -3569,6 +3569,51 @@ fn test_dump_docx() {
     officecli().args(["dump", &p]).assert().success();
 }
 
+#[test]
+fn test_dump_docx_batch_replays_into_fresh_document() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_source.docx");
+    let target = tmp.path().join("dump_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &source_path,
+            "/body",
+            "--type",
+            "paragraph",
+            "--prop",
+            "text=Round trip",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &target_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Round trip"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Raw — read a part by name
 // ═══════════════════════════════════════════════════════════════════════
