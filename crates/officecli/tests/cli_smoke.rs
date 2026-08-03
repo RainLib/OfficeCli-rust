@@ -1280,7 +1280,7 @@ fn test_docx_move_revision_creates_and_resolves_range_markers() {
         .args(["--json", "query", &p, "revision"])
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+        .stdout(predicate::str::contains("\"matches\": 0"));
     officecli().args(["validate", &p]).assert().success();
 }
 
@@ -1339,7 +1339,7 @@ fn test_docx_format_revision_reject_restores_snapshot() {
         .args(["--json", "query", &p, "revision"])
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+        .stdout(predicate::str::contains("\"matches\": 0"));
     officecli().args(["validate", &p]).assert().success();
 }
 
@@ -1489,7 +1489,7 @@ fn test_docx_set_existing_paragraph_format_revision_restores_prior_properties() 
         .args(["--json", "query", &p, "revision"])
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+        .stdout(predicate::str::contains("\"matches\": 0"));
     officecli().args(["validate", &p]).assert().success();
 }
 
@@ -3535,7 +3535,7 @@ fn test_xlsx_detected_table_query_and_row_predicate() {
         .args(["--json", "query", &p, "listobject"])
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"(?s)^\s*\[\s*\]\s*$").unwrap());
+        .stdout(predicate::str::contains("\"matches\": 0"));
 
     officecli()
         .args(["help", "xlsx", "detectedtable"])
