@@ -4845,3 +4845,62 @@ fn test_json_envelopes_wrap_writes_and_failures() {
         .unwrap()
         .contains("not found"));
 }
+
+#[test]
+fn test_query_compact_uses_csharp_stable_docx_format() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("query_compact.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=Alpha\tBeta",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["set", &p, "/body/p[2]", "style=Heading1"])
+        .assert()
+        .success();
+
+    officecli()
+        .args(["query", &p, "paragraph", "--compact", "--fields", "style"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body/p[1]\t[p]\t(empty)\tstyle="))
+        .stdout(predicate::str::contains(
+            "/body/p[2]\t[Heading1]\t\"Alpha\\tBeta\"\tstyle=",
+        ))
+        .stdout(predicate::str::contains("total: 2 of 2 elements"));
+    officecli()
+        .args(["--json", "query", &p, "paragraph", "--compact"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "--compact is a plain-text line format",
+        ));
+}
+
+#[test]
+fn test_query_compact_uses_csharp_pptx_total_suffix() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("query_compact.pptx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["query", &p, "shape", "--compact"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "total: 0 of 0 elements / 1 slides",
+        ));
+}
