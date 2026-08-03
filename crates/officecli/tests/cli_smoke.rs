@@ -983,6 +983,12 @@ fn test_docx_removing_num_clears_direct_paragraph_bindings() {
         .success()
         .stdout(predicate::str::contains("<w:numId w:val=\"9\""));
     officecli()
+        .args(["get", &p, "/body/p[2]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"numId\": \"9\""))
+        .stdout(predicate::str::contains("\"numLevel\": \"0\""));
+    officecli()
         .args(["remove", &p, "/numbering/num[@id=9]"])
         .assert()
         .success();
@@ -995,6 +1001,12 @@ fn test_docx_removing_num_clears_direct_paragraph_bindings() {
         .assert()
         .success()
         .stdout(predicate::str::contains("<w:numPr").not());
+    officecli()
+        .args(["get", &p, "/body/p[2]", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"numId\"").not())
+        .stdout(predicate::str::contains("\"numLevel\"").not());
     officecli()
         .args(["validate", &p, "--json"])
         .assert()

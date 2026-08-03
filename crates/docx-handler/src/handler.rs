@@ -474,6 +474,27 @@ impl DocumentHandler for WordHandler {
                                 );
                             }
                         }
+                        if name == "numPr" {
+                            for num_child in &child.children {
+                                if let WordElementType::Unknown(ref num_name) =
+                                    num_child.element_type
+                                {
+                                    let key = match num_name.as_str() {
+                                        "numId" => Some("numId"),
+                                        "ilvl" => Some("numLevel"),
+                                        _ => None,
+                                    };
+                                    if let (Some(key), Some(value)) =
+                                        (key, num_child.attributes.get("val"))
+                                    {
+                                        doc_node = doc_node.with_format(
+                                            key,
+                                            serde_json::Value::String(value.clone()),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
