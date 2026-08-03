@@ -4939,11 +4939,31 @@ fn test_move_paragraph() {
         .assert()
         .success();
 
-    // Move p[3] before p[2] using --target
+    // C# syntax infers /body from the sibling anchor and does not need --to.
     officecli()
-        .args(["move", &p, "/body/p[3]", "--target", "/body/p[2]"])
+        .args(["move", &p, "/body/p[3]", "--before", "/body/p[2]"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Moved to /body/p[2]"));
+    officecli()
+        .args(["get", &p, "/body/p[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Second"));
+
+    officecli()
+        .args([
+            "move",
+            &p,
+            "/body/p[2]",
+            "--index",
+            "0",
+            "--after",
+            "/body/p[1]",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mutually exclusive"));
 }
 
 #[test]

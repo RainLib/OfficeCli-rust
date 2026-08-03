@@ -153,10 +153,26 @@ pub fn parse_position(input: Option<&str>) -> InsertPosition {
 /// position flags. Keeping `--position` avoids breaking existing Rust CLI
 /// users while making the public C# syntax available verbatim.
 fn resolve_position(cmd: &AddCommand) -> Result<InsertPosition, HandlerError> {
-    let explicit_count = usize::from(cmd.position.is_some())
-        + usize::from(cmd.index.is_some())
-        + usize::from(cmd.after.is_some())
-        + usize::from(cmd.before.is_some());
+    resolve_position_fields(
+        cmd.position.as_deref(),
+        cmd.index,
+        cmd.after.as_deref(),
+        cmd.before.as_deref(),
+    )
+}
+
+/// Shared resolver for the C# explicit flags and the Rust legacy compact
+/// position field used by add and move.
+pub(crate) fn resolve_position_fields(
+    position: Option<&str>,
+    index: Option<usize>,
+    after: Option<&str>,
+    before: Option<&str>,
+) -> Result<InsertPosition, HandlerError> {
+    let explicit_count = usize::from(position.is_some())
+        + usize::from(index.is_some())
+        + usize::from(after.is_some())
+        + usize::from(before.is_some());
     if explicit_count > 1 {
         return Err(HandlerError::InvalidArgument(
             "--index, --after, --before, and --position are mutually exclusive. Use only one."
@@ -164,11 +180,11 @@ fn resolve_position(cmd: &AddCommand) -> Result<InsertPosition, HandlerError> {
         ));
     }
 
-    Ok(match (&cmd.index, &cmd.after, &cmd.before) {
-        (Some(index), None, None) => InsertPosition::AtIndex(*index),
-        (None, Some(after), None) => InsertPosition::AfterElement(after.clone()),
-        (None, None, Some(before)) => InsertPosition::BeforeElement(before.clone()),
-        _ => parse_position(cmd.position.as_deref()),
+    Ok(match (index, after, before) {
+        (Some(index), None, None) => InsertPosition::AtIndex(index),
+        (None, Some(after), None) => InsertPosition::AfterElement(after.to_string()),
+        (None, None, Some(before)) => InsertPosition::BeforeElement(before.to_string()),
+        _ => parse_position(position),
     })
 }
 
