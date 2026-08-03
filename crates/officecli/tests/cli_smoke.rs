@@ -3615,6 +3615,24 @@ fn test_dump_docx_batch_replays_into_fresh_document() {
 }
 
 #[test]
+fn test_dump_accepts_csharp_positional_path_and_legacy_path_flag() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("dump_path.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["dump", &p, "/body", "--dom"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body"));
+    officecli()
+        .args(["dump", &p, "--path", "/body", "--dom"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/body"));
+}
+
+#[test]
 fn test_dump_xlsx_batch_replays_into_fresh_workbook() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_source.xlsx");

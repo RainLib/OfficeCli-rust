@@ -13,20 +13,32 @@ pub struct DumpCommand {
     /// Keep Rust's original DOM JSON export mode.
     #[arg(long)]
     pub dom: bool,
-    #[arg(long)]
+    #[arg(value_name = "PATH")]
     pub path: Option<String>,
+    /// Legacy Rust spelling for the dump subtree path.
+    #[arg(long = "path")]
+    pub path_flag: Option<String>,
 }
 
 pub fn handle_dump(
     cmd: DumpCommand,
     _format: handler_common::OutputFormat,
 ) -> Result<String, HandlerError> {
+    let path = match (cmd.path, cmd.path_flag) {
+        (Some(_), Some(_)) => {
+            return Err(HandlerError::InvalidArgument(
+                "dump path cannot be supplied both positionally and with --path".to_string(),
+            ))
+        }
+        (Some(path), None) | (None, Some(path)) => Some(path),
+        (None, None) => None,
+    };
     if !cmd.dom && cmd.format.eq_ignore_ascii_case("batch") {
         let extension = std::path::Path::new(&cmd.file)
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if extension.eq_ignore_ascii_case("docx") && cmd.path.as_deref().unwrap_or("/") == "/" {
+        if extension.eq_ignore_ascii_case("docx") && path.as_deref().unwrap_or("/") == "/" {
             let handler = crate::open_handler(&cmd.file, false)?;
             let xml = handler.raw("word/document.xml", handler_common::RawOptions::default())?;
             let xml = oxml::xml_util::strip_prolog(&xml).to_string();
@@ -40,7 +52,7 @@ pub fn handle_dump(
             }
             return Ok(output);
         }
-        if extension.eq_ignore_ascii_case("xlsx") && cmd.path.as_deref().unwrap_or("/") == "/" {
+        if extension.eq_ignore_ascii_case("xlsx") && path.as_deref().unwrap_or("/") == "/" {
             let handler = crate::open_handler(&cmd.file, false)?;
             let root = handler.get("/", 0)?;
             let mut items = vec![serde_json::json!({"command":"meta","dumpVersion":2})];
@@ -57,7 +69,7 @@ pub fn handle_dump(
             }
             return Ok(output);
         }
-        if extension.eq_ignore_ascii_case("pptx") && cmd.path.as_deref().unwrap_or("/") == "/" {
+        if extension.eq_ignore_ascii_case("pptx") && path.as_deref().unwrap_or("/") == "/" {
             let handler = crate::open_handler(&cmd.file, false)?;
             let root = handler.get("/", 1)?;
             let mut items = vec![serde_json::json!({"command":"meta","dumpVersion":2})];
@@ -85,7 +97,7 @@ pub fn handle_dump(
     }
     let handler = crate::open_handler(&cmd.file, false)?;
 
-    if let Some(path) = cmd.path {
+    if let Some(path) = path {
         // Dump a specific node as JSON
         let node = handler.get(&path, 10)?;
         let json = serde_json::to_string_pretty(&node).map_err(|e| HandlerError::JsonError(e))?;
