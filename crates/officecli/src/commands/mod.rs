@@ -90,9 +90,30 @@ pub fn ensure_json_success_envelope(output: &str) -> String {
 pub fn json_error_envelope(error: &HandlerError) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "success": false,
-        "error": { "error": error.to_string() },
+        "error": {
+            "error": error.to_string(),
+            "code": json_error_code(error),
+        },
     }))
     .expect("JSON envelope contains only serializable values")
+}
+
+/// Map Rust's typed failures onto the C# JSON error-code vocabulary. Keeping
+/// this enum-driven avoids classifying a localized or handler-specific message
+/// as an internal error merely because its wording changed.
+fn json_error_code(error: &HandlerError) -> &'static str {
+    match error {
+        HandlerError::PathNotFound(_) => "not_found",
+        HandlerError::InvalidPath(_) => "invalid_path",
+        HandlerError::InvalidArgument(_) => "invalid_value",
+        HandlerError::UnsupportedType(_) => "unsupported_type",
+        HandlerError::UnsupportedMode(_) => "unsupported_feature",
+        HandlerError::UnsupportedProperty(_) => "unsupported_property",
+        HandlerError::OpenError(_) => "corrupt_input",
+        HandlerError::SaveError(_) | HandlerError::IoError(_) => "io_error",
+        HandlerError::ValidationError(_) => "validation_error",
+        HandlerError::JsonError(_) | HandlerError::OperationFailed(_) => "internal_error",
+    }
 }
 
 /// Return the business outcome carried by an already rendered JSON envelope.

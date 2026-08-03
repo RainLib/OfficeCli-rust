@@ -4927,6 +4927,7 @@ fn test_json_envelopes_wrap_writes_and_failures() {
         .clone();
     let error_json: serde_json::Value = serde_json::from_slice(&error_output).unwrap();
     assert_eq!(error_json["success"], false);
+    assert_eq!(error_json["error"]["code"], "not_found");
     assert!(error_json["error"]["error"]
         .as_str()
         .unwrap()
