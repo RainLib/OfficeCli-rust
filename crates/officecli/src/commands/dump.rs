@@ -120,6 +120,20 @@ pub fn handle_dump(
             }
             return Ok(output);
         }
+        if extension.eq_ignore_ascii_case("pptx") {
+            let slide_path = path.as_deref().unwrap_or("/");
+            let handler = crate::open_handler(&cmd.file, false)?;
+            let xml = handler.raw(slide_path, handler_common::RawOptions::default())?;
+            let output = serde_json::to_string(&vec![
+                serde_json::json!({"command":"meta","dumpVersion":2}),
+                serde_json::json!({"command":"raw-set","part":slide_path,"xpath":"/sld","action":"replace","xml":oxml::xml_util::strip_prolog(&xml)}),
+            ]).map_err(HandlerError::JsonError)?;
+            if let Some(path) = cmd.out.filter(|path| path != "-") {
+                std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
+                return Ok(path);
+            }
+            return Ok(output);
+        }
         return Err(HandlerError::UnsupportedMode("replayable dump currently supports full .docx documents; use --dom for the Rust DOM export".to_string()));
     }
     let handler = crate::open_handler(&cmd.file, false)?;
