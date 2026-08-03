@@ -3271,6 +3271,65 @@ fn test_xlsx_modern_formula_ooxml_round_trip() {
 }
 
 #[test]
+fn test_xlsx_workbook_settings_root_lifecycle() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("workbook_settings.xlsx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/",
+            "--type-name",
+            "sheet",
+            "--properties",
+            "name=Second",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/",
+            "date1904=true",
+            "codeName=Ledger",
+            "calc.mode=manual",
+            "calc.iterate=true",
+            "calc.iterateCount=50",
+            "calc.iterateDelta=0.01",
+            "calc.fullPrecision=false",
+            "calc.refMode=R1C1",
+            "activeTab=Second",
+            "firstSheet=1",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""workbook.date1904": true"#))
+        .stdout(predicate::str::contains(r#""workbook.codeName": "Ledger""#))
+        .stdout(predicate::str::contains(r#""calc.mode": "manual""#))
+        .stdout(predicate::str::contains(r#""activeTab": "1""#));
+    officecli()
+        .args(["raw", &p, "xl/workbook.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<workbookPr"))
+        .stdout(predicate::str::contains(r#"date1904="1""#))
+        .stdout(predicate::str::contains(r#"codeName="Ledger""#))
+        .stdout(predicate::str::contains("<calcPr"))
+        .stdout(predicate::str::contains(r#"calcMode="manual""#))
+        .stdout(predicate::str::contains(r#"iterateCount="50""#))
+        .stdout(predicate::str::contains(r#"refMode="R1C1""#));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
 fn test_xlsx_in_cell_rich_value_image_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("in_cell_image.xlsx");

@@ -158,6 +158,7 @@ pub fn get_node_at_path(
                 })
                 .collect();
             root = root.with_children(children);
+            crate::workbook_settings::populate_node(package, &mut root)?;
             Ok(root)
         }
         // Sheet root: /SheetName

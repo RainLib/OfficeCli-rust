@@ -169,7 +169,10 @@ impl DocumentHandler for ExcelHandler {
             ));
         }
         // Find/replace and range edits carry their target in the property map.
-        if !properties.contains_key("find") && !properties.contains_key("range_paths") {
+        if !properties.contains_key("find")
+            && !properties.contains_key("range_paths")
+            && path != "/"
+        {
             handler_common::ensure_scoped(path, "set")?;
         }
         let mut pkg = self.package.borrow_mut();
@@ -178,6 +181,8 @@ impl DocumentHandler for ExcelHandler {
                 HandlerError::InvalidArgument(format!("invalid range paths: {}", e))
             })?;
             mutations::apply_xlsx_range_highlights(&mut pkg, properties, &segments)
+        } else if path == "/" {
+            crate::workbook_settings::set(&mut pkg, properties)
         } else {
             mutations::set_cell_properties(&mut pkg, path, properties)
         }
