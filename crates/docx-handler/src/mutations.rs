@@ -55,7 +55,7 @@ pub fn add_numbering_definition(
             element_type
         )));
     }
-    let xml = package.read_part_xml(DOCX_NUMBERING_PART).unwrap_or_else(|_| {
+    let mut xml = package.read_part_xml(DOCX_NUMBERING_PART).unwrap_or_else(|_| {
         format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"{}\"></w:numbering>", W_NS)
     });
     let is_abstract = element_type.eq_ignore_ascii_case("abstractNum");
@@ -77,10 +77,59 @@ pub fn add_numbering_definition(
             format!("/numbering/abstractNum[@id={}]", id),
         )
     } else {
-        let abs_id = properties
+        let has_abstract_id = properties
             .get("abstractNumId")
-            .ok_or_else(|| HandlerError::InvalidArgument("num requires abstractNumId".to_string()))
-            .and_then(|v| parse_numbering_id(v))?;
+            .is_some_and(|value| !value.is_empty());
+        let has_template_properties = properties.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "format"
+                    | "fmt"
+                    | "numFmt"
+                    | "text"
+                    | "lvlText"
+                    | "indent"
+                    | "type"
+                    | "name"
+                    | "styleLink"
+                    | "numStyleLink"
+            ) || key
+                .strip_prefix("level")
+                .is_some_and(|suffix| suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        });
+        if has_abstract_id && has_template_properties {
+            return Err(HandlerError::InvalidArgument(
+                "abstractNumId conflicts with template properties; reuse a template or define one"
+                    .to_string(),
+            ));
+        }
+        if !has_abstract_id && !has_template_properties {
+            return Err(HandlerError::InvalidArgument(
+                "num requires abstractNumId or template properties such as format=decimal"
+                    .to_string(),
+            ));
+        }
+        let abs_id = if let Some(value) = properties.get("abstractNumId") {
+            let abs_id = parse_numbering_id(value)?;
+            if !xml.contains(&format!("w:abstractNumId=\"{}\"", abs_id)) {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "abstractNumId={} not found",
+                    abs_id
+                )));
+            }
+            abs_id
+        } else {
+            let abs_id = next_numbering_id(&xml, "abstractNumId");
+            let template = build_abstract_num(abs_id, properties)?;
+            let insert_at = xml
+                .find("<w:num ")
+                .or_else(|| xml.find("</w:numbering>"))
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("invalid numbering.xml".to_string())
+                })?;
+            xml.insert_str(insert_at, &template);
+            abs_id
+        };
         if !xml.contains(&format!("w:abstractNumId=\"{}\"", abs_id)) {
             return Err(HandlerError::InvalidArgument(format!(
                 "abstractNumId={} not found",
@@ -104,10 +153,13 @@ pub fn add_numbering_definition(
             format!("/numbering/num[@id={}]", id),
         )
     };
-    let close = "</w:numbering>";
-    let pos = xml
-        .find(close)
-        .ok_or_else(|| HandlerError::OperationFailed("invalid numbering.xml".to_string()))?;
+    let pos = if is_abstract {
+        xml.find("<w:num ").or_else(|| xml.find("</w:numbering>"))
+    } else {
+        xml.find("<w:numIdMacAtCleanup")
+            .or_else(|| xml.find("</w:numbering>"))
+    }
+    .ok_or_else(|| HandlerError::OperationFailed("invalid numbering.xml".to_string()))?;
     let mut updated = xml;
     updated.insert_str(pos, &fragment);
     package
@@ -1115,14 +1167,23 @@ fn next_numbering_id(xml: &str, attr: &str) -> i32 {
         + 1
 }
 fn build_abstract_num(id: i32, props: &HashMap<String, String>) -> Result<String, HandlerError> {
-    let format = props.get("format").map(String::as_str).unwrap_or("decimal");
-    let text = props.get("text").cloned().unwrap_or_else(|| {
-        if format == "bullet" {
-            "•".into()
-        } else {
-            "%1.".into()
-        }
-    });
+    let format = props
+        .get("format")
+        .or_else(|| props.get("fmt"))
+        .or_else(|| props.get("numFmt"))
+        .map(String::as_str)
+        .unwrap_or("decimal");
+    let text = props
+        .get("text")
+        .or_else(|| props.get("lvlText"))
+        .cloned()
+        .unwrap_or_else(|| {
+            if format == "bullet" {
+                "•".into()
+            } else {
+                "%1.".into()
+            }
+        });
     let mut levels = String::new();
     for level in 0..9 {
         let f = props

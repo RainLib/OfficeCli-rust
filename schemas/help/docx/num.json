@@ -6,10 +6,14 @@
   "addParent": "/numbering",
   "operations": { "add": true, "set": true, "get": true, "query": true, "remove": true },
   "paths": { "stable": ["/numbering/num[@id=N]"], "positional": ["/numbering/num[N]"] },
-  "note": "Numbering instance referencing an existing abstractNum. New instances restart level 0 by default; pass continue=true to retain Word's continuation behavior. Remove clears all direct paragraph bindings to this numId across the document, headers, footers, footnotes and endnotes.",
+  "note": "Numbering instance. Supply abstractNumId to reuse a template, or format/text/indent/type to create a matching abstractNum automatically. New instances restart level 0 by default; pass continue=true to retain Word's continuation behavior. Remove clears all direct paragraph bindings to this numId across the document, headers, footers, footnotes and endnotes.",
   "properties": {
     "id": { "type": "int", "add": true, "get": true, "enforcement": "strict" },
     "abstractNumId": { "type": "int", "add": true, "set": true, "get": true, "enforcement": "strict" },
+    "format": { "type": "string", "aliases": ["fmt", "numFmt"], "add": true, "get": false, "enforcement": "report", "description": "Without abstractNumId, creates a matching numbering template." },
+    "text": { "type": "string", "aliases": ["lvlText"], "add": true, "get": false, "enforcement": "report", "description": "Level-0 marker text for an auto-created template." },
+    "indent": { "type": "int", "add": true, "get": false, "enforcement": "report", "description": "Template indentation when using format-based auto-create." },
+    "type": { "type": "enum", "values": ["hybridMultilevel", "multilevel", "singleLevel"], "add": true, "get": false, "enforcement": "report", "description": "multiLevelType for an auto-created template." },
     "start": { "type": "int", "add": true, "set": true, "get": false, "enforcement": "strict", "description": "Shorthand for startOverride.0." },
     "startOverride.N": { "type": "int", "add": true, "set": true, "get": true, "enforcement": "strict", "description": "Per-level start override; N must be 0 through 8." },
     "continue": { "type": "boolean", "add": true, "set": false, "get": false, "enforcement": "strict", "description": "Do not add the default level-0 restart override." }

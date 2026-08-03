@@ -639,6 +639,55 @@ fn test_docx_num_reference_update_rejects_dangling_template() {
 }
 
 #[test]
+fn test_docx_num_format_auto_creates_numbering_template() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_num_auto_template.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/numbering",
+            "--type-name",
+            "num",
+            "--properties",
+            "id=9",
+            "--properties",
+            "format=bullet",
+            "--properties",
+            "text=•",
+            "--properties",
+            "type=single",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/numbering", "--depth", "1", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"abstractNumId\": \"0\""))
+        .stdout(predicate::str::contains("\"numId\": \"9\""));
+    officecli()
+        .args([
+            "get",
+            &p,
+            "/numbering/abstractNum[@id=0]/level[0]",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\": \"bullet\""))
+        .stdout(predicate::str::contains("\"text\": \"•\""));
+    officecli()
+        .args(["validate", &p, "--json"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_numbering_level_set.docx");
