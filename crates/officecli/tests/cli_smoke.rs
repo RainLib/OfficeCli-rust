@@ -3624,6 +3624,36 @@ fn test_xlsx_raw_accepts_csharp_drawing_chart_and_relationship_paths() {
         .stdout(predicate::str::contains("wsDr"));
 }
 
+#[test]
+fn test_xlsx_raw_filters_rows_and_columns_like_csharp() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("raw_filters.xlsx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    for (cell, value) in [("A1", "keep"), ("B1", "drop column"), ("A2", "drop row")] {
+        officecli()
+            .args([
+                "set",
+                &p,
+                &format!("/Sheet1/{cell}"),
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    }
+
+    officecli()
+        .args([
+            "raw", &p, "/Sheet1", "--start", "1", "--end", "1", "--cols", "A",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("A1"))
+        .stdout(predicate::str::contains("B1").not())
+        .stdout(predicate::str::contains("A2").not());
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Extract-text — pull plain text
 // ═══════════════════════════════════════════════════════════════════════

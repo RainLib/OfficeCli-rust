@@ -280,11 +280,21 @@ impl DocumentHandler for ExcelHandler {
         template_merger::merge_ooxml_parts(&mut pkg, &parts, "t", data)
     }
 
-    fn raw(&self, part_path: &str, _opts: RawOptions) -> Result<String, HandlerError> {
+    fn raw(&self, part_path: &str, opts: RawOptions) -> Result<String, HandlerError> {
         let pkg = self.package.borrow();
         let resolved = crate::helpers::resolve_raw_part_path(&pkg, part_path)?;
-        pkg.read_part_xml(&resolved)
-            .map_err(|e| HandlerError::OperationFailed(e.to_string()))
+        let xml = pkg
+            .read_part_xml(&resolved)
+            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
+        let is_worksheet = crate::helpers::parse_workbook(&pkg)
+            .map_err(HandlerError::OperationFailed)?
+            .iter()
+            .any(|(_, sheet_part, _)| sheet_part == &resolved);
+        if is_worksheet {
+            raw::filter_worksheet_xml(&xml, &opts)
+        } else {
+            Ok(xml)
+        }
     }
 
     fn raw_set(
