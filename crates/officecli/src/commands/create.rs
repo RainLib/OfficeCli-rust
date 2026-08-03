@@ -18,6 +18,10 @@ pub struct CreateCommand {
     /// For .docx, emit a raw OOXML scaffold without the Word-style baseline.
     #[arg(long)]
     pub minimal: bool,
+
+    /// Locale tag used to seed DOCX script fonts and RTL defaults (for example zh-CN or ar-SA).
+    #[arg(long)]
+    pub locale: Option<String>,
 }
 
 pub fn handle_create(
@@ -45,7 +49,7 @@ pub fn handle_create(
     }
 
     let result = match ext.as_str() {
-        "docx" => create_blank_docx_with_options(&output_file, cmd.minimal)?,
+        "docx" => create_blank_docx_with_locale(&output_file, cmd.minimal, cmd.locale.as_deref())?,
         "xlsx" => create_blank_xlsx(&output_file)?,
         "pptx" => create_blank_pptx(&output_file)?,
         "pdf" => create_blank_pdf(&output_file)?,
@@ -65,16 +69,33 @@ pub(crate) fn create_blank_docx(path: &str) -> Result<String, HandlerError> {
 }
 
 fn create_blank_docx_with_options(path: &str, minimal: bool) -> Result<String, HandlerError> {
+    create_blank_docx_with_locale(path, minimal, None)
+}
+
+fn create_blank_docx_with_locale(
+    path: &str,
+    minimal: bool,
+    locale: Option<&str>,
+) -> Result<String, HandlerError> {
     use oxml::OxmlPackage;
 
     // Minimal blank docx: word/document.xml with empty body
-    let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    let rtl = locale.map(locale_is_rtl).unwrap_or(false);
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:body>
     <w:p><w:r><w:t/></w:r></w:p>
+    {}
   </w:body>
-</w:document>"#;
+</w:document>"#,
+        if rtl {
+            "<w:sectPr><w:bidi/></w:sectPr>"
+        } else {
+            ""
+        }
+    );
 
     let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -99,9 +120,27 @@ fn create_blank_docx_with_options(path: &str, minimal: bool) -> Result<String, H
     // direct `style=HeadingN` edits must not create dangling pStyle IDs. Keep
     // the built-in style IDs Word itself recognizes, with concise definitions
     // sufficient for interoperable OOXML and later style mutation.
-    let styles_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    let (latin, east_asia, complex_script) = locale_fonts(locale);
+    let r_fonts = format!(
+        "<w:rFonts w:ascii=\"{}\" w:hAnsi=\"{}\"{}{} />",
+        latin.unwrap_or("Calibri"),
+        latin.unwrap_or("Calibri"),
+        east_asia
+            .map(|font| format!(" w:eastAsia=\"{}\"", font))
+            .unwrap_or_default(),
+        complex_script
+            .map(|font| format!(" w:cs=\"{}\"", font))
+            .unwrap_or_default(),
+    );
+    let paragraph_defaults = if rtl {
+        "<w:pPrDefault><w:pPr><w:bidi/></w:pPr></w:pPrDefault>"
+    } else {
+        ""
+    };
+    let styles_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:docDefaults/>
+  <w:docDefaults><w:rPrDefault><w:rPr>{}</w:rPr></w:rPrDefault>{}</w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>
@@ -112,7 +151,9 @@ fn create_blank_docx_with_options(path: &str, minimal: bool) -> Result<String, H
   <w:style w:type="paragraph" w:styleId="Heading7"><w:name w:val="heading 7"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading8"><w:name w:val="heading 8"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading9"><w:name w:val="heading 9"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/></w:style>
-</w:styles>"#;
+</w:styles>"#,
+        r_fonts, paragraph_defaults
+    );
     let document_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
@@ -137,6 +178,72 @@ fn create_blank_docx_with_options(path: &str, minimal: bool) -> Result<String, H
     pkg.save_as(path)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     Ok(format!("Created blank Word document: {}", path))
+}
+
+fn locale_fonts(
+    locale: Option<&str>,
+) -> (
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+) {
+    let Some(locale) = locale else {
+        return (None, None, None);
+    };
+    let normalized = locale.replace('_', "-").to_ascii_lowercase();
+    let language = normalized.split('-').next().unwrap_or_default();
+    match normalized.as_str() {
+        "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant" => {
+            (Some("Times New Roman"), Some("新細明體"), None)
+        }
+        "zh-cn" | "zh-sg" | "zh-hans" => (Some("Times New Roman"), Some("等线"), None),
+        _ => match language {
+            "zh" => (Some("Times New Roman"), Some("等线"), None),
+            "ja" => (Some("Times New Roman"), Some("游明朝"), None),
+            "ko" => (Some("Times New Roman"), Some("맑은 고딕"), None),
+            "ar" => (Some("Times New Roman"), None, Some("Arabic Typesetting")),
+            "he" => (Some("Times New Roman"), None, Some("Times New Roman")),
+            "th" => (Some("Times New Roman"), None, Some("Tahoma")),
+            "fa" => (Some("Times New Roman"), None, Some("B Nazanin")),
+            "ur" => (
+                Some("Times New Roman"),
+                None,
+                Some("Jameel Noori Nastaleeq"),
+            ),
+            "hi" => (Some("Times New Roman"), None, Some("Mangal")),
+            "en" | "fr" | "de" | "es" | "it" | "pt" | "nl" | "ru" | "pl" => {
+                (Some("Times New Roman"), None, None)
+            }
+            _ => (None, None, None),
+        },
+    }
+}
+
+fn locale_is_rtl(locale: &str) -> bool {
+    matches!(
+        locale
+            .replace('_', "-")
+            .to_ascii_lowercase()
+            .split('-')
+            .next(),
+        Some(
+            "ar" | "he"
+                | "iw"
+                | "yi"
+                | "ji"
+                | "ur"
+                | "fa"
+                | "ps"
+                | "sd"
+                | "ks"
+                | "ug"
+                | "ku"
+                | "ckb"
+                | "dv"
+                | "syr"
+                | "nqo"
+        )
+    )
 }
 
 pub(crate) fn create_blank_xlsx(path: &str) -> Result<String, HandlerError> {

@@ -277,6 +277,28 @@ fn test_create_minimal_docx_omits_style_baseline() {
 }
 
 #[test]
+fn test_create_docx_accepts_csharp_locale_fonts_and_rtl_defaults() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("localized.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &p, "--locale", "ar-SA"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "/styles"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Arabic Typesetting"))
+        .stdout(predicate::str::contains("w:bidi"));
+    officecli()
+        .args(["raw", &p, "/document"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<w:bidi"));
+}
+
+#[test]
 fn test_create_xlsx() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_create.xlsx");
