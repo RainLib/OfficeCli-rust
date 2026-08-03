@@ -436,6 +436,89 @@ fn test_add_and_get_paragraph() {
 }
 
 #[test]
+fn test_add_accepts_csharp_position_flags() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_add_csharp_positions.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=tail",
+        ])
+        .assert()
+        .success();
+
+    // `--index` is zero-based, as in the C# CLI. It inserts before the
+    // document's initial blank paragraph at index 0.
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--index",
+            "0",
+            "--properties",
+            "text=head",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("head"));
+
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--before",
+            "/body/p[3]",
+            "--properties",
+            "text=before-tail",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["get", &p, "/body/p[3]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("before-tail"));
+
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--index",
+            "0",
+            "--before",
+            "/body/p[1]",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mutually exclusive"));
+}
+
+#[test]
 fn test_docx_tabstop_uses_flat_csharp_compatible_get_path() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_tabstop.docx");

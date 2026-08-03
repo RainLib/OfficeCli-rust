@@ -1926,31 +1926,37 @@ fn add_paragraph(
         .map(|(i, _)| i)
         .collect();
 
-    let insert_idx = resolve_insert_index_simple(&position, content_items.len());
-
-    match insert_idx {
-        Some(idx) => {
-            let real_idx = if idx < content_items.len() {
-                content_items[idx]
-            } else {
-                dom.root.children[body_idx].children.len()
-            };
-            dom.root.children[body_idx].children.insert(real_idx, para);
+    // `--index` addresses visible body content (not trailing sectPr), while
+    // `--after` / `--before` address a concrete sibling path.  The older
+    // helper only handled indexes, which silently appended anchored paragraph
+    // inserts despite the command accepting those options.
+    let real_idx = match &position {
+        InsertPosition::AtIndex(idx) => content_items
+            .get(*idx)
+            .copied()
+            .unwrap_or_else(|| body_append_index(&dom.root.children[body_idx].children)),
+        InsertPosition::Append => body_append_index(&dom.root.children[body_idx].children),
+        InsertPosition::AfterElement(_) | InsertPosition::BeforeElement(_) => {
+            resolve_insert_index(dom, parent, &position)?
+                .unwrap_or_else(|| body_append_index(&dom.root.children[body_idx].children))
         }
-        None => {
-            dom.root.children[body_idx].children.push(para);
-        }
-    }
-
-    // Calculate the path of the new paragraph
-    let mut new_para_idx = 0;
-    for child in &dom.root.children[body_idx].children {
-        if child.element_type == WordElementType::Paragraph {
-            new_para_idx += 1;
-        }
-    }
+    };
+    let new_para_idx = dom.root.children[body_idx].children[..real_idx]
+        .iter()
+        .filter(|child| child.element_type == WordElementType::Paragraph)
+        .count()
+        + 1;
+    dom.root.children[body_idx].children.insert(real_idx, para);
 
     Ok(format!("/body/p[{}]", new_para_idx))
+}
+
+/// Body content must precede a trailing section-properties node.
+fn body_append_index(children: &[WordNode]) -> usize {
+    children
+        .iter()
+        .rposition(|child| child.element_type == WordElementType::SectionProperties)
+        .unwrap_or(children.len())
 }
 
 /// Expand a pragmatic Markdown subset into editable native Word paragraphs.

@@ -24,6 +24,18 @@ pub struct AddCommand {
     #[arg(long)]
     pub position: Option<String>,
 
+    /// Insert at a 0-based child index (C#-compatible spelling).
+    #[arg(long)]
+    pub index: Option<usize>,
+
+    /// Insert after this sibling path (C#-compatible spelling).
+    #[arg(long)]
+    pub after: Option<String>,
+
+    /// Insert before this sibling path (C#-compatible spelling).
+    #[arg(long)]
+    pub before: Option<String>,
+
     /// Properties (key=value pairs)
     #[arg(long, num_args = 1..)]
     pub properties: Vec<String>,
@@ -45,7 +57,7 @@ pub struct AddCommand {
 pub fn handle_add(cmd: AddCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, true)?;
 
-    let position = parse_position(cmd.position.as_deref());
+    let position = resolve_position(&cmd)?;
     let mut properties = parse_properties(&cmd.properties);
 
     if cmd.type_name.is_none() && cmd.from.is_none() {
@@ -117,6 +129,29 @@ pub fn parse_position(input: Option<&str>) -> InsertPosition {
             }
         }
     }
+}
+
+/// Resolve the current compact `--position` syntax and the C# CLI's explicit
+/// position flags. Keeping `--position` avoids breaking existing Rust CLI
+/// users while making the public C# syntax available verbatim.
+fn resolve_position(cmd: &AddCommand) -> Result<InsertPosition, HandlerError> {
+    let explicit_count = usize::from(cmd.position.is_some())
+        + usize::from(cmd.index.is_some())
+        + usize::from(cmd.after.is_some())
+        + usize::from(cmd.before.is_some());
+    if explicit_count > 1 {
+        return Err(HandlerError::InvalidArgument(
+            "--index, --after, --before, and --position are mutually exclusive. Use only one."
+                .to_string(),
+        ));
+    }
+
+    Ok(match (&cmd.index, &cmd.after, &cmd.before) {
+        (Some(index), None, None) => InsertPosition::AtIndex(*index),
+        (None, Some(after), None) => InsertPosition::AfterElement(after.clone()),
+        (None, None, Some(before)) => InsertPosition::BeforeElement(before.clone()),
+        _ => parse_position(cmd.position.as_deref()),
+    })
 }
 
 fn parse_properties(props: &[String]) -> HashMap<String, String> {
