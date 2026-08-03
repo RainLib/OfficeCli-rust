@@ -4653,7 +4653,22 @@ fn test_raw_set_docx() {
             "/w:document",
             "setattr",
             "--xml",
-            "mc:Ignorable=wp",
+            "w:rsidR=00000000",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args([
+            "raw-set",
+            &p,
+            "word/document.xml",
+            "--xpath",
+            "/w:document",
+            "--action",
+            "setattr",
+            "--xml",
+            "w:rsidDel=00000001",
         ])
         .assert()
         .success();
