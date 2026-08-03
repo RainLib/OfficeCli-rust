@@ -39,8 +39,20 @@ pub(crate) fn normalize_logical_part_path(file: &str, part: &str) -> String {
         ("docx" | "docm", "/styles") => "word/styles.xml".to_string(),
         ("docx" | "docm", "/settings") => "word/settings.xml".to_string(),
         ("docx" | "docm", "/numbering") => "word/numbering.xml".to_string(),
-        ("pptx" | "pptm", "/presentation") => "ppt/presentation.xml".to_string(),
-        ("pptx" | "pptm", "/theme") => "ppt/theme/theme1.xml".to_string(),
         _ => part.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_logical_part_path;
+
+    #[test]
+    fn keeps_pptx_semantic_parts_for_relationship_aware_handler_resolution() {
+        assert_eq!(
+            normalize_logical_part_path("deck.pptx", "/presentation"),
+            "/presentation"
+        );
+        assert_eq!(normalize_logical_part_path("deck.pptx", "/theme"), "/theme");
     }
 }
