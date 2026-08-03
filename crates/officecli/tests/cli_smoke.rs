@@ -4693,6 +4693,52 @@ fn test_pptx_raw_set_accepts_semantic_slide_path() {
 }
 
 #[test]
+fn test_pptx_raw_accepts_csharp_semantic_presentation_part_paths() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("raw_semantic.pptx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["raw", &p, "/presentation"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("presentation"));
+    officecli()
+        .args(["raw", &p, "/theme"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("theme"));
+    officecli()
+        .args(["add", &p, "/slide[1]", "--type", "note"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "/noteSlide[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("notes"));
+    officecli()
+        .args([
+            "raw-set",
+            &p,
+            "/presentation",
+            "--xpath",
+            "/presentation",
+            "--action",
+            "setattr",
+            "--xml",
+            "firstSlideNum=7",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "/presentation"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("firstSlideNum=\"7\""));
+}
+
+#[test]
 fn test_pptx_presentation_settings_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_pptx_presentation_settings.pptx");

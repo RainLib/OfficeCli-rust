@@ -388,6 +388,14 @@ impl DocumentHandler for PptxHandler {
 
 fn resolve_raw_part_path(package: &OxmlPackage, part_path: &str) -> Result<String, HandlerError> {
     let trimmed = part_path.trim_start_matches('/');
+    if trimmed == "presentation" {
+        return Ok("ppt/presentation.xml".to_string());
+    }
+    if trimmed == "theme" {
+        return crate::presentation::theme_path(package)?.ok_or_else(|| {
+            HandlerError::PathNotFound("theme relationship for presentation".to_string())
+        });
+    }
     if let Some(index) = trimmed
         .strip_prefix("slide[")
         .and_then(|value| value.strip_suffix(']'))
@@ -395,5 +403,129 @@ fn resolve_raw_part_path(package: &OxmlPackage, part_path: &str) -> Result<Strin
     {
         return crate::navigation::resolve_slide_part_path(package, index);
     }
+    if let Some(index) = semantic_index(trimmed, "slideMaster") {
+        return indexed_relationship_target(
+            package,
+            "ppt/presentation.xml",
+            SLIDE_MASTER_REL,
+            index,
+        );
+    }
+    if let Some(index) = semantic_index(trimmed, "slideLayout") {
+        let masters = relationship_targets(package, "ppt/presentation.xml", SLIDE_MASTER_REL)?;
+        let layouts = masters
+            .iter()
+            .map(|master| relationship_targets(package, master, SLIDE_LAYOUT_REL))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        return layouts
+            .into_iter()
+            .nth(index - 1)
+            .ok_or_else(|| HandlerError::PathNotFound(format!("slideLayout[{}]", index)));
+    }
+    if let Some(index) = semantic_index(trimmed, "noteSlide") {
+        let slide = crate::navigation::resolve_slide_part_path(package, index)?;
+        return indexed_relationship_target(package, &slide, NOTES_SLIDE_REL, 1);
+    }
     Ok(trimmed.to_string())
+}
+
+const SLIDE_MASTER_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
+const SLIDE_LAYOUT_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
+const NOTES_SLIDE_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
+
+fn semantic_index(path: &str, kind: &str) -> Option<usize> {
+    path.strip_prefix(kind)
+        .and_then(|value| value.strip_prefix('['))
+        .and_then(|value| value.strip_suffix(']'))
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|index| *index > 0)
+}
+
+fn relationship_targets(
+    package: &OxmlPackage,
+    source_part: &str,
+    relationship_type: &str,
+) -> Result<Vec<String>, HandlerError> {
+    let rels = package
+        .part_rels(source_part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut matches = rels
+        .by_type(relationship_type)
+        .into_iter()
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(matches
+        .into_iter()
+        .map(|rel| package.resolve_rel_target(source_part, &rel.target))
+        .collect())
+}
+
+fn indexed_relationship_target(
+    package: &OxmlPackage,
+    source_part: &str,
+    relationship_type: &str,
+    index: usize,
+) -> Result<String, HandlerError> {
+    relationship_targets(package, source_part, relationship_type)?
+        .into_iter()
+        .nth(index - 1)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("{}[{}]", relationship_type, index)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_raw_paths_resolve_relationship_targets() {
+        let mut package = OxmlPackage::create("semantic-raw.pptx");
+        package.add_part(
+            "ppt/presentation.xml",
+            br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst></p:presentation>"#,
+        );
+        package.add_part(
+            "ppt/_rels/presentation.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/master7.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide9.xml"/></Relationships>"#,
+        );
+        package.add_part("ppt/slideMasters/master7.xml", b"<p:sldMaster/>");
+        package.add_part(
+            "ppt/slideMasters/_rels/master7.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/layout3.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme5.xml"/></Relationships>"#,
+        );
+        package.add_part("ppt/slideLayouts/layout3.xml", b"<p:sldLayout/>");
+        package.add_part("ppt/theme/theme5.xml", b"<a:theme/>");
+        package.add_part("ppt/slides/slide9.xml", b"<p:sld/>");
+        package.add_part(
+            "ppt/slides/_rels/slide9.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide4.xml"/></Relationships>"#,
+        );
+        package.add_part("ppt/notesSlides/notesSlide4.xml", b"<p:notes/>");
+
+        assert_eq!(
+            resolve_raw_part_path(&package, "/presentation").unwrap(),
+            "ppt/presentation.xml"
+        );
+        assert_eq!(
+            resolve_raw_part_path(&package, "/theme").unwrap(),
+            "ppt/theme/theme5.xml"
+        );
+        assert_eq!(
+            resolve_raw_part_path(&package, "/slideMaster[1]").unwrap(),
+            "ppt/slideMasters/master7.xml"
+        );
+        assert_eq!(
+            resolve_raw_part_path(&package, "/slideLayout[1]").unwrap(),
+            "ppt/slideLayouts/layout3.xml"
+        );
+        assert_eq!(
+            resolve_raw_part_path(&package, "/noteSlide[1]").unwrap(),
+            "ppt/notesSlides/notesSlide4.xml"
+        );
+    }
 }
