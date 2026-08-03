@@ -262,9 +262,10 @@ impl DocumentHandler for PptxHandler {
     }
 
     fn raw(&self, part_path: &str, _opts: RawOptions) -> Result<String, HandlerError> {
-        self.package
-            .borrow()
-            .read_part_xml(part_path)
+        let package = self.package.borrow();
+        let resolved = resolve_raw_part_path(&package, part_path)?;
+        package
+            .read_part_xml(&resolved)
             .map_err(|e| HandlerError::OperationFailed(e.to_string()))
     }
 
@@ -280,13 +281,9 @@ impl DocumentHandler for PptxHandler {
                 "package opened in read-only mode".to_string(),
             ));
         }
-        crate::raw::apply_raw_set(
-            &mut self.package.borrow_mut(),
-            part_path,
-            xpath,
-            action,
-            xml,
-        )
+        let mut package = self.package.borrow_mut();
+        let resolved = resolve_raw_part_path(&package, part_path)?;
+        crate::raw::apply_raw_set(&mut package, &resolved, xpath, action, xml)
     }
 
     fn add_part(
@@ -387,4 +384,16 @@ impl DocumentHandler for PptxHandler {
     fn extract_text_with_offsets(&self) -> Result<TextOffsetMap, HandlerError> {
         crate::text_offset::extract_text_with_offsets(&self.package.borrow())
     }
+}
+
+fn resolve_raw_part_path(package: &OxmlPackage, part_path: &str) -> Result<String, HandlerError> {
+    let trimmed = part_path.trim_start_matches('/');
+    if let Some(index) = trimmed
+        .strip_prefix("slide[")
+        .and_then(|value| value.strip_suffix(']'))
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return crate::navigation::resolve_slide_part_path(package, index);
+    }
+    Ok(trimmed.to_string())
 }

@@ -4396,6 +4396,33 @@ fn test_pptx_add_slide() {
 }
 
 #[test]
+fn test_pptx_raw_set_accepts_semantic_slide_path() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("raw_slide.pptx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "raw-set",
+            &p,
+            "/slide[1]",
+            "--xpath",
+            "/sld",
+            "--action",
+            "setattr",
+            "--xml",
+            "showMasterSp=0",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "/slide[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("showMasterSp=\"0\""));
+}
+
+#[test]
 fn test_pptx_presentation_settings_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_pptx_presentation_settings.pptx");
