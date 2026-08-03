@@ -374,13 +374,18 @@ pub fn run_dump_reader(source_path: &str, out_path: &str) -> Result<DumpResult, 
                 manifest.name, idx, e
             ))
         })?;
-        super::batch::execute_batch_op(&*handler, &op, &mut std::collections::HashMap::new())
-            .map_err(|e| {
-                HandlerError::OperationFailed(format!(
-                    "dump-reader plugin '{}' command #{} ({}) failed while replaying: {}",
-                    manifest.name, idx, op.command, e
-                ))
-            })?;
+        super::batch::execute_batch_op(
+            &*handler,
+            &op,
+            &mut std::collections::HashMap::new(),
+            out_path,
+        )
+        .map_err(|e| {
+            HandlerError::OperationFailed(format!(
+                "dump-reader plugin '{}' command #{} ({}) failed while replaying: {}",
+                manifest.name, idx, op.command, e
+            ))
+        })?;
         items_replayed += 1;
     }
     handler.save().map_err(|e| {

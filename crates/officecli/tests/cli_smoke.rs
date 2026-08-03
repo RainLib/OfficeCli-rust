@@ -4881,6 +4881,24 @@ fn test_batch_docx() {
 }
 
 #[test]
+fn test_batch_accepts_csharp_dump_meta_and_raw_set_items() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("batch_raw_set.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    let batch = r#"[
+      {"command":"meta","dumpVersion":2},
+      {"command":"raw-set","part":"/document","xpath":"/w:document","action":"setattr","xml":"w:rsidR=12345678"}
+    ]"#;
+    officecli().args(["batch", &p, batch]).assert().success();
+    officecli()
+        .args(["raw", &p, "/document"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rsidR=\"12345678\""));
+}
+
+#[test]
 fn test_batch_docx_from_commands_file() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_batch_file.docx");

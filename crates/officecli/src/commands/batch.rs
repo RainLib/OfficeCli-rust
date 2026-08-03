@@ -82,7 +82,7 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
     };
 
     for op in ops {
-        let result = execute_batch_op(&*handler, &op, &mut ledger);
+        let result = execute_batch_op(&*handler, &op, &mut ledger, &cmd.file);
         if cmd.emit_map {
             // Re-extract after every op so callers can re-address against the
             // structure produced by this specific step.
@@ -103,7 +103,10 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
     // partial-save behaviour as an explicit opt-in.
     let has_error = results.iter().any(|r| r.result.is_err());
     let has_mutations = results.iter().any(|r| {
-        matches!(r.op.as_str(), "set" | "add" | "remove" | "move" | "copy") && r.result.is_ok()
+        matches!(
+            r.op.as_str(),
+            "set" | "add" | "remove" | "move" | "copy" | "raw-set"
+        ) && r.result.is_ok()
     });
     if has_mutations && (cmd.best_effort || !has_error) {
         handler.save()?;
@@ -633,8 +636,12 @@ pub(crate) fn execute_batch_op(
     handler: &dyn handler_common::DocumentHandler,
     op: &BatchOp,
     ledger: &mut EditLedger,
+    file: &str,
 ) -> Result<String, String> {
     match op.command.as_str() {
+        // C# dump streams start with a metadata/version marker. It is advisory
+        // for this compatible reader and deliberately does not mutate the file.
+        "meta" => Ok("OK".to_string()),
         "set" => {
             let path = op.params.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let mut properties = string_map(&op.params, "properties")
@@ -782,6 +789,25 @@ pub(crate) fn execute_batch_op(
                 },
                 other => Err(format!("unknown view mode: {}", other)),
             }
+        }
+        "raw-set" => {
+            let part = op.params.get("part").and_then(|v| v.as_str()).unwrap_or("");
+            let xpath = op
+                .params
+                .get("xpath")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let action = op
+                .params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let xml = op.params.get("xml").and_then(|v| v.as_str());
+            let part = super::raw::normalize_logical_part_path(file, part);
+            handler
+                .raw_set(&part, xpath, action, xml)
+                .map(|_| "OK".to_string())
+                .map_err(|e| e.to_string())
         }
         other => Err(format!("unknown command: {}", other)),
     }
