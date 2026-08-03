@@ -5076,7 +5076,11 @@ fn test_save_docx() {
     let p = path.to_string_lossy().to_string();
 
     officecli().args(["create", &p]).assert().success();
-    officecli().args(["save", &p]).assert().success();
+    officecli()
+        .args(["save", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is already saved to disk."));
 }
 
 // ═══════════════════════════════════════════════════════════════════════

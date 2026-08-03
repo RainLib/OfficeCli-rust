@@ -10,5 +10,9 @@ pub struct SaveCommand {
 pub fn handle_save(cmd: SaveCommand, _format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, true)?;
     handler.save()?;
-    Ok("Saved".to_string())
+    let file_name = std::path::Path::new(&cmd.file)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&cmd.file);
+    Ok(format!("{} is already saved to disk.", file_name))
 }
