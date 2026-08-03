@@ -6,6 +6,16 @@ use thiserror::Error;
 use zip::read::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
+/// Generous package limits mirrored from the C# `DocumentLimits` guard. They
+/// are evaluated from the ZIP central directory before any entry is inflated.
+pub const MAX_ZIP_ENTRIES: usize = 100_000;
+pub const MAX_UNCOMPRESSED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_COMPRESSION_RATIO: u64 = 1_000;
+pub const MAX_RECURSION_DEPTH: usize = 256;
+pub const DEFAULT_MAX_DOM_ELEMENTS: usize = 3_000_000;
+pub const ELEMENT_SCAN_PART_THRESHOLD: usize = 8 * 1024 * 1024;
+const RATIO_MIN_COMPRESSED_BYTES: u64 = 64 * 1024;
+
 #[derive(Debug, Error)]
 pub enum PackageError {
     #[error("failed to open package: {0}")]
@@ -26,6 +36,8 @@ pub enum PackageError {
     ContentTypes(#[from] ContentTypesError),
     #[error("relationships error: {0}")]
     Rels(#[from] RelsError),
+    #[error("package rejected by resource limit: {0}")]
+    ResourceLimit(String),
 }
 
 /// Represents an OOXML package (ZIP file with XML parts).
@@ -62,6 +74,8 @@ impl OxmlPackage {
         let file = std::fs::File::open(path)?;
         let mut archive = ZipArchive::new(file)?;
 
+        guard_zip_resources(&mut archive)?;
+
         let mut parts = HashMap::new();
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i)?;
@@ -70,6 +84,8 @@ impl OxmlPackage {
             entry.read_to_end(&mut content)?;
             parts.insert(entry_path, content);
         }
+
+        guard_large_xml_structures(&parts)?;
 
         // Parse content types
         let content_types_xml = parts
@@ -221,9 +237,19 @@ impl OxmlPackage {
             ));
         }
 
-        // Write all parts to a new ZIP file
-        let tmp_path = format!("{}.new", self.file_path);
-        let file = std::fs::File::create(&tmp_path)?;
+        // Use a unique sibling temp file so concurrent commands cannot race on
+        // the old predictable `<file>.new` name. Keeping it in the target
+        // directory makes the final replacement a same-filesystem operation.
+        let target = std::path::Path::new(&self.file_path);
+        let parent = target
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let temp = tempfile::Builder::new()
+            .prefix(".officecli-")
+            .suffix(".tmp")
+            .tempfile_in(parent)?;
+        let file = temp.reopen()?;
         let mut writer = zip::ZipWriter::new(file);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -235,8 +261,8 @@ impl OxmlPackage {
 
         writer.finish()?;
 
-        // Atomic replacement: rename temp to original
-        std::fs::rename(&tmp_path, &self.file_path)?;
+        temp.persist(&self.file_path)
+            .map_err(|error| PackageError::SaveError(error.error.to_string()))?;
 
         self.dirty_parts.clear();
         Ok(())
@@ -269,5 +295,269 @@ impl OxmlPackage {
         self.file_path = path.to_string();
         self.dirty_parts.clear();
         Ok(())
+    }
+}
+
+/// Reject entry-count, decompressed-size and compression-ratio bombs before
+/// `read_to_end` can allocate attacker-controlled amounts of memory.
+fn guard_zip_resources(archive: &mut ZipArchive<std::fs::File>) -> Result<(), PackageError> {
+    let mut uncompressed = 0u64;
+    let mut compressed = 0u64;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        uncompressed = uncompressed.saturating_add(entry.size());
+        compressed = compressed.saturating_add(entry.compressed_size());
+    }
+
+    validate_zip_resource_totals(archive.len(), uncompressed, compressed)
+}
+
+fn validate_zip_resource_totals(
+    entries: usize,
+    uncompressed: u64,
+    compressed: u64,
+) -> Result<(), PackageError> {
+    if entries > MAX_ZIP_ENTRIES {
+        return Err(PackageError::ResourceLimit(format!(
+            "{} entries exceeds the {} entry limit",
+            entries, MAX_ZIP_ENTRIES
+        )));
+    }
+    if uncompressed > MAX_UNCOMPRESSED_BYTES {
+        return Err(PackageError::ResourceLimit(format!(
+            "uncompressed size exceeds the {} GiB limit",
+            MAX_UNCOMPRESSED_BYTES / (1024 * 1024 * 1024)
+        )));
+    }
+    if compressed > RATIO_MIN_COMPRESSED_BYTES
+        && uncompressed / compressed.max(1) > MAX_COMPRESSION_RATIO
+    {
+        return Err(PackageError::ResourceLimit(format!(
+            "compression ratio {}x exceeds the {}x limit",
+            uncompressed / compressed.max(1),
+            MAX_COMPRESSION_RATIO
+        )));
+    }
+    Ok(())
+}
+
+/// Count XML start tags without constructing a DOM for suspiciously large
+/// XML parts.  ZIP byte limits alone cannot prevent a dense worksheet from
+/// expanding into millions of DOM nodes.  The environment override matches
+/// the C# `OFFICECLI_MAX_DOM_ELEMENTS` escape hatch for exceptional workbooks.
+fn guard_large_xml_structures(parts: &HashMap<String, Vec<u8>>) -> Result<(), PackageError> {
+    let max_elements = std::env::var("OFFICECLI_MAX_DOM_ELEMENTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_DOM_ELEMENTS);
+
+    for (part_path, content) in parts {
+        if !is_xml_part(part_path) {
+            continue;
+        }
+        // Dense element counting is necessary only for large XML parts. Depth
+        // is cheap to scan and must be capped for every part: a tiny, deeply
+        // nested document can still overflow recursive DOM walkers/renderers.
+        let element_limit = if content.len() >= ELEMENT_SCAN_PART_THRESHOLD {
+            max_elements
+        } else {
+            usize::MAX
+        };
+        validate_xml_structure_limits(content, element_limit, MAX_RECURSION_DEPTH).map_err(
+            |reason| {
+                PackageError::ResourceLimit(format!(
+                    "XML part '{}' exceeds a structural limit: {}",
+                    part_path, reason
+                ))
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn is_xml_part(part_path: &str) -> bool {
+    part_path.ends_with(".xml")
+        || part_path.ends_with(".rels")
+        || part_path == "[Content_Types].xml"
+}
+
+/// Lightweight XML tag scan.  It intentionally does not validate XML (the
+/// normal XML parsers provide precise syntax errors); it only establishes
+/// resource bounds before a format handler creates a recursive tree.
+fn validate_xml_structure_limits(
+    xml: &[u8],
+    max_elements: usize,
+    max_depth: usize,
+) -> Result<(), String> {
+    let mut index = 0;
+    let mut elements = 0usize;
+    let mut depth = 0usize;
+
+    while index < xml.len() {
+        let Some(relative) = xml[index..].iter().position(|byte| *byte == b'<') else {
+            break;
+        };
+        index += relative;
+        let next = *xml.get(index + 1).unwrap_or(&0);
+        if next == b'!' {
+            if xml[index..].starts_with(b"<!--") {
+                let Some(end) = find_bytes(&xml[index + 4..], b"-->") else {
+                    break;
+                };
+                index += end + 7;
+                continue;
+            }
+            if xml[index..].starts_with(b"<![CDATA[") {
+                let Some(end) = find_bytes(&xml[index + 9..], b"]]>") else {
+                    break;
+                };
+                index += end + 12;
+                continue;
+            }
+        }
+        let Some(tag_end_relative) = find_tag_end(&xml[index + 1..]) else {
+            break;
+        };
+        let tag_end = index + tag_end_relative + 1;
+
+        if next == b'/' {
+            depth = depth.saturating_sub(1);
+        } else if next != b'?' && next != b'!' {
+            elements += 1;
+            if elements > max_elements {
+                return Err(format!(
+                    "{} elements exceeds the {} element limit",
+                    elements, max_elements
+                ));
+            }
+            let self_closing = xml[index..=tag_end]
+                .iter()
+                .rev()
+                .skip(1)
+                .find(|byte| !byte.is_ascii_whitespace())
+                == Some(&b'/');
+            if !self_closing {
+                depth += 1;
+                if depth > max_depth {
+                    return Err(format!(
+                        "nesting depth {} exceeds the {} depth limit",
+                        depth, max_depth
+                    ));
+                }
+            }
+        }
+        index = tag_end + 1;
+    }
+    Ok(())
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Find the end of a tag while respecting quoted attribute values.
+fn find_tag_end(bytes: &[u8]) -> Option<usize> {
+    let mut quote = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(byte, b'\'' | b'\"') {
+            if quote == Some(*byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(*byte);
+            }
+        } else if *byte == b'>' && quote.is_none() {
+            return Some(index);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_normal_zip_metadata() {
+        assert!(validate_zip_resource_totals(3, 50_000, 10_000).is_ok());
+    }
+
+    #[test]
+    fn rejects_excessive_entry_count() {
+        assert!(matches!(
+            validate_zip_resource_totals(MAX_ZIP_ENTRIES + 1, 0, 0),
+            Err(PackageError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_excessive_uncompressed_size_and_ratio() {
+        assert!(matches!(
+            validate_zip_resource_totals(1, MAX_UNCOMPRESSED_BYTES + 1, 1),
+            Err(PackageError::ResourceLimit(_))
+        ));
+        assert!(matches!(
+            validate_zip_resource_totals(1, 1001 * 65_537, 65_537),
+            Err(PackageError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_excessive_xml_elements_and_depth() {
+        assert!(validate_xml_structure_limits(b"<root><a/><b/></root>", 2, 10).is_err());
+        assert!(validate_xml_structure_limits(b"<a><b><c><d/></c></b></a>", 10, 2).is_err());
+        assert!(validate_xml_structure_limits(b"<a note=\"1 > 0\"><b/></a>", 10, 2).is_ok());
+    }
+
+    #[test]
+    fn rejects_deep_small_xml_parts_before_handler_recursion() {
+        let xml = format!(
+            "{}{}",
+            "<n>".repeat(MAX_RECURSION_DEPTH + 1),
+            "</n>".repeat(MAX_RECURSION_DEPTH + 1)
+        );
+        let parts = HashMap::from([("word/document.xml".to_string(), xml.into_bytes())]);
+        assert!(matches!(
+            guard_large_xml_structures(&parts),
+            Err(PackageError::ResourceLimit(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    #[test]
+    fn save_replaces_existing_package_with_a_unique_sibling_tempfile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.docx");
+        let path_text = path.to_string_lossy().to_string();
+        let mut created = OxmlPackage::create(&path_text);
+        created.add_part(
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+        );
+        created.add_part(
+            "_rels/.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        );
+        created.add_part("word/document.xml", b"<document>before</document>");
+        created.save_as(&path_text).unwrap();
+
+        let mut opened = OxmlPackage::open(&path_text, true).unwrap();
+        opened
+            .write_part_xml("word/document.xml", "<document>after</document>")
+            .unwrap();
+        opened.save().unwrap();
+
+        let reopened = OxmlPackage::open(&path_text, false).unwrap();
+        assert_eq!(
+            reopened.read_part_xml("word/document.xml").unwrap(),
+            "<document>after</document>"
+        );
+        assert!(!directory.path().join("document.docx.new").exists());
     }
 }
