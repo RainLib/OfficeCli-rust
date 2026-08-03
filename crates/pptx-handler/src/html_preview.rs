@@ -8,7 +8,7 @@
 )]
 
 use handler_common::HandlerError;
-use oxml::OxmlPackage;
+use oxml::{package::MAX_RECURSION_DEPTH, OxmlPackage};
 use std::collections::HashMap;
 
 // Embed the complete preview.css from C# resources
@@ -2234,6 +2234,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 } else if tag == "grpSp" {
                     render_group_shape(
                         &child,
+                        0,
                         slide_num,
                         &slide.part_path,
                         &slide_rels,
@@ -4291,6 +4292,7 @@ fn render_connector(
 #[allow(clippy::too_many_arguments)]
 fn render_group_shape(
     node: &roxmltree::Node,
+    depth: usize,
     slide_num: usize,
     slide_path: &str,
     rels: &oxml::rels::Relationships,
@@ -4301,6 +4303,16 @@ fn render_group_shape(
     master_tree: Option<roxmltree::Node<'_, '_>>,
     master_text_styles: Option<roxmltree::Node<'_, '_>>,
 ) {
+    // Package opening rejects XML that is deeper than this limit, but keep the
+    // renderer safe for DOMs created or modified in memory after that scan.
+    // A compact placeholder is preferable to an uncatchable stack overflow in
+    // resident/watch mode.
+    if depth >= MAX_RECURSION_DEPTH {
+        output.push_str(
+            "    <div class=\"group group-depth-limit\">[group nesting limit exceeded]</div>\n",
+        );
+        return;
+    }
     let grp_sp_pr = node.children().find(|n| n.has_tag_name("grpSpPr"));
     let xfrm = grp_sp_pr
         .as_ref()
@@ -4450,6 +4462,7 @@ fn render_group_shape(
         } else if tag == "grpSp" {
             render_group_shape(
                 &child,
+                depth + 1,
                 slide_num,
                 slide_path,
                 rels,
