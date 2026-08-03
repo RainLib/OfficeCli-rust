@@ -34,7 +34,7 @@ pub fn handle_query(cmd: QueryCommand, format: OutputFormat) -> Result<String, H
         ));
     }
     let nodes = handler.query(&cmd.selector)?;
-    let nodes = if let Some(find) = cmd.find.as_deref() {
+    let mut nodes = if let Some(find) = cmd.find.as_deref() {
         let mut filtered = Vec::with_capacity(nodes.len());
         for node in nodes {
             let matches = match node.text.as_deref() {
@@ -57,6 +57,21 @@ pub fn handle_query(cmd: QueryCommand, format: OutputFormat) -> Result<String, H
 
     if cmd.compact {
         return format_nodes_compact(handler.as_ref(), nodes, cmd.fields.as_deref());
+    }
+
+    if matches!(format, OutputFormat::Json) {
+        // C# query JSON exposes the same first child layer as get --depth 1.
+        // Query implementations may intentionally build shallow nodes, so
+        // hydrate only those that advertise children but omitted them.
+        for node in &mut nodes {
+            if node.child_count > 0 && node.children.is_empty() && !node.path.is_empty() {
+                if let Ok(hydrated) = handler.get(&node.path, 1) {
+                    if !hydrated.children.is_empty() {
+                        node.children = hydrated.children;
+                    }
+                }
+            }
+        }
     }
 
     match format {

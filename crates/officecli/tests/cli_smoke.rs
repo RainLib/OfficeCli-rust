@@ -4852,7 +4852,12 @@ fn test_get_and_query_json_use_csharp_node_envelope() {
     let results = query_json["data"]["results"].as_array().unwrap();
     assert_eq!(query_json["success"], true);
     assert_eq!(query_json["data"]["matches"], results.len());
-    assert!(results.iter().any(|node| node["path"] == "/body/p[1]"));
+    let first_paragraph = results
+        .iter()
+        .find(|node| node["path"] == "/body/p[1]")
+        .unwrap();
+    assert!(first_paragraph["child_count"].as_u64().unwrap() > 0);
+    assert!(!first_paragraph["children"].as_array().unwrap().is_empty());
 }
 
 #[test]
