@@ -1237,6 +1237,25 @@ fn get_numbering_node(
         {
             result = result.with_format("start", serde_json::Value::String(start.to_string()));
         }
+        for (tag, key) in [
+            ("lvlRestart", "lvlRestart"),
+            ("suff", "suff"),
+            ("lvlJc", "justification"),
+        ] {
+            if let Some(value) = level_node
+                .children()
+                .find(|node| node.has_tag_name((W_NS, tag)))
+                .and_then(|node| node.attribute((W_NS, "val")))
+            {
+                result = result.with_format(key, serde_json::Value::String(value.to_string()));
+            }
+        }
+        if level_node
+            .children()
+            .any(|node| node.has_tag_name((W_NS, "isLgl")))
+        {
+            result = result.with_format("isLgl", serde_json::Value::Bool(true));
+        }
         return Ok(result);
     }
     let defs: Vec<DocumentNode> = document

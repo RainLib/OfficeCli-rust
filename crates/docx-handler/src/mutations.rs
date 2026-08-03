@@ -296,6 +296,25 @@ pub fn set_numbering_level(
     if let Some(value) = properties.get("text").or_else(|| properties.get("lvlText")) {
         upsert_level_value(&mut block, "lvlText", escape_attr(value))?;
     }
+    if let Some(value) = properties.get("lvlRestart") {
+        upsert_level_value(
+            &mut block,
+            "lvlRestart",
+            parse_numbering_id(value)?.to_string(),
+        )?;
+    }
+    if let Some(value) = properties.get("suff") {
+        upsert_level_value(&mut block, "suff", normalize_level_suffix(value)?)?;
+    }
+    if let Some(value) = properties
+        .get("justification")
+        .or_else(|| properties.get("jc"))
+    {
+        upsert_level_value(&mut block, "lvlJc", normalize_level_justification(value)?)?;
+    }
+    if let Some(value) = properties.get("isLgl") {
+        set_level_empty_element(&mut block, "isLgl", is_truthy_string(value))?;
+    }
     let mut updated = xml;
     updated.replace_range(start..end, &block);
     package
@@ -306,7 +325,16 @@ pub fn set_numbering_level(
         .filter(|k| {
             !matches!(
                 k.as_str(),
-                "start" | "format" | "numFmt" | "text" | "lvlText"
+                "start"
+                    | "format"
+                    | "numFmt"
+                    | "text"
+                    | "lvlText"
+                    | "lvlRestart"
+                    | "suff"
+                    | "justification"
+                    | "jc"
+                    | "isLgl"
             )
         })
         .cloned()
@@ -374,6 +402,102 @@ fn upsert_level_value(
         &format!("<w:{} w:val=\"{}\"/>", tag, value.as_ref()),
     );
     Ok(())
+}
+
+fn set_level_empty_element(
+    block: &mut String,
+    tag: &str,
+    enabled: bool,
+) -> Result<(), HandlerError> {
+    let marker = format!("<w:{}", tag);
+    if let Some(start) = block.find(&marker) {
+        let opening_end = block[start..]
+            .find('>')
+            .map(|offset| start + offset + 1)
+            .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {} element", tag)))?;
+        let end = if block[..opening_end].ends_with("/>") {
+            opening_end
+        } else {
+            block[opening_end..]
+                .find(&format!("</w:{}>", tag))
+                .map(|offset| opening_end + offset + tag.len() + 5)
+                .ok_or_else(|| HandlerError::OperationFailed(format!("invalid {} element", tag)))?
+        };
+        if enabled {
+            block.replace_range(start..end, &format!("<w:{}/>", tag));
+        } else {
+            block.replace_range(start..end, "");
+        }
+    } else if enabled {
+        let insert_at = level_insert_at(block, tag)?;
+        block.insert_str(insert_at, &format!("<w:{}/>", tag));
+    }
+    Ok(())
+}
+
+fn level_insert_at(block: &str, tag: &str) -> Result<usize, HandlerError> {
+    let order = [
+        "start",
+        "numFmt",
+        "lvlRestart",
+        "isLgl",
+        "suff",
+        "lvlText",
+        "lvlJc",
+        "pPr",
+        "rPr",
+    ];
+    let current = order
+        .iter()
+        .position(|item| *item == tag)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("unknown level tag {}", tag)))?;
+    let mut insert_at = block
+        .find('>')
+        .ok_or_else(|| HandlerError::OperationFailed("invalid level opening tag".to_string()))?
+        + 1;
+    for previous in &order[..current] {
+        let previous_marker = format!("<w:{}", previous);
+        if let Some(start) = block.find(&previous_marker) {
+            let opening_end = block[start..]
+                .find('>')
+                .map(|offset| start + offset + 1)
+                .ok_or_else(|| HandlerError::OperationFailed("invalid level child".to_string()))?;
+            let end = if block[..opening_end].ends_with("/>") {
+                Some(opening_end)
+            } else {
+                block[start..]
+                    .find(&format!("</w:{}>", previous))
+                    .map(|offset| start + offset + previous.len() + 5)
+            }
+            .ok_or_else(|| HandlerError::OperationFailed("invalid level child".to_string()))?;
+            insert_at = end;
+        }
+    }
+    Ok(insert_at)
+}
+
+fn normalize_level_suffix(value: &str) -> Result<&'static str, HandlerError> {
+    match value.to_ascii_lowercase().as_str() {
+        "tab" => Ok("tab"),
+        "space" => Ok("space"),
+        "nothing" | "none" => Ok("nothing"),
+        _ => Err(HandlerError::InvalidArgument(format!(
+            "invalid suff '{}': tab, space, or nothing expected",
+            value
+        ))),
+    }
+}
+
+fn normalize_level_justification(value: &str) -> Result<&'static str, HandlerError> {
+    match value.to_ascii_lowercase().as_str() {
+        "left" | "start" => Ok("left"),
+        "center" => Ok("center"),
+        "right" | "end" => Ok("right"),
+        _ => Err(HandlerError::InvalidArgument(format!(
+            "invalid justification '{}'",
+            value
+        ))),
+    }
 }
 
 fn parse_numbering_id(value: &str) -> Result<i32, HandlerError> {

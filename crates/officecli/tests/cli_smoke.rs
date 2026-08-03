@@ -671,6 +671,10 @@ fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
             "format=upperRoman",
             "text=%1)",
             "start=7",
+            "lvlRestart=0",
+            "suff=space",
+            "jc=center",
+            "isLgl=true",
         ])
         .assert()
         .success();
@@ -695,7 +699,11 @@ fn test_docx_numbering_level_set_targets_the_selected_abstract_num() {
         .success()
         .stdout(predicate::str::contains("\"format\": \"upperRoman\""))
         .stdout(predicate::str::contains("\"text\": \"%1)\""))
-        .stdout(predicate::str::contains("\"start\": \"7\""));
+        .stdout(predicate::str::contains("\"start\": \"7\""))
+        .stdout(predicate::str::contains("\"lvlRestart\": \"0\""))
+        .stdout(predicate::str::contains("\"suff\": \"space\""))
+        .stdout(predicate::str::contains("\"justification\": \"center\""))
+        .stdout(predicate::str::contains("\"isLgl\": true"));
 }
 
 #[test]
