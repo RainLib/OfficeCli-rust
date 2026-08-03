@@ -262,6 +262,21 @@ fn test_create_docx() {
 }
 
 #[test]
+fn test_create_minimal_docx_omits_style_baseline() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("minimal.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli()
+        .args(["create", &p, "--minimal"])
+        .assert()
+        .success();
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    assert!(package.read_part_xml("word/styles.xml").is_err());
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
 fn test_create_xlsx() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_create.xlsx");

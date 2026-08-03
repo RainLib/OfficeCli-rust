@@ -14,6 +14,10 @@ pub struct CreateCommand {
     /// Overwrite an existing file. Without this flag create refuses to replace data.
     #[arg(long)]
     pub force: bool,
+
+    /// For .docx, emit a raw OOXML scaffold without the Word-style baseline.
+    #[arg(long)]
+    pub minimal: bool,
 }
 
 pub fn handle_create(
@@ -41,7 +45,7 @@ pub fn handle_create(
     }
 
     let result = match ext.as_str() {
-        "docx" => create_blank_docx(&output_file)?,
+        "docx" => create_blank_docx_with_options(&output_file, cmd.minimal)?,
         "xlsx" => create_blank_xlsx(&output_file)?,
         "pptx" => create_blank_pptx(&output_file)?,
         "pdf" => create_blank_pdf(&output_file)?,
@@ -57,6 +61,10 @@ pub fn handle_create(
 }
 
 pub(crate) fn create_blank_docx(path: &str) -> Result<String, HandlerError> {
+    create_blank_docx_with_options(path, false)
+}
+
+fn create_blank_docx_with_options(path: &str, minimal: bool) -> Result<String, HandlerError> {
     use oxml::OxmlPackage;
 
     // Minimal blank docx: word/document.xml with empty body
@@ -74,6 +82,12 @@ pub(crate) fn create_blank_docx(path: &str) -> Result<String, HandlerError> {
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"#;
+    let minimal_content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
 </Types>"#;
 
     let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -105,11 +119,20 @@ pub(crate) fn create_blank_docx(path: &str) -> Result<String, HandlerError> {
 </Relationships>"#;
 
     let mut pkg = OxmlPackage::create(path);
-    pkg.add_part("[Content_Types].xml", content_types.as_bytes());
+    pkg.add_part(
+        "[Content_Types].xml",
+        if minimal {
+            minimal_content_types.as_bytes()
+        } else {
+            content_types.as_bytes()
+        },
+    );
     pkg.add_part("_rels/.rels", rels.as_bytes());
     pkg.add_part("word/document.xml", document_xml.as_bytes());
-    pkg.add_part("word/styles.xml", styles_xml.as_bytes());
-    pkg.add_part("word/_rels/document.xml.rels", document_rels.as_bytes());
+    if !minimal {
+        pkg.add_part("word/styles.xml", styles_xml.as_bytes());
+        pkg.add_part("word/_rels/document.xml.rels", document_rels.as_bytes());
+    }
 
     pkg.save_as(path)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
