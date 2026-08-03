@@ -1340,6 +1340,9 @@ fn inject_live_reload(html: &str) -> String {
       body: JSON.stringify({paths: [...selected]})
     }).catch(() => {});
   }
+  function paintSelection() {
+    document.querySelectorAll('[data-path]').forEach(el => el.style.outline = selected.has(el.getAttribute('data-path')) ? '2px solid #2f80ed' : '');
+  }
   document.addEventListener('click', function(event) {
     const target = event.target.closest('[data-path]');
     if (!target) { if (!event.metaKey && !event.ctrlKey && !event.shiftKey) { selected.clear(); publishSelection(); } return; }
@@ -1347,8 +1350,32 @@ fn inject_live_reload(html: &str) -> String {
     if (!path) return;
     if (!event.metaKey && !event.ctrlKey && !event.shiftKey) selected.clear();
     if (selected.has(path) && (event.metaKey || event.ctrlKey)) selected.delete(path); else selected.add(path);
-    document.querySelectorAll('[data-path]').forEach(el => el.style.outline = selected.has(el.getAttribute('data-path')) ? '2px solid #2f80ed' : '');
+    paintSelection();
     publishSelection();
+  });
+  let dragStart = null;
+  let dragBox = null;
+  document.addEventListener('mousedown', function(event) {
+    if (event.button !== 0 || event.target.closest('[data-path]')) return;
+    dragStart = {x: event.clientX, y: event.clientY, additive: event.metaKey || event.ctrlKey || event.shiftKey};
+    dragBox = document.createElement('div');
+    dragBox.style.cssText = 'position:fixed;border:1px solid #2f80ed;background:#2f80ed22;pointer-events:none;z-index:99999';
+    document.body.appendChild(dragBox);
+  });
+  document.addEventListener('mousemove', function(event) {
+    if (!dragStart || !dragBox) return;
+    const left = Math.min(dragStart.x, event.clientX), top = Math.min(dragStart.y, event.clientY);
+    dragBox.style.left = left + 'px'; dragBox.style.top = top + 'px';
+    dragBox.style.width = Math.abs(event.clientX - dragStart.x) + 'px'; dragBox.style.height = Math.abs(event.clientY - dragStart.y) + 'px';
+  });
+  document.addEventListener('mouseup', function(event) {
+    if (!dragStart) return;
+    const x1 = Math.min(dragStart.x, event.clientX), x2 = Math.max(dragStart.x, event.clientX), y1 = Math.min(dragStart.y, event.clientY), y2 = Math.max(dragStart.y, event.clientY);
+    if (!dragStart.additive) selected.clear();
+    if (x2 - x1 > 3 || y2 - y1 > 3) document.querySelectorAll('[data-path]').forEach(el => {
+      const r = el.getBoundingClientRect(); if (r.right >= x1 && r.left <= x2 && r.bottom >= y1 && r.top <= y2) selected.add(el.getAttribute('data-path'));
+    });
+    dragBox?.remove(); dragBox = null; dragStart = null; paintSelection(); publishSelection();
   });
   const ssePath = window.location.pathname.endsWith('/') ? 'sse' : window.location.pathname + '/sse';
   const es = new EventSource(ssePath);
