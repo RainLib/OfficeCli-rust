@@ -39,6 +39,38 @@ pub fn find_all_offsets(text: &str, find: &str, opts: &FindReplaceOptions) -> Ve
         .collect()
 }
 
+/// Match the C# CLI's `query --find` vocabulary.
+///
+/// A normal value is a case-insensitive literal substring. `r"..."` and
+/// `r'...'` opt into a case-insensitive regex; the closing quote is found at
+/// the final matching quote, matching the upstream command parser. Unlike the
+/// older replacement helpers this surfaces an invalid regex so a query cannot
+/// silently look like it found no documents.
+pub fn matches_text_filter(text: &str, find: &str) -> Result<bool, regex::Error> {
+    if let Some(pattern) = parse_regex_prefix(find) {
+        let options = FindReplaceOptions {
+            case_insensitive: true,
+            use_regex: true,
+            ..Default::default()
+        };
+        return Ok(compile_find_regex(pattern, &options)?.is_match(text));
+    }
+
+    Ok(text.to_lowercase().contains(&find.to_lowercase()))
+}
+
+/// Return the pattern in the C# raw-regex `r"..."` / `r'...'` syntax.
+pub fn parse_regex_prefix(find: &str) -> Option<&str> {
+    let bytes = find.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'r' || !matches!(bytes[1], b'\'' | b'"') {
+        return None;
+    }
+
+    let quote = bytes[1];
+    let end = bytes.iter().rposition(|byte| *byte == quote)?;
+    (end > 1).then(|| &find[2..end])
+}
+
 /// Find complete byte spans for every match. Unlike `find_all_offsets`, this
 /// preserves the end boundary required by structure-aware editors that split
 /// runs before replacing or tracking a match.
@@ -384,6 +416,14 @@ mod tests {
             find_all_spans("a1b22", "[0-9]+", &regex),
             vec![(1, 2), (3, 5)]
         );
+    }
+
+    #[test]
+    fn test_matches_text_filter_uses_csharp_literal_and_regex_vocabulary() {
+        assert!(matches_text_filter("Quarterly BULLET review", "bullet").unwrap());
+        assert!(matches_text_filter("Quarterly BULLET review", "r\"bull.t\"").unwrap());
+        assert!(!matches_text_filter("Quarterly review", "r\"bull.t\"").unwrap());
+        assert!(matches_text_filter("text", "r\"[\"").is_err());
     }
 
     #[test]

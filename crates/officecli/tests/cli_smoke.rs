@@ -4763,3 +4763,41 @@ fn test_get_and_query_json_use_csharp_node_envelope() {
     assert_eq!(query_json["data"]["matches"], results.len());
     assert!(results.iter().any(|node| node["path"] == "/body/p[1]"));
 }
+
+#[test]
+fn test_query_find_supports_csharp_literal_and_regex_filters() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("query_find.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=Quarterly BULLET review",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args(["--json", "query", &p, "paragraph", "--find", "bullet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Quarterly BULLET review"));
+    officecli()
+        .args(["--json", "query", &p, "paragraph", "--find", "r\"bull.t\""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Quarterly BULLET review"));
+    officecli()
+        .args(["query", &p, "paragraph", "--find", "r\"[\""])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid regex pattern"));
+}
