@@ -44,14 +44,63 @@ use handler_common::{DocumentHandler, DocumentNode, HandlerError};
 /// automation can always read paths from `.data.results`, regardless of
 /// whether it requested one node or many.
 pub fn nodes_json_envelope(nodes: &[DocumentNode]) -> Result<String, HandlerError> {
-    serde_json::to_string_pretty(&serde_json::json!({
-        "success": true,
-        "data": {
+    Ok(json_data_envelope(
+        serde_json::json!({
             "matches": nodes.len(),
             "results": nodes,
-        }
+        }),
+        true,
+    ))
+}
+
+/// Wrap structured JSON using the C# CLI's top-level success contract.
+pub fn json_data_envelope(data: serde_json::Value, success: bool) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "success": success,
+        "data": data,
     }))
-    .map_err(HandlerError::from)
+    .expect("JSON envelope contains only serializable values")
+}
+
+/// Add the C# success envelope to a command result unless it already has one.
+///
+/// Handlers may return structured JSON or a plain-text status. The latter uses
+/// `data` and `message`, matching C# `WrapEnvelopeText` for script stability.
+pub fn ensure_json_success_envelope(output: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(output) {
+        Ok(value)
+            if value
+                .get("success")
+                .and_then(serde_json::Value::as_bool)
+                .is_some() =>
+        {
+            output.to_string()
+        }
+        Ok(value) => json_data_envelope(value, true),
+        Err(_) => serde_json::to_string_pretty(&serde_json::json!({
+            "success": true,
+            "data": output,
+            "message": output,
+        }))
+        .expect("JSON envelope contains only serializable values"),
+    }
+}
+
+/// Format an unexpected command failure in the C# JSON error-envelope shape.
+pub fn json_error_envelope(error: &HandlerError) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "success": false,
+        "error": { "error": error.to_string() },
+    }))
+    .expect("JSON envelope contains only serializable values")
+}
+
+/// Return the business outcome carried by an already rendered JSON envelope.
+pub fn json_envelope_succeeded(output: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|value| value.get("success").and_then(serde_json::Value::as_bool))
+        .unwrap_or(true)
 }
 
 /// Build a JSON value of the handler's current text+offset map.

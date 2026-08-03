@@ -180,9 +180,26 @@ fn main() {
     };
 
     match result {
-        Ok(text) => println!("{}", text),
+        Ok(text) => {
+            if cli.json {
+                let rendered = commands::ensure_json_success_envelope(&text);
+                let succeeded = commands::json_envelope_succeeded(&rendered);
+                println!("{}", rendered);
+                if !succeeded {
+                    std::process::exit(1);
+                }
+            } else {
+                println!("{}", text);
+            }
+        }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            if cli.json {
+                // C# writes structured JSON failures to stdout so agents can
+                // consume success and error results from the same stream.
+                println!("{}", commands::json_error_envelope(&e));
+            } else {
+                eprintln!("Error: {}", e);
+            }
             std::process::exit(1);
         }
     }

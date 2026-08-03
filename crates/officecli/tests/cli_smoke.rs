@@ -4801,3 +4801,47 @@ fn test_query_find_supports_csharp_literal_and_regex_filters() {
         .failure()
         .stderr(predicate::str::contains("invalid regex pattern"));
 }
+
+#[test]
+fn test_json_envelopes_wrap_writes_and_failures() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("json_envelope.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+
+    let add_output = officecli()
+        .args([
+            "--json",
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=wrapped",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add_json: serde_json::Value = serde_json::from_slice(&add_output).unwrap();
+    assert_eq!(add_json["success"], true);
+    assert_eq!(add_json["data"]["path"], "/body/p[2]");
+
+    let error_output = officecli()
+        .args(["--json", "get", &p, "/body/p[999]"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let error_json: serde_json::Value = serde_json::from_slice(&error_output).unwrap();
+    assert_eq!(error_json["success"], false);
+    assert!(error_json["error"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+}

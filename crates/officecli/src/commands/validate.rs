@@ -22,6 +22,9 @@ pub fn handle_validate(cmd: ValidateCommand, format: OutputFormat) -> Result<Str
                 Ok(lines.join("\n"))
             }
         }
-        OutputFormat::Json => Ok(serde_json::to_string_pretty(&errors)?),
+        OutputFormat::Json => Ok(crate::commands::json_data_envelope(
+            serde_json::to_value(&errors)?,
+            errors.is_empty(),
+        )),
     }
 }
