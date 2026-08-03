@@ -893,6 +893,41 @@ impl DocumentHandler for WordHandler {
         Ok(result)
     }
 
+    fn remove_with_properties(
+        &self,
+        path: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<Option<String>, HandlerError> {
+        let has_revision = properties
+            .keys()
+            .any(|key| key.starts_with("revision.") || key.starts_with("trackChange."));
+        if !has_revision {
+            return self.remove(path);
+        }
+
+        // C# exposes remove --prop revision.*. Retain the older
+        // trackChange.* spelling as a compatibility alias while routing both
+        // to the Rust handler's native revision model.
+        let mut revision_properties = HashMap::new();
+        for (key, value) in properties {
+            let normalized = key
+                .strip_prefix("trackChange.")
+                .map_or(key.as_str(), |suffix| match suffix {
+                    "author" => "revision.author",
+                    "date" => "revision.date",
+                    "id" => "revision.id",
+                    "type" => "revision.type",
+                    _ => key.as_str(),
+                });
+            revision_properties.insert(normalized.to_string(), value.clone());
+        }
+        revision_properties
+            .entry("revision.type".to_string())
+            .or_insert_with(|| "del".to_string());
+        self.set(path, &revision_properties)?;
+        Ok(None)
+    }
+
     fn move_element(
         &self,
         source: &str,

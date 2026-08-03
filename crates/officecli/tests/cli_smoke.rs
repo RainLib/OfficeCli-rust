@@ -1608,6 +1608,42 @@ fn test_docx_set_existing_run_as_revision() {
 }
 
 #[test]
+fn test_remove_accepts_csharp_revision_props() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_remove_revision_props.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body",
+            "--type",
+            "paragraph",
+            "--prop",
+            "text=tracked",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "remove",
+            &p,
+            "/body/p[2]/r[1]",
+            "--prop",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/revision[@id=1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"text\": \"tracked\""));
+}
+
+#[test]
 fn test_docx_set_existing_run_format_revision_restores_prior_properties() {
     let tmp = temp_dir();
     let path = tmp.path().join("test_set_format_revision.docx");

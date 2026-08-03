@@ -57,6 +57,15 @@ pub trait DocumentHandler: Send {
         wrap: Option<&str>,
     ) -> Result<String, HandlerError>;
     fn remove(&self, path: &str) -> Result<Option<String>, HandlerError>;
+    /// Remove an element with optional command-level modifiers. Formats that
+    /// do not define modifiers retain ordinary physical deletion.
+    fn remove_with_properties(
+        &self,
+        path: &str,
+        _properties: &HashMap<String, String>,
+    ) -> Result<Option<String>, HandlerError> {
+        self.remove(path)
+    }
     fn move_element(
         &self,
         source: &str,
