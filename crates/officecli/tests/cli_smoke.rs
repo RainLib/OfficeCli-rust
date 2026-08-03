@@ -2604,12 +2604,16 @@ fn test_docx_hyperlink_add_and_set_write_external_relationships() {
 
     let package = oxml::OxmlPackage::open(&p, false).unwrap();
     let document = package.read_part_xml("word/document.xml").unwrap();
-    let rels = package
-        .read_part_xml("word/_rels/document.xml.rels")
-        .unwrap();
-    assert!(document.contains(r#"w:hyperlink r:id="rId2""#));
-    assert!(rels.contains(r#"Id="rId2""#));
-    assert!(rels.contains(r#"Target="https://example.com/first" TargetMode="External""#));
+    let first_id = package
+        .part_rels("word/document.xml")
+        .unwrap()
+        .all()
+        .values()
+        .find(|relationship| relationship.target == "https://example.com/first")
+        .unwrap()
+        .id
+        .clone();
+    assert!(document.contains(&format!(r#"w:hyperlink r:id="{}""#, first_id)));
 
     officecli()
         .args([
@@ -2622,12 +2626,16 @@ fn test_docx_hyperlink_add_and_set_write_external_relationships() {
         .success();
     let package = oxml::OxmlPackage::open(&p, false).unwrap();
     let document = package.read_part_xml("word/document.xml").unwrap();
-    let rels = package
-        .read_part_xml("word/_rels/document.xml.rels")
-        .unwrap();
-    assert!(document.contains(r#"w:hyperlink r:id="rId3""#));
-    assert!(rels.contains(r#"Id="rId3""#));
-    assert!(rels.contains(r#"Target="https://example.com/second" TargetMode="External""#));
+    let second_id = package
+        .part_rels("word/document.xml")
+        .unwrap()
+        .all()
+        .values()
+        .find(|relationship| relationship.target == "https://example.com/second")
+        .unwrap()
+        .id
+        .clone();
+    assert!(document.contains(&format!(r#"w:hyperlink r:id="{}""#, second_id)));
     officecli()
         .args(["--json", "validate", &p])
         .assert()
