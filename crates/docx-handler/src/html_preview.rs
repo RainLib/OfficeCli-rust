@@ -1,5 +1,5 @@
 use handler_common::HandlerError;
-use oxml::OxmlPackage;
+use oxml::{package::MAX_RECURSION_DEPTH, OxmlPackage};
 use std::collections::{HashMap, HashSet};
 
 const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -764,6 +764,7 @@ fn build_section_hf_bundles(
                                     render_table(
                                         &child,
                                         "",
+                                        0,
                                         &mut html,
                                         styles,
                                         doc_defaults,
@@ -1049,6 +1050,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             render_table(
                 element,
                 &format!("/body/table[{}]", w_table_count),
+                0,
                 &mut body_html,
                 &styles,
                 &doc_defaults,
@@ -3109,15 +3111,27 @@ fn render_paragraph(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_table(
     node: &roxmltree::Node,
     path: &str,
+    depth: usize,
     output: &mut String,
     styles: &HashMap<String, DocxStyle>,
     doc_defaults: &DocDefaults,
     rels: &oxml::rels::Relationships,
     package: &OxmlPackage,
 ) {
+    // Guard tables built or modified in memory after the package-level XML
+    // scan.  Keep previews/resident mode alive instead of overflowing the
+    // stack on adversarial table nesting.
+    if depth >= MAX_RECURSION_DEPTH {
+        output.push_str(&format!(
+            "<div data-path=\"{}\" class=\"table-depth-limit\">[table nesting limit exceeded]</div>\n",
+            path
+        ));
+        return;
+    }
     output.push_str(&format!("<table data-path=\"{}\">\n", path));
     let mut r_idx = 0;
     for row in node.children().filter(|n| n.has_tag_name("tr")) {
@@ -3206,6 +3220,7 @@ fn render_table(
                     render_table(
                         &child,
                         &child_path,
+                        depth + 1,
                         output,
                         styles,
                         doc_defaults,
