@@ -5555,6 +5555,24 @@ fn test_batch_accepts_csharp_command_envelope() {
 }
 
 #[test]
+fn test_batch_envelope_stop_on_error_false_continues() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("batch_stop_on_error.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    let envelope = r#"{"stopOnError":false,"commands":[{"command":"set","path":"/missing","props":{"text":"ignored"}},{"command":"set","path":"/body/p[1]","props":{"text":"Continued"}}]}"#;
+    officecli()
+        .args(["batch", &p, envelope, "--best-effort"])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Continued"));
+}
+
+#[test]
 fn test_batch_accepts_csharp_dump_meta_and_raw_set_items() {
     let tmp = temp_dir();
     let path = tmp.path().join("batch_raw_set.docx");

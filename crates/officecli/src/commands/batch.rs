@@ -52,7 +52,9 @@ type RangeOriginals = Vec<(String, usize, usize)>;
 pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let batch_json = read_batch_json(&cmd)?;
 
-    let ops = parse_batch_ops(&batch_json)?;
+    let batch = parse_batch_ops(&batch_json)?;
+    let ops = batch.ops;
+    let stop_on_error = batch.stop_on_error.unwrap_or(!cmd.best_effort);
 
     if !cmd.emit_map {
         if let Some(output) =
@@ -91,7 +93,7 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
             op: op.command.clone(),
             result,
         });
-        if !cmd.best_effort && results.last().is_some_and(|result| result.result.is_err()) {
+        if stop_on_error && results.last().is_some_and(|result| result.result.is_err()) {
             break;
         }
     }
@@ -158,30 +160,40 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
     Ok(output)
 }
 
-fn parse_batch_ops(batch_json: &str) -> Result<Vec<BatchOp>, HandlerError> {
+struct ParsedBatch {
+    ops: Vec<BatchOp>,
+    stop_on_error: Option<bool>,
+}
+
+fn parse_batch_ops(batch_json: &str) -> Result<ParsedBatch, HandlerError> {
     let value: serde_json::Value = serde_json::from_str(batch_json)
         .map_err(|error| HandlerError::InvalidArgument(format!("invalid batch JSON: {error}")))?;
-    let operations = match &value {
-        serde_json::Value::Array(_) => value,
-        serde_json::Value::Object(object) => object
-            .get("commands")
-            .or_else(|| object.get("operations"))
-            .or_else(|| object.get("items"))
-            .cloned()
-            .ok_or_else(|| {
-                HandlerError::InvalidArgument(
-                    "batch JSON envelope must contain commands, operations, or items".to_string(),
-                )
-            })?,
+    let (operations, stop_on_error) = match &value {
+        serde_json::Value::Array(_) => (value, None),
+        serde_json::Value::Object(object) => (
+            object
+                .get("commands")
+                .or_else(|| object.get("operations"))
+                .or_else(|| object.get("items"))
+                .cloned()
+                .ok_or_else(|| {
+                    HandlerError::InvalidArgument(
+                        "batch JSON envelope must contain commands, operations, or items"
+                            .to_string(),
+                    )
+                })?,
+            object.get("stopOnError").and_then(|value| value.as_bool()),
+        ),
         _ => {
             return Err(HandlerError::InvalidArgument(
                 "batch JSON must be an operation array or object envelope".to_string(),
             ))
         }
     };
-    serde_json::from_value(operations).map_err(|error| {
+    let ops = serde_json::from_value(operations).map_err(|error| {
         HandlerError::InvalidArgument(format!("invalid batch operations: {error}"))
-    })
+    })?;
+    Ok(ParsedBatch { ops, stop_on_error })
 }
 
 fn read_batch_json(cmd: &BatchCommand) -> Result<String, HandlerError> {
