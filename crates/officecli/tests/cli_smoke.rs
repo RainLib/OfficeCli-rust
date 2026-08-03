@@ -3874,6 +3874,53 @@ fn test_dump_pptx_slide_subtree_replays_into_matching_slide() {
         .stdout(predicate::str::contains("Slide replay"));
 }
 
+#[test]
+fn test_dump_pptx_presentation_subtree_replays_into_fresh_deck() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_presentation_source.pptx");
+    let target = tmp.path().join("dump_presentation_target.pptx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "raw-set",
+            &source_path,
+            "/presentation",
+            "--xpath",
+            "/presentation",
+            "--action",
+            "setattr",
+            "--xml",
+            "firstSlideNum=7",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path, "/presentation"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &target_path, "/presentation"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("firstSlideNum=\"7\""));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Raw — read a part by name
 // ═══════════════════════════════════════════════════════════════════════

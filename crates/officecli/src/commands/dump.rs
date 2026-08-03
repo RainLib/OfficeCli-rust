@@ -144,9 +144,17 @@ pub fn handle_dump(
             let slide_path = path.as_deref().unwrap_or("/");
             let handler = crate::open_handler(&cmd.file, false)?;
             let xml = handler.raw(slide_path, handler_common::RawOptions::default())?;
+            let xpath = match slide_path {
+                "/presentation" => "/presentation",
+                "/theme" => "/theme",
+                path if path.starts_with("/slideMaster[") => "/sldMaster",
+                path if path.starts_with("/slideLayout[") => "/sldLayout",
+                path if path.starts_with("/noteSlide[") => "/notes",
+                _ => "/sld",
+            };
             let output = serde_json::to_string(&vec![
                 serde_json::json!({"command":"meta","dumpVersion":2}),
-                serde_json::json!({"command":"raw-set","part":slide_path,"xpath":"/sld","action":"replace","xml":oxml::xml_util::strip_prolog(&xml)}),
+                serde_json::json!({"command":"raw-set","part":slide_path,"xpath":xpath,"action":"replace","xml":oxml::xml_util::strip_prolog(&xml)}),
             ]).map_err(HandlerError::JsonError)?;
             if let Some(path) = cmd.out.filter(|path| path != "-") {
                 std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
