@@ -8,7 +8,7 @@ use crate::add::add_element;
 use crate::dom_types::{WordDom, WordElementType, WordNode};
 use crate::mutations::{self, move_element, remove_element, set_properties, swap_elements};
 use crate::navigation::{navigate_to_element, navigate_to_element_mut, parse_path};
-use crate::query::query_elements;
+use crate::query::{query_elements, query_subtree};
 use crate::raw::read_raw;
 use crate::revision;
 use crate::text_offset::extract_text_with_offsets;
@@ -382,6 +382,42 @@ impl DocumentHandler for WordHandler {
         if mutations::is_drawing_group_path(path) {
             return mutations::get_drawing_group(&self.package.borrow(), path);
         }
+        if let Some((kind, index, tail)) = header_footer_path_parts(path) {
+            let package = self.package.borrow();
+            let root_path = format!("/{kind}[{index}]");
+            let part_path = resolve_docx_raw_part_path(&package, &root_path)?;
+            let xml = package
+                .read_part_xml(&part_path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let dom = parse_document_xml(&xml)?;
+            let target = if tail.is_empty() {
+                &dom.root
+            } else {
+                navigate_header_footer_node(&dom.root, &tail)?
+            };
+            let node_path = if tail.is_empty() {
+                root_path
+            } else {
+                path.to_string()
+            };
+            let mut node = DocumentNode::new(
+                &node_path,
+                if tail.is_empty() {
+                    kind
+                } else {
+                    target.element_type.to_path_name()
+                },
+            );
+            let text = target.paragraph_text();
+            if !text.is_empty() {
+                node = node.with_text(&text).with_preview(&text);
+            }
+            node.child_count = target.children.len();
+            if depth > 0 {
+                node = node.with_children(build_children_nodes(target, &node_path, depth - 1));
+            }
+            return Ok(node);
+        }
         let dom = self.parse_dom()?;
 
         // Special case: root path "/" returns the document structure
@@ -415,6 +451,17 @@ impl DocumentHandler for WordHandler {
                             .with_text(&text)
                             .with_preview(&preview),
                     );
+                }
+                let package = self.package.borrow();
+                for (kind, relationship_type) in [("header", HEADER_REL), ("footer", FOOTER_REL)] {
+                    if let Ok(rels) = package.part_rels(DOCUMENT_PART) {
+                        let mut matching = rels.by_type(relationship_type);
+                        matching.sort_by(|left, right| left.id.cmp(&right.id));
+                        for (index, _) in matching.iter().enumerate() {
+                            let child_path = format!("/{kind}[{}]", index + 1);
+                            children.push(DocumentNode::new(&child_path, kind));
+                        }
+                    }
                 }
                 root_node = root_node.with_children(children);
             }
@@ -609,6 +656,36 @@ impl DocumentHandler for WordHandler {
         }
         let dom = self.parse_dom()?;
         let mut results = query_elements(&dom, selector)?;
+        {
+            let package = self.package.borrow();
+            for kind in ["header", "footer"] {
+                let relationship_type = if kind == "header" {
+                    HEADER_REL
+                } else {
+                    FOOTER_REL
+                };
+                let relationships = package
+                    .part_rels(DOCUMENT_PART)
+                    .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+                let mut parts = relationships.by_type(relationship_type);
+                parts.sort_by(|left, right| left.id.cmp(&right.id));
+                for (index, relationship) in parts.into_iter().enumerate() {
+                    if relationship.target_mode.eq_ignore_ascii_case("external") {
+                        continue;
+                    }
+                    let part_path = package.resolve_rel_target(DOCUMENT_PART, &relationship.target);
+                    let xml = package
+                        .read_part_xml(&part_path)
+                        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+                    let part_dom = parse_document_xml(&xml)?;
+                    results.extend(query_subtree(
+                        &part_dom.root,
+                        selector,
+                        &format!("/{kind}[{}]", index + 1),
+                    )?);
+                }
+            }
+        }
         if matches!(
             parsed.element_type.as_deref(),
             Some("p" | "paragraph" | "r" | "run")
@@ -721,6 +798,25 @@ impl DocumentHandler for WordHandler {
                 properties,
             );
         }
+        if let Some((kind, index, tail)) = header_footer_path_parts(path) {
+            if tail.is_empty() {
+                return Err(HandlerError::InvalidPath(format!(
+                    "set requires a child path below /{kind}[{index}]"
+                )));
+            }
+            let mut package = self.package.borrow_mut();
+            let root_path = format!("/{kind}[{index}]");
+            let part_path = resolve_docx_raw_part_path(&package, &root_path)?;
+            let xml = package
+                .read_part_xml(&part_path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let part_dom = parse_document_xml(&xml)?;
+            let mut edit_dom = header_footer_as_body_dom(&part_dom);
+            let result =
+                set_properties(&mut edit_dom, &header_footer_body_path(&tail), properties)?;
+            write_header_footer_body_dom(&mut package, &part_path, &part_dom, &edit_dom)?;
+            return Ok(result);
+        }
         if mutations::is_drawing_shape_path(path) {
             return mutations::set_drawing_shape(&mut self.package.borrow_mut(), path, properties);
         }
@@ -770,6 +866,102 @@ impl DocumentHandler for WordHandler {
                 "document opened in read-only mode".to_string(),
             ));
         }
+        if element_type == "inlinedparts"
+            || (matches!(
+                element_type,
+                "chartpart" | "diagram" | "smartart" | "activex" | "vmlshape" | "drawingshape"
+            ) && properties.contains_key("runXml"))
+        {
+            if let Some((kind, index, tail)) = header_footer_path_parts(parent) {
+                if tail.is_empty() {
+                    return Err(HandlerError::InvalidPath(format!(
+                        "inlinedparts requires a paragraph below /{kind}[{index}]"
+                    )));
+                }
+                let mut package = self.package.borrow_mut();
+                let root_path = format!("/{kind}[{index}]");
+                let part_path = resolve_docx_raw_part_path(&package, &root_path)?;
+                let xml = package
+                    .read_part_xml(&part_path)
+                    .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+                let part_dom = parse_document_xml(&xml)?;
+                let mut edit_dom = header_footer_as_body_dom(&part_dom);
+                let run_xml =
+                    mutations::materialize_inlined_parts(&mut package, &part_path, properties)?;
+                let result = append_inlined_run_xml(
+                    &mut edit_dom,
+                    &header_footer_body_path(&tail),
+                    &run_xml,
+                )?;
+                write_header_footer_body_dom(&mut package, &part_path, &part_dom, &edit_dom)?;
+                return Ok(header_footer_from_body_path(kind, index, &result));
+            }
+            let run_xml = mutations::materialize_inlined_parts(
+                &mut self.package.borrow_mut(),
+                DOCUMENT_PART,
+                properties,
+            )?;
+            let mut dom = self.parse_dom()?;
+            let result = append_inlined_run_xml(&mut dom, parent, &run_xml)?;
+            self.write_dom(&dom)?;
+            return Ok(result);
+        }
+        if let Some((kind, index, tail)) = header_footer_path_parts(parent) {
+            let mut package = self.package.borrow_mut();
+            let root_path = format!("/{kind}[{index}]");
+            let part_path = resolve_docx_raw_part_path(&package, &root_path)?;
+            let body_parent = header_footer_body_path(&tail);
+            if matches!(element_type, "image" | "drawing" | "picture" | "img") {
+                let new_path = mutations::add_image_part_aware_on_part(
+                    &mut package,
+                    &part_path,
+                    &body_parent,
+                    properties,
+                )?;
+                return Ok(header_footer_from_body_path(kind, index, &new_path));
+            }
+            if matches!(element_type, "chart" | "chartSpace") {
+                let new_path = mutations::add_chart_part_aware_on_part(
+                    &mut package,
+                    &part_path,
+                    &body_parent,
+                    properties,
+                )?;
+                return Ok(header_footer_from_body_path(kind, index, &new_path));
+            }
+            let xml = package
+                .read_part_xml(&part_path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let part_dom = parse_document_xml(&xml)?;
+            let mut edit_dom = header_footer_as_body_dom(&part_dom);
+            let position = translate_header_footer_position(position, kind, index)?;
+            let new_path = add_element(
+                &mut edit_dom,
+                &body_parent,
+                element_type,
+                position,
+                properties,
+                wrap,
+            )?;
+            if element_type.eq_ignore_ascii_case("hyperlink")
+                || element_type.eq_ignore_ascii_case("link")
+            {
+                if let Some(target) = hyperlink_target(properties) {
+                    let relationship_id = mutations::add_part_hyperlink_relationship(
+                        &mut package,
+                        &part_path,
+                        target,
+                    )?;
+                    mutations::set_hyperlink_relationship_id(
+                        &mut edit_dom,
+                        &new_path,
+                        &relationship_id,
+                    )?;
+                }
+            }
+            write_header_footer_body_dom(&mut package, &part_path, &part_dom, &edit_dom)?;
+            return Ok(header_footer_from_body_path(kind, index, &new_path));
+        }
         // Image requires part-aware work (word/media + rels + Content Types).
         // Route before WordDom parsing so we can wire the OOXML package.
         if matches!(element_type, "image" | "drawing" | "picture" | "img") {
@@ -806,6 +998,16 @@ impl DocumentHandler for WordHandler {
             return mutations::add_comment_part_aware(
                 &mut self.package.borrow_mut(),
                 parent,
+                properties,
+            );
+        }
+        if element_type.eq_ignore_ascii_case("header")
+            || element_type.eq_ignore_ascii_case("footer")
+        {
+            return mutations::add_header_footer_part_aware(
+                &mut self.package.borrow_mut(),
+                parent,
+                &element_type.to_ascii_lowercase(),
                 properties,
             );
         }
@@ -881,6 +1083,24 @@ impl DocumentHandler for WordHandler {
             mutations::remove_drawing_group(&mut self.package.borrow_mut(), path)?;
             return Ok(Some(path.to_string()));
         }
+        if let Some((kind, index, tail)) = header_footer_path_parts(path) {
+            if tail.is_empty() {
+                return Err(HandlerError::InvalidPath(format!(
+                    "cannot remove the /{kind}[{index}] part through L2; remove its section reference instead"
+                )));
+            }
+            let mut package = self.package.borrow_mut();
+            let root_path = format!("/{kind}[{index}]");
+            let part_path = resolve_docx_raw_part_path(&package, &root_path)?;
+            let xml = package
+                .read_part_xml(&part_path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let part_dom = parse_document_xml(&xml)?;
+            let mut edit_dom = header_footer_as_body_dom(&part_dom);
+            let result = remove_element(&mut edit_dom, &header_footer_body_path(&tail))?;
+            write_header_footer_body_dom(&mut package, &part_path, &part_dom, &edit_dom)?;
+            return Ok(result.map(|path| header_footer_from_body_path(kind, index, &path)));
+        }
         if let Some((paragraph_path, tab_index)) = parse_tabstop_path(path) {
             let mut dom = self.parse_dom()?;
             remove_tabstop(&mut dom, &paragraph_path, tab_index)?;
@@ -938,6 +1158,50 @@ impl DocumentHandler for WordHandler {
             return Err(HandlerError::OperationFailed(
                 "document opened in read-only mode".to_string(),
             ));
+        }
+        if let Some((kind, index, tail)) = header_footer_path_parts(source) {
+            if tail.is_empty() {
+                return Err(HandlerError::InvalidPath(
+                    "cannot move a header/footer root".to_string(),
+                ));
+            }
+            let target_tail = match target_parent {
+                Some(target) => {
+                    let Some((target_kind, target_index, target_tail)) =
+                        header_footer_path_parts(target)
+                    else {
+                        return Err(HandlerError::InvalidPath(
+                            "a header/footer source must move within the same header/footer part"
+                                .to_string(),
+                        ));
+                    };
+                    if target_kind != kind || target_index != index {
+                        return Err(HandlerError::InvalidPath(
+                            "move between different header/footer parts is not supported"
+                                .to_string(),
+                        ));
+                    }
+                    header_footer_body_path(&target_tail)
+                }
+                None => "/body".to_string(),
+            };
+            let mut package = self.package.borrow_mut();
+            let root_path = format!("/{kind}[{index}]");
+            let part_path = resolve_docx_raw_part_path(&package, &root_path)?;
+            let xml = package
+                .read_part_xml(&part_path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let part_dom = parse_document_xml(&xml)?;
+            let mut edit_dom = header_footer_as_body_dom(&part_dom);
+            let position = translate_header_footer_position(position, kind, index)?;
+            let new_path = move_element(
+                &mut edit_dom,
+                &header_footer_body_path(&tail),
+                Some(&target_tail),
+                position,
+            )?;
+            write_header_footer_body_dom(&mut package, &part_path, &part_dom, &edit_dom)?;
+            return Ok(header_footer_from_body_path(kind, index, &new_path));
         }
         let mut dom = self.parse_dom()?;
         let new_path = move_element(&mut dom, source, target_parent, position)?;
@@ -1057,6 +1321,142 @@ impl DocumentHandler for WordHandler {
                     .map_err(|error| HandlerError::SaveError(error.to_string()));
             }
         }
+        if part_path.eq_ignore_ascii_case("/document")
+            && action.eq_ignore_ascii_case("embed-binary")
+        {
+            let data_uri = xml.ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "/document embed-binary requires a data URI in XML".to_string(),
+                )
+            })?;
+            return mutations::attach_document_image_binary(&mut package, xpath.trim(), data_uri);
+        }
+        if part_path.eq_ignore_ascii_case("/customXml")
+            && action.eq_ignore_ascii_case("embed-binary")
+        {
+            let data_uri = xml.ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "/customXml embed-binary requires a data URI in XML".to_string(),
+                )
+            })?;
+            return mutations::attach_custom_xml_item_binary(&mut package, xpath.trim(), data_uri);
+        }
+        if part_path.eq_ignore_ascii_case("/numbering")
+            && action.eq_ignore_ascii_case("embed-binary")
+        {
+            let data_uri = xml.ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "/numbering embed-binary requires a data URI in XML".to_string(),
+                )
+            })?;
+            mutations::prepare_numbering_raw_replace(&mut package)?;
+            return mutations::attach_part_image_binary(
+                &mut package,
+                "word/numbering.xml",
+                xpath.trim(),
+                data_uri,
+            );
+        }
+        if action.eq_ignore_ascii_case("embed-binary") {
+            if let Some(item_relationship_id) = part_path
+                .strip_prefix("/customXml/")
+                .filter(|value| !value.contains('/'))
+            {
+                let data_uri = xml.ok_or_else(|| {
+                    HandlerError::InvalidArgument(
+                        "/customXml/<rId> embed-binary requires a data URI in XML".to_string(),
+                    )
+                })?;
+                return mutations::attach_custom_xml_properties_binary(
+                    &mut package,
+                    item_relationship_id,
+                    xpath.trim(),
+                    data_uri,
+                );
+            }
+        }
+        if action.eq_ignore_ascii_case("embed-binary") {
+            if let Some((_kind, _index)) = semantic_header_footer_path(part_path) {
+                let data_uri = xml.ok_or_else(|| {
+                    HandlerError::InvalidArgument(
+                        "header/footer embed-binary requires a data URI in XML".to_string(),
+                    )
+                })?;
+                let source_part = resolve_docx_raw_part_path(&package, part_path)?;
+                return mutations::attach_part_image_binary(
+                    &mut package,
+                    &source_part,
+                    xpath.trim(),
+                    data_uri,
+                );
+            }
+        }
+        if action.eq_ignore_ascii_case("replace") {
+            let properties_kind = match part_path
+                .trim_start_matches('/')
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "docprops/core.xml" | "coreproperties" => Some("core"),
+                "docprops/app.xml" | "appproperties" => Some("app"),
+                "docprops/custom.xml" | "customproperties" => Some("custom"),
+                _ => None,
+            };
+            if let Some(kind) = properties_kind {
+                let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {
+                    HandlerError::InvalidArgument(format!("{} replace requires XML", part_path))
+                })?;
+                let target = mutations::prepare_doc_properties_raw_replace(&mut package, kind)?;
+                return package
+                    .write_part_xml(target, replacement)
+                    .map_err(|error| HandlerError::SaveError(error.to_string()));
+            }
+        }
+        if action.eq_ignore_ascii_case("replace")
+            && (part_path.eq_ignore_ascii_case("/numbering")
+                || part_path.eq_ignore_ascii_case("/settings")
+                || part_path.eq_ignore_ascii_case("/footnotes")
+                || part_path.eq_ignore_ascii_case("/endnotes")
+                || part_path.eq_ignore_ascii_case("/webSettings"))
+        {
+            let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {
+                HandlerError::InvalidArgument(format!("{} replace requires XML", part_path))
+            })?;
+            let target = if part_path.eq_ignore_ascii_case("/numbering") {
+                mutations::prepare_numbering_raw_replace(&mut package)?;
+                "word/numbering.xml"
+            } else if part_path.eq_ignore_ascii_case("/settings") {
+                mutations::prepare_settings_raw_replace(&mut package)?;
+                "word/settings.xml"
+            } else if part_path.eq_ignore_ascii_case("/footnotes") {
+                mutations::prepare_notes_raw_replace(&mut package, "footnotes")?
+            } else if part_path.eq_ignore_ascii_case("/endnotes") {
+                mutations::prepare_notes_raw_replace(&mut package, "endnotes")?
+            } else {
+                mutations::prepare_web_settings_raw_replace(&mut package)?;
+                "word/webSettings.xml"
+            };
+            return package
+                .write_part_xml(target, replacement)
+                .map_err(|error| HandlerError::SaveError(error.to_string()));
+        }
+        if action.eq_ignore_ascii_case("replace") {
+            if let Some((kind, index)) = semantic_header_footer_path(part_path) {
+                let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {
+                    HandlerError::InvalidArgument(format!("{} replace requires XML", part_path))
+                })?;
+                let relationship_id = xpath.trim().strip_prefix("rId").map(|_| xpath.trim());
+                let target = mutations::prepare_header_footer_raw_replace(
+                    &mut package,
+                    kind,
+                    index,
+                    relationship_id,
+                )?;
+                return package
+                    .write_part_xml(&target, replacement)
+                    .map_err(|error| HandlerError::SaveError(error.to_string()));
+            }
+        }
         let resolved = resolve_docx_raw_part_path(&package, part_path)?;
         crate::raw::apply_raw_set(&mut package, &resolved, xpath, action, xml)
     }
@@ -1073,6 +1473,12 @@ impl DocumentHandler for WordHandler {
             ));
         }
         let mut package = self.package.borrow_mut();
+        if part_type.eq_ignore_ascii_case("header") || part_type.eq_ignore_ascii_case("footer") {
+            return mutations::create_header_footer_part(
+                &mut package,
+                &part_type.to_ascii_lowercase(),
+            );
+        }
         crate::raw::add_part(&mut package, parent, part_type, properties)
     }
 
@@ -1260,6 +1666,12 @@ fn resolve_docx_raw_part_path(
         "styles" => return Ok("word/styles.xml".to_string()),
         "settings" => return Ok("word/settings.xml".to_string()),
         "numbering" => return Ok("word/numbering.xml".to_string()),
+        "footnotes" => return Ok("word/footnotes.xml".to_string()),
+        "endnotes" => return Ok("word/endnotes.xml".to_string()),
+        "websettings" => return Ok("word/webSettings.xml".to_string()),
+        "coreproperties" => return Ok("docProps/core.xml".to_string()),
+        "appproperties" => return Ok("docProps/app.xml".to_string()),
+        "customproperties" => return Ok("docProps/custom.xml".to_string()),
         "comments" => return Ok("word/comments.xml".to_string()),
         "commentsextended" => return Ok("word/commentsExtended.xml".to_string()),
         "fonttable" => return Ok("word/fontTable.xml".to_string()),
@@ -1293,6 +1705,174 @@ fn semantic_part_index(path: &str, prefix: &str) -> Option<usize> {
         .and_then(|suffix| suffix.strip_suffix(']'))
         .and_then(|suffix| suffix.parse::<usize>().ok())
         .filter(|index| *index > 0)
+}
+
+fn semantic_header_footer_path(path: &str) -> Option<(&'static str, usize)> {
+    let alias = path.trim_matches('/').to_ascii_lowercase();
+    for kind in ["header", "footer"] {
+        if let Some(index) = semantic_part_index(&alias, kind) {
+            return Some((kind, index));
+        }
+    }
+    None
+}
+
+fn header_footer_path_parts(path: &str) -> Option<(&'static str, usize, String)> {
+    let trimmed = path.trim_matches('/');
+    for kind in ["header", "footer"] {
+        let Some(suffix) = trimmed.strip_prefix(kind) else {
+            continue;
+        };
+        let Some(rest) = suffix.strip_prefix('[') else {
+            continue;
+        };
+        let close = rest.find(']')?;
+        let index = rest
+            .get(..close)?
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index > 0)?;
+        let tail = rest.get(close + 1..)?;
+        if tail.is_empty() || tail.starts_with('/') {
+            return Some((kind, index, tail.to_string()));
+        }
+    }
+    None
+}
+
+/// Existing DOM mutation helpers are intentionally rooted at `/body`.  A
+/// header/footer owns the same block vocabulary but lives in `w:hdr`/`w:ftr`,
+/// so expose its children through a transient document/body wrapper and write
+/// the changed body children back to the original part root afterwards.
+fn header_footer_as_body_dom(part_dom: &WordDom) -> WordDom {
+    let mut root = WordNode::new(WordElementType::Document);
+    let mut body = WordNode::new(WordElementType::Body);
+    body.children = part_dom.root.children.clone();
+    root.children.push(body);
+    WordDom::new(root)
+}
+
+fn write_header_footer_body_dom(
+    package: &mut OxmlPackage,
+    part_path: &str,
+    original_part_dom: &WordDom,
+    edited_body_dom: &WordDom,
+) -> Result<(), HandlerError> {
+    let mut part_root = original_part_dom.root.clone();
+    let body = edited_body_dom.body().ok_or_else(|| {
+        HandlerError::OperationFailed("header/footer edit body unexpectedly missing".to_string())
+    })?;
+    part_root.children = body.children.clone();
+    let xml = serialize_dom(&WordDom::new(part_root));
+    package
+        .write_part_xml(part_path, &xml)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
+}
+
+fn header_footer_body_path(tail: &str) -> String {
+    if tail.is_empty() {
+        "/body".to_string()
+    } else {
+        format!("/body{tail}")
+    }
+}
+
+fn header_footer_from_body_path(kind: &str, index: usize, body_path: &str) -> String {
+    format!(
+        "/{kind}[{index}]{}",
+        body_path.strip_prefix("/body").unwrap_or(body_path)
+    )
+}
+
+fn translate_header_footer_position(
+    position: InsertPosition,
+    kind: &str,
+    index: usize,
+) -> Result<InsertPosition, HandlerError> {
+    let translate = |anchor: String| {
+        let Some((anchor_kind, anchor_index, tail)) = header_footer_path_parts(&anchor) else {
+            return Err(HandlerError::InvalidPath(
+                "header/footer insertion anchors must be in the same part".to_string(),
+            ));
+        };
+        if anchor_kind != kind || anchor_index != index {
+            return Err(HandlerError::InvalidPath(
+                "header/footer insertion anchors must be in the same part".to_string(),
+            ));
+        }
+        Ok(header_footer_body_path(&tail))
+    };
+    match position {
+        InsertPosition::Append => Ok(InsertPosition::Append),
+        InsertPosition::AtIndex(index) => Ok(InsertPosition::AtIndex(index)),
+        InsertPosition::AfterElement(anchor) => {
+            Ok(InsertPosition::AfterElement(translate(anchor)?))
+        }
+        InsertPosition::BeforeElement(anchor) => {
+            Ok(InsertPosition::BeforeElement(translate(anchor)?))
+        }
+    }
+}
+
+fn append_inlined_run_xml(
+    dom: &mut WordDom,
+    parent: &str,
+    run_xml: &str,
+) -> Result<String, HandlerError> {
+    let run = parse_document_xml(run_xml)?.root;
+    if run.element_type != WordElementType::Run {
+        return Err(HandlerError::InvalidArgument(
+            "inlinedparts runXml must have a w:r root element".to_string(),
+        ));
+    }
+    let parent_node = navigate_to_element_mut(dom, parent)?;
+    if parent_node.element_type != WordElementType::Paragraph {
+        return Err(HandlerError::InvalidPath(format!(
+            "inlinedparts currently requires a paragraph parent, got '{}'",
+            parent
+        )));
+    }
+    parent_node.children.push(run);
+    let run_index = parent_node
+        .children
+        .iter()
+        .filter(|child| child.element_type == WordElementType::Run)
+        .count();
+    Ok(format!("{parent}/r[{run_index}]"))
+}
+
+fn navigate_header_footer_node<'a>(
+    root: &'a WordNode,
+    tail: &str,
+) -> Result<&'a WordNode, HandlerError> {
+    let segments = parse_path(tail)?;
+    let mut current = root;
+    for segment in segments {
+        let matches: Vec<&WordNode> = current
+            .children
+            .iter()
+            .filter(|child| {
+                child.element_type.to_path_name() == segment.name
+                    && segment
+                        .attribute
+                        .as_ref()
+                        .is_none_or(|(key, value)| child.attributes.get(key) == Some(value))
+            })
+            .collect();
+        let index = segment.index.unwrap_or(1);
+        current = matches
+            .get(index.checked_sub(1).ok_or_else(|| {
+                HandlerError::PathNotFound(format!("invalid zero index in {tail}"))
+            })?)
+            .copied()
+            .ok_or_else(|| {
+                HandlerError::PathNotFound(format!(
+                    "no {} at header/footer path {tail}",
+                    segment.name
+                ))
+            })?;
+    }
+    Ok(current)
 }
 
 fn indexed_document_relationship(

@@ -40,6 +40,41 @@ const DOCX_NUMBERING_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
 const DOCX_NUMBERING_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
+const DOCX_SETTINGS_PART: &str = "word/settings.xml";
+const DOCX_SETTINGS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
+const DOCX_SETTINGS_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml";
+const DOCX_FOOTNOTES_PART: &str = "word/footnotes.xml";
+const DOCX_ENDNOTES_PART: &str = "word/endnotes.xml";
+const DOCX_FOOTNOTES_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
+const DOCX_ENDNOTES_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes";
+const DOCX_FOOTNOTES_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+const DOCX_ENDNOTES_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
+const DOCX_WEB_SETTINGS_PART: &str = "word/webSettings.xml";
+const DOCX_WEB_SETTINGS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings";
+const DOCX_WEB_SETTINGS_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml";
+const DOCX_CORE_PROPERTIES_PART: &str = "docProps/core.xml";
+const DOCX_APP_PROPERTIES_PART: &str = "docProps/app.xml";
+const DOCX_CUSTOM_PROPERTIES_PART: &str = "docProps/custom.xml";
+const ROOT_CORE_PROPERTIES_REL: &str =
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
+const ROOT_APP_PROPERTIES_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
+const ROOT_CUSTOM_PROPERTIES_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties";
+const CORE_PROPERTIES_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-package.core-properties+xml";
+const APP_PROPERTIES_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+const CUSTOM_PROPERTIES_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.custom-properties+xml";
 const DOCX_FONT_TABLE_PART: &str = "word/fontTable.xml";
 const DOCX_FONT_TABLE_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable";
@@ -47,8 +82,46 @@ const DOCX_FONT_TABLE_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml";
 const DOCX_FONT_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font";
+const DOCX_IMAGE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const DOCX_CHART_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+const DOCX_CHART_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+const DOCX_CHART_STYLE_REL_TYPE: &str =
+    "http://schemas.microsoft.com/office/2011/relationships/chartStyle";
+const DOCX_CHART_COLOR_STYLE_REL_TYPE: &str =
+    "http://schemas.microsoft.com/office/2011/relationships/chartColorStyle";
+const DOCX_CHART_THEME_OVERRIDE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/themeOverride";
+const DOCX_CHART_USER_SHAPES_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartUserShapes";
+const DOCX_PACKAGE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package";
+const DOCX_DIAGRAM_DATA_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData";
+const DOCX_DIAGRAM_LAYOUT_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout";
+const DOCX_DIAGRAM_STYLE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle";
+const DOCX_DIAGRAM_COLORS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors";
+const DOCX_DIAGRAM_DRAWING_REL_TYPE: &str =
+    "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing";
+const DOCX_CUSTOM_XML_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml";
+const DOCX_CUSTOM_XML_PROPS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps";
 const DOCX_OBFUSCATED_FONT_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.obfuscatedFont";
+const DOCX_HEADER_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+const DOCX_FOOTER_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+const DOCX_HEADER_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
+const DOCX_FOOTER_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
 
 /// Create a numbering template or instance while maintaining the package parts
 /// Word requires.  The template emits all nine OOXML levels so it remains a
@@ -1610,6 +1683,660 @@ fn ensure_numbering_package_wiring(package: &mut OxmlPackage) -> Result<(), Hand
             .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     }
     Ok(())
+}
+
+/// Prepare missing C# semantic raw parts before whole-root replacement.
+pub(crate) fn prepare_numbering_raw_replace(package: &mut OxmlPackage) -> Result<(), HandlerError> {
+    if !package.has_part(DOCX_NUMBERING_PART) {
+        package
+            .write_part_xml(
+                DOCX_NUMBERING_PART,
+                &format!("<w:numbering xmlns:w=\"{}\"></w:numbering>", W_NS),
+            )
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    ensure_numbering_package_wiring(package)
+}
+
+pub(crate) fn prepare_settings_raw_replace(package: &mut OxmlPackage) -> Result<(), HandlerError> {
+    if !package.has_part(DOCX_SETTINGS_PART) {
+        package
+            .write_part_xml(
+                DOCX_SETTINGS_PART,
+                &format!("<w:settings xmlns:w=\"{}\"></w:settings>", W_NS),
+            )
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    let rels = package
+        .read_part_xml(DOCX_DOCUMENT_RELS_PART)
+        .unwrap_or_default();
+    if !rels.contains(DOCX_SETTINGS_REL_TYPE) {
+        inject_docx_relationship(
+            package,
+            DOCX_DOCUMENT_RELS_PART,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"settings.xml\"/>",
+                next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART),
+                DOCX_SETTINGS_REL_TYPE
+            ),
+        )?;
+    }
+    ensure_content_type_override(package, "/word/settings.xml", DOCX_SETTINGS_CONTENT_TYPE)
+}
+
+/// Lazily recreate the notes part graph for C# logical whole-part raw replay.
+pub(crate) fn prepare_notes_raw_replace(
+    package: &mut OxmlPackage,
+    kind: &str,
+) -> Result<&'static str, HandlerError> {
+    let (part, root, relationship_type, content_type, target) = match kind {
+        "footnotes" => (
+            DOCX_FOOTNOTES_PART,
+            "footnotes",
+            DOCX_FOOTNOTES_REL_TYPE,
+            DOCX_FOOTNOTES_CONTENT_TYPE,
+            "footnotes.xml",
+        ),
+        "endnotes" => (
+            DOCX_ENDNOTES_PART,
+            "endnotes",
+            DOCX_ENDNOTES_REL_TYPE,
+            DOCX_ENDNOTES_CONTENT_TYPE,
+            "endnotes.xml",
+        ),
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "invalid notes kind: {kind}"
+            )))
+        }
+    };
+    if !package.has_part(part) {
+        package
+            .write_part_xml(part, &format!("<w:{root} xmlns:w=\"{W_NS}\"></w:{root}>"))
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    let rels = package
+        .read_part_xml(DOCX_DOCUMENT_RELS_PART)
+        .unwrap_or_default();
+    if !rels.contains(relationship_type) {
+        inject_docx_relationship(
+            package,
+            DOCX_DOCUMENT_RELS_PART,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+                next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART),
+                relationship_type,
+                target
+            ),
+        )?;
+    }
+    ensure_content_type_override(package, &format!("/{part}"), content_type)?;
+    Ok(part)
+}
+
+/// Lazily recreate `word/webSettings.xml` for C# semantic raw replay.
+pub(crate) fn prepare_web_settings_raw_replace(
+    package: &mut OxmlPackage,
+) -> Result<(), HandlerError> {
+    if !package.has_part(DOCX_WEB_SETTINGS_PART) {
+        package
+            .write_part_xml(
+                DOCX_WEB_SETTINGS_PART,
+                &format!("<w:webSettings xmlns:w=\"{W_NS}\"></w:webSettings>"),
+            )
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    let rels = package
+        .read_part_xml(DOCX_DOCUMENT_RELS_PART)
+        .unwrap_or_default();
+    if !rels.contains(DOCX_WEB_SETTINGS_REL_TYPE) {
+        inject_docx_relationship(
+            package,
+            DOCX_DOCUMENT_RELS_PART,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"webSettings.xml\"/>",
+                next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART),
+                DOCX_WEB_SETTINGS_REL_TYPE
+            ),
+        )?;
+    }
+    ensure_content_type_override(
+        package,
+        "/word/webSettings.xml",
+        DOCX_WEB_SETTINGS_CONTENT_TYPE,
+    )
+}
+
+/// Create the root-level relationship and content-type graph for a document
+/// property part emitted verbatim by C# dump (`core`, `app`, or `custom`).
+pub(crate) fn prepare_doc_properties_raw_replace(
+    package: &mut OxmlPackage,
+    part: &str,
+) -> Result<&'static str, HandlerError> {
+    let (path, relationship_type, target, content_type, placeholder) = match part {
+        "core" => (
+            DOCX_CORE_PROPERTIES_PART,
+            ROOT_CORE_PROPERTIES_REL,
+            "docProps/core.xml",
+            CORE_PROPERTIES_CONTENT_TYPE,
+            "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\"></cp:coreProperties>",
+        ),
+        "app" => (
+            DOCX_APP_PROPERTIES_PART,
+            ROOT_APP_PROPERTIES_REL,
+            "docProps/app.xml",
+            APP_PROPERTIES_CONTENT_TYPE,
+            "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"></Properties>",
+        ),
+        "custom" => (
+            DOCX_CUSTOM_PROPERTIES_PART,
+            ROOT_CUSTOM_PROPERTIES_REL,
+            "docProps/custom.xml",
+            CUSTOM_PROPERTIES_CONTENT_TYPE,
+            "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties\"></Properties>",
+        ),
+        _ => return Err(HandlerError::InvalidArgument(format!("invalid document properties part: {part}"))),
+    };
+    if !package.has_part(path) {
+        package
+            .write_part_xml(path, placeholder)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    let rels = package.read_part_xml("_rels/.rels").unwrap_or_default();
+    if !rels.contains(relationship_type) {
+        inject_docx_relationship(
+            package,
+            "_rels/.rels",
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+                next_docx_rel_id(package, "_rels/.rels"),
+                relationship_type,
+                target
+            ),
+        )?;
+    }
+    ensure_content_type_override(package, &format!("/{path}"), content_type)?;
+    Ok(path)
+}
+
+/// Create or resolve the package graph behind a semantic `/header[N]` or
+/// `/footer[N]` whole-part replacement.  During a full dump replay the
+/// document XML has already been restored, so `relationship_id` preserves the
+/// source `r:id` used by its section reference.  Direct raw-set calls without
+/// a source reference fall back to a default reference on the final section.
+pub(crate) fn prepare_header_footer_raw_replace(
+    package: &mut OxmlPackage,
+    kind: &str,
+    index: usize,
+    relationship_id: Option<&str>,
+) -> Result<String, HandlerError> {
+    let (reference_name, root_name, relation_type, content_type, prefix) = match kind {
+        "header" => (
+            "header",
+            "hdr",
+            DOCX_HEADER_REL_TYPE,
+            DOCX_HEADER_CONTENT_TYPE,
+            "header",
+        ),
+        "footer" => (
+            "footer",
+            "ftr",
+            DOCX_FOOTER_REL_TYPE,
+            DOCX_FOOTER_CONTENT_TYPE,
+            "footer",
+        ),
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "invalid header/footer kind: {kind}"
+            )))
+        }
+    };
+    if index == 0 {
+        return Err(HandlerError::InvalidArgument(format!(
+            "/{kind}[N] uses 1-based indices"
+        )));
+    }
+
+    let document_xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let reference_id = relationship_id
+        .filter(|id| id.starts_with("rId"))
+        .map(str::to_string)
+        .or_else(|| nth_header_footer_reference_id(&document_xml, reference_name, index));
+
+    if let Some(id) = reference_id.as_deref() {
+        let rels = package
+            .part_rels(DOCX_DOCUMENT_PART)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        if let Some(relationship) = rels.get(id) {
+            if relationship.type_uri != relation_type {
+                return Err(HandlerError::OperationFailed(format!(
+                    "{id} is not a {kind} relationship"
+                )));
+            }
+            return Ok(package.resolve_rel_target(DOCX_DOCUMENT_PART, &relationship.target));
+        }
+    }
+
+    let relation_id = reference_id
+        .clone()
+        .unwrap_or_else(|| next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART));
+    let part_path = next_header_footer_part_path(package, prefix);
+    let target = part_path.strip_prefix("word/").unwrap_or(&part_path);
+    inject_docx_relationship(
+        package,
+        DOCX_DOCUMENT_RELS_PART,
+        &format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+            relation_id, relation_type, target
+        ),
+    )?;
+    ensure_content_type_override(package, &format!("/{part_path}"), content_type)?;
+    if !package.has_part(&part_path) {
+        package
+            .write_part_xml(
+                &part_path,
+                &format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:{root_name} xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\"><w:p/></w:{root_name}>"
+                ),
+            )
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+
+    if reference_id.is_none() {
+        attach_default_header_footer_reference(package, reference_name, &relation_id)?;
+    }
+    Ok(part_path)
+}
+
+/// Create a detached header/footer package part for the public `add-part`
+/// command.  The caller receives the main-document relationship id and can
+/// wire it into a chosen `w:sectPr` with a later raw-set; unlike semantic dump
+/// replay this intentionally does not alter document.xml.
+pub(crate) fn create_header_footer_part(
+    package: &mut OxmlPackage,
+    kind: &str,
+) -> Result<(String, String), HandlerError> {
+    let (root_name, relation_type, content_type, prefix) = match kind {
+        "header" => (
+            "hdr",
+            DOCX_HEADER_REL_TYPE,
+            DOCX_HEADER_CONTENT_TYPE,
+            "header",
+        ),
+        "footer" => (
+            "ftr",
+            DOCX_FOOTER_REL_TYPE,
+            DOCX_FOOTER_CONTENT_TYPE,
+            "footer",
+        ),
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "invalid header/footer kind: {kind}"
+            )))
+        }
+    };
+    let relationship_id = next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART);
+    let part_path = next_header_footer_part_path(package, prefix);
+    let target = part_path.strip_prefix("word/").unwrap_or(&part_path);
+    inject_docx_relationship(
+        package,
+        DOCX_DOCUMENT_RELS_PART,
+        &format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+            relationship_id, relation_type, target
+        ),
+    )?;
+    ensure_content_type_override(package, &format!("/{part_path}"), content_type)?;
+    package
+        .write_part_xml(
+            &part_path,
+            &format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:{root_name} xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\"><w:p/></w:{root_name}>"
+            ),
+        )
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok((relationship_id, part_path))
+}
+
+/// C#-compatible structural creation for the common document-final-section
+/// header/footer command.  The part itself is relationship-backed (unlike a
+/// normal DOM node), so create it here before the caller parses document.xml.
+/// Per-section targeting and subsequent block-level edits are intentionally
+/// routed separately; they require a part-aware DOM rather than string paths.
+pub(crate) fn add_header_footer_part_aware(
+    package: &mut OxmlPackage,
+    parent: &str,
+    kind: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let reference_name = match kind {
+        "header" => "header",
+        "footer" => "footer",
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "invalid header/footer kind: {kind}"
+            )))
+        }
+    };
+    let reference_type = properties
+        .get("type")
+        .or_else(|| properties.get("kind"))
+        .or_else(|| properties.get("ref"))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "default".to_string());
+    if !matches!(reference_type.as_str(), "default" | "first" | "even") {
+        return Err(HandlerError::InvalidArgument(format!(
+            "invalid {kind} type '{}'; expected default, first, or even",
+            reference_type
+        )));
+    }
+
+    let mut document = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    if !document.contains("<w:sectPr") {
+        let body_close = document.rfind("</w:body>").ok_or_else(|| {
+            HandlerError::OperationFailed("document.xml has no w:body".to_string())
+        })?;
+        document.insert_str(body_close, "<w:sectPr></w:sectPr>");
+    }
+    let (section_start, section_end) = target_header_footer_section_bounds(&document, parent)?;
+    let section = &document[section_start..section_end];
+    if section_contains_header_footer_type(section, reference_name, &reference_type) {
+        return Err(HandlerError::OperationFailed(format!(
+            "{kind} of type '{reference_type}' already exists in the final section"
+        )));
+    }
+
+    let (relationship_id, part_path) = create_header_footer_part(package, kind)?;
+    let reference = format!(
+        "<w:{reference_name}Reference w:type=\"{reference_type}\" r:id=\"{relationship_id}\"/>"
+    );
+    let mut updated = document;
+    updated.insert_str(section_end, &reference);
+    if reference_type == "first" && !is_truthy(properties.get("noTitlePg")) {
+        let insert_at = updated
+            .rfind("</w:sectPr>")
+            .expect("validated sectPr close");
+        updated.insert_str(insert_at, "<w:titlePg/>");
+    }
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    if reference_type == "even" && !is_truthy(properties.get("noEvenAndOddHeaders")) {
+        ensure_even_and_odd_headers(package)?;
+    }
+    package
+        .write_part_xml(&part_path, &header_footer_xml(kind, properties))
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+
+    let rels = package
+        .part_rels(DOCX_DOCUMENT_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut related = rels.by_type(if kind == "header" {
+        DOCX_HEADER_REL_TYPE
+    } else {
+        DOCX_FOOTER_REL_TYPE
+    });
+    related.sort_by(|left, right| left.id.cmp(&right.id));
+    let index = related
+        .iter()
+        .position(|relationship| relationship.id == relationship_id)
+        .expect("new relationship is visible")
+        + 1;
+    Ok(format!("/{kind}[{index}]"))
+}
+
+/// Match C#'s `ResolveTargetSectPrForHeaderFooter`: `/section[N]` selects the
+/// Nth paragraph-carried section break while all other parents resolve to the
+/// trailing body section.  A paragraph-scoped scan is sufficient here because
+/// Word stores the intermediate section break inside its carrier `w:pPr`.
+fn target_header_footer_section_bounds(
+    xml: &str,
+    parent: &str,
+) -> Result<(usize, usize), HandlerError> {
+    if let Some(index) = parse_header_footer_section_index(parent) {
+        let mut cursor = 0;
+        let mut found = 0usize;
+        while let Some(offset) = xml[cursor..].find("<w:p") {
+            let paragraph_start = cursor + offset;
+            let name_end = paragraph_start + "<w:p".len();
+            if !matches!(
+                xml.as_bytes().get(name_end),
+                Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+            ) {
+                cursor = name_end;
+                continue;
+            }
+            let opening_end = find_tag_close_after(xml, paragraph_start).ok_or_else(|| {
+                HandlerError::OperationFailed("malformed paragraph in document.xml".to_string())
+            })?;
+            if xml[paragraph_start..=opening_end].ends_with("/>") {
+                cursor = opening_end + 1;
+                continue;
+            }
+            let paragraph_end = xml[opening_end + 1..]
+                .find("</w:p>")
+                .map(|offset| opening_end + 1 + offset)
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("unclosed paragraph in document.xml".to_string())
+                })?;
+            let paragraph = &xml[opening_end + 1..paragraph_end];
+            if let Some(relative_start) = paragraph.find("<w:sectPr") {
+                let section_start = opening_end + 1 + relative_start;
+                let section_end = xml[section_start..]
+                    .find("</w:sectPr>")
+                    .map(|offset| section_start + offset)
+                    .ok_or_else(|| {
+                        HandlerError::OperationFailed(
+                            "malformed paragraph section properties".to_string(),
+                        )
+                    })?;
+                if section_end < paragraph_end {
+                    found += 1;
+                    if found == index {
+                        return Ok((section_start, section_end));
+                    }
+                }
+            }
+            cursor = paragraph_end + "</w:p>".len();
+        }
+    }
+    let section_start = xml.rfind("<w:sectPr").ok_or_else(|| {
+        HandlerError::OperationFailed("document.xml has no final w:sectPr".to_string())
+    })?;
+    let section_end = xml[section_start..]
+        .find("</w:sectPr>")
+        .map(|offset| section_start + offset)
+        .ok_or_else(|| HandlerError::OperationFailed("malformed final w:sectPr".to_string()))?;
+    Ok((section_start, section_end))
+}
+
+fn parse_header_footer_section_index(parent: &str) -> Option<usize> {
+    let parent = parent.trim();
+    let suffix = parent.strip_prefix("/section[")?.strip_suffix(']')?;
+    suffix.parse::<usize>().ok().filter(|index| *index > 0)
+}
+
+fn section_contains_header_footer_type(section: &str, kind: &str, expected_type: &str) -> bool {
+    let marker = format!("<w:{kind}Reference");
+    let mut cursor = 0;
+    while let Some(offset) = section[cursor..].find(&marker) {
+        let start = cursor + offset;
+        let Some(end) = find_tag_close_after(section, start) else {
+            return false;
+        };
+        if xml_attribute(&section[start..=end], "w:type").as_deref() == Some(expected_type) {
+            return true;
+        }
+        cursor = end + 1;
+    }
+    false
+}
+
+fn ensure_even_and_odd_headers(package: &mut OxmlPackage) -> Result<(), HandlerError> {
+    prepare_settings_raw_replace(package)?;
+    let xml = package
+        .read_part_xml(DOCX_SETTINGS_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    if xml.contains("<w:evenAndOddHeaders") {
+        return Ok(());
+    }
+    let close = xml
+        .rfind("</w:settings>")
+        .ok_or_else(|| HandlerError::OperationFailed("malformed word/settings.xml".to_string()))?;
+    let mut updated = xml;
+    updated.insert_str(close, "<w:evenAndOddHeaders/>");
+    package
+        .write_part_xml(DOCX_SETTINGS_PART, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
+}
+
+fn header_footer_xml(kind: &str, properties: &HashMap<String, String>) -> String {
+    let root = if kind == "header" { "hdr" } else { "ftr" };
+    let mut ppr = String::new();
+    if let Some(align) = properties
+        .get("align")
+        .or_else(|| properties.get("alignment"))
+        .or_else(|| properties.get("jc"))
+    {
+        let value = match align.trim().to_ascii_lowercase().as_str() {
+            "left" => "left",
+            "center" => "center",
+            "right" => "right",
+            "justify" | "both" => "both",
+            "distribute" => "distribute",
+            _ => "left",
+        };
+        ppr.push_str(&format!("<w:jc w:val=\"{value}\"/>"));
+    }
+    if properties
+        .get("direction")
+        .or_else(|| properties.get("dir"))
+        .or_else(|| properties.get("bidi"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("rtl"))
+    {
+        ppr.push_str("<w:bidi/>");
+    }
+    let mut rpr = String::new();
+    if let Some(font) = properties.get("font") {
+        let font = escape_attr(font);
+        rpr.push_str(&format!(
+            "<w:rFonts w:ascii=\"{font}\" w:hAnsi=\"{font}\" w:eastAsia=\"{font}\"/>"
+        ));
+    }
+    if let Some(size) = properties.get("size") {
+        if let Ok(size) = size.trim_end_matches("pt").trim().parse::<f64>() {
+            rpr.push_str(&format!(
+                "<w:sz w:val=\"{}\"/>",
+                (size * 2.0).round() as i64
+            ));
+        }
+    }
+    if is_truthy(properties.get("bold")) {
+        rpr.push_str("<w:b/>");
+    }
+    if is_truthy(properties.get("italic")) {
+        rpr.push_str("<w:i/>");
+    }
+    if let Some(color) = properties.get("color") {
+        rpr.push_str(&format!(
+            "<w:color w:val=\"{}\"/>",
+            escape_attr(color.trim_start_matches('#'))
+        ));
+    }
+    if properties
+        .get("direction")
+        .or_else(|| properties.get("dir"))
+        .or_else(|| properties.get("bidi"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("rtl"))
+    {
+        rpr.push_str("<w:rtl/>");
+    }
+    let rpr = if rpr.is_empty() {
+        String::new()
+    } else {
+        format!("<w:rPr>{rpr}</w:rPr>")
+    };
+    let mut runs = String::new();
+    if let Some(text) = properties.get("text") {
+        runs.push_str(&format!(
+            "<w:r>{rpr}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
+            xml_escape_text(text)
+        ));
+    }
+    if let Some(field) = properties.get("field") {
+        let instruction = match field.trim().to_ascii_lowercase().as_str() {
+            "page" | "pagenum" | "pagenumber" => " PAGE ",
+            "numpages" => " NUMPAGES ",
+            "date" => " DATE \\@ &quot;yyyy-MM-dd&quot; ",
+            "author" => " AUTHOR ", "title" => " TITLE ", "time" => " TIME ", "filename" => " FILENAME ",
+            other => return format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:{root} xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\"><w:p>{}<w:r>{rpr}<w:instrText xml:space=\"preserve\"> {} </w:instrText></w:r></w:p></w:{root}>", if ppr.is_empty() { String::new() } else { format!("<w:pPr>{ppr}</w:pPr>") }, xml_escape_text(&other.to_ascii_uppercase())),
+        };
+        runs.push_str(&format!("<w:r>{rpr}<w:fldChar w:fldCharType=\"begin\"/></w:r><w:r>{rpr}<w:instrText xml:space=\"preserve\">{instruction}</w:instrText></w:r><w:r>{rpr}<w:fldChar w:fldCharType=\"separate\"/></w:r><w:r>{rpr}<w:t>1</w:t></w:r><w:r>{rpr}<w:fldChar w:fldCharType=\"end\"/></w:r>"));
+    }
+    let ppr = if ppr.is_empty() {
+        String::new()
+    } else {
+        format!("<w:pPr>{ppr}</w:pPr>")
+    };
+    format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:{root} xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\"><w:p>{ppr}{runs}</w:p></w:{root}>")
+}
+
+fn nth_header_footer_reference_id(xml: &str, element: &str, index: usize) -> Option<String> {
+    let marker = format!("<w:{element}Reference");
+    let mut cursor = 0;
+    let mut found = 0;
+    while let Some(offset) = xml[cursor..].find(&marker) {
+        let start = cursor + offset;
+        let end = find_tag_close_after(xml, start)?;
+        found += 1;
+        if found == index {
+            return xml_attribute(&xml[start..=end], "r:id");
+        }
+        cursor = end + 1;
+    }
+    None
+}
+
+fn next_header_footer_part_path(package: &OxmlPackage, prefix: &str) -> String {
+    let mut number = 1usize;
+    loop {
+        let candidate = format!("word/{prefix}{number}.xml");
+        if !package.has_part(&candidate) {
+            return candidate;
+        }
+        number += 1;
+    }
+}
+
+fn attach_default_header_footer_reference(
+    package: &mut OxmlPackage,
+    element: &str,
+    relationship_id: &str,
+) -> Result<(), HandlerError> {
+    let xml = package
+        .read_part_xml(DOCX_DOCUMENT_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let reference =
+        format!("<w:{element}Reference w:type=\"default\" r:id=\"{relationship_id}\"/>");
+    let updated = if let Some(position) = xml.rfind("</w:sectPr>") {
+        let mut result = xml;
+        result.insert_str(position, &reference);
+        result
+    } else {
+        let position = xml.rfind("</w:body>").ok_or_else(|| {
+            HandlerError::OperationFailed("document.xml has no w:body".to_string())
+        })?;
+        let mut result = xml;
+        result.insert_str(position, &format!("<w:sectPr>{reference}</w:sectPr>"));
+        result
+    };
+    package
+        .write_part_xml(DOCX_DOCUMENT_PART, &updated)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
 }
 
 /// Set properties on an element at a given path.
@@ -6095,6 +6822,709 @@ pub(crate) fn attach_font_table_binary(
     )
 }
 
+/// Attach an image binary emitted by a full-document dump.  The source
+/// document XML has already been restored when this is invoked, so retain the
+/// supplied relationship id exactly: `<a:blip r:embed="...">` must continue
+/// to resolve without rewriting arbitrary drawing XML.
+pub(crate) fn attach_document_image_binary(
+    package: &mut OxmlPackage,
+    relationship_id: &str,
+    data_uri: &str,
+) -> Result<(), HandlerError> {
+    attach_part_image_binary(package, DOCX_DOCUMENT_PART, relationship_id, data_uri)
+}
+
+/// Attach an image binary to any relationship-owning Word content part.  In
+/// addition to document.xml, headers and footers own their image relations,
+/// so a root dump must rebuild binaries on the same host part as the source.
+pub(crate) fn attach_part_image_binary(
+    package: &mut OxmlPackage,
+    source_part: &str,
+    relationship_id: &str,
+    data_uri: &str,
+) -> Result<(), HandlerError> {
+    if relationship_id.is_empty()
+        || relationship_id
+            .chars()
+            .any(|ch| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+    {
+        return Err(HandlerError::InvalidArgument(
+            "image embed-binary requires a safe relationship id in xpath".to_string(),
+        ));
+    }
+    let (content_type, encoded) = data_uri
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .and_then(|(head, body)| head.strip_suffix(";base64").map(|kind| (kind, body)))
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(
+                "image embed-binary requires a data:<content-type>;base64,... payload".to_string(),
+            )
+        })?;
+    let bytes = base64_decode(encoded).map_err(|_| {
+        HandlerError::InvalidArgument("image embed-binary has invalid base64 data".to_string())
+    })?;
+    if bytes.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "image embed-binary requires non-empty data".to_string(),
+        ));
+    }
+    let extension = image_extension_for_content_type(content_type).ok_or_else(|| {
+        HandlerError::InvalidArgument(format!(
+            "image embed-binary does not support image content type '{}'",
+            content_type
+        ))
+    })?;
+    let index = next_docx_image_index(package, extension);
+    let part_path = format!("word/media/image{}.{}", index, extension);
+    package
+        .write_part(&part_path, bytes)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    let relationship = format!(
+        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"media/image{}.{}\"/>",
+        relationship_id, DOCX_IMAGE_REL_TYPE, index, extension
+    );
+    let rels_path = docx_relationships_path(source_part);
+    upsert_docx_relationship(package, &rels_path, relationship_id, &relationship)?;
+    update_docx_content_types_for_image(package, extension, content_type)
+}
+
+fn docx_relationships_path(source_part: &str) -> String {
+    let last_slash = source_part.rfind('/').unwrap_or(0);
+    if source_part.contains('/') {
+        format!(
+            "{}_rels/{}.rels",
+            &source_part[..last_slash + 1],
+            &source_part[last_slash + 1..]
+        )
+    } else {
+        format!("_rels/{}.rels", source_part)
+    }
+}
+
+fn image_extension_for_content_type(content_type: &str) -> Option<&'static str> {
+    match content_type.to_ascii_lowercase().as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpeg"),
+        "image/gif" => Some("gif"),
+        "image/bmp" => Some("bmp"),
+        "image/tiff" => Some("tiff"),
+        "image/webp" => Some("webp"),
+        "image/svg+xml" => Some("svg"),
+        "image/x-icon" | "image/vnd.microsoft.icon" => Some("ico"),
+        "image/x-emf" => Some("emf"),
+        "image/x-wmf" => Some("wmf"),
+        _ => None,
+    }
+}
+
+/// Attach a C# dump custom XML item to the main document with the original
+/// relationship id.  Data-bound SDTs resolve their store through the package
+/// relationship graph, so preserving the item bytes alone is insufficient.
+pub(crate) fn attach_custom_xml_item_binary(
+    package: &mut OxmlPackage,
+    relationship_id: &str,
+    data_uri: &str,
+) -> Result<(), HandlerError> {
+    validate_embedded_relationship_id(relationship_id, "customXml")?;
+    let (content_type, bytes) = parse_embedded_data_uri(data_uri, "customXml")?;
+    let index = next_custom_xml_index(package);
+    let part_path = format!("customXml/item{}.xml", index);
+    package
+        .write_part(&part_path, bytes)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    let relationship = format!(
+        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"../customXml/item{}.xml\"/>",
+        relationship_id, DOCX_CUSTOM_XML_REL_TYPE, index
+    );
+    upsert_docx_relationship(
+        package,
+        DOCX_DOCUMENT_RELS_PART,
+        relationship_id,
+        &relationship,
+    )?;
+    ensure_content_type_override(package, &format!("/{}", part_path), content_type)
+}
+
+/// Materialize C#'s generic `add inlinedparts` relationship graph.
+///
+/// Top-level parts and external relationships belong to the run's host part,
+/// so they receive fresh relationship ids. Child/grandchild relationships and
+/// part-owned external relationships are scoped to newly-created parts and
+/// intentionally retain their source ids because their opaque payloads refer
+/// to those ids verbatim. All top-level parts are allocated before XML payloads
+/// are written so cross-sibling references such as SmartArt's bare `relId` can
+/// be rewritten with the complete old-to-new map.
+pub(crate) fn materialize_inlined_parts(
+    package: &mut OxmlPackage,
+    host_part: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let run_xml = properties.get("runXml").ok_or_else(|| {
+        HandlerError::InvalidArgument("inlinedparts requires a runXml property".to_string())
+    })?;
+    if !(run_xml.contains("c:chart")
+        || run_xml.contains("<w:drawing")
+        || run_xml.contains("<w:pict")
+        || run_xml.contains("<w:control")
+        || run_xml.contains("contentPart")
+        || run_xml.contains("relIds"))
+    {
+        return Err(HandlerError::UnsupportedMode(
+            "inlinedparts runXml must contain a part-owning drawing, pict, control, contentPart, chart, or relIds element"
+                .to_string(),
+        ));
+    }
+    let host_rels_path = docx_relationships_path(host_part);
+    let mut id_map = Vec::new();
+    let mut pending = Vec::new();
+
+    // Pass 1: allocate every top-level part and host relationship. This must
+    // finish before any XML payload is rewritten because a payload can point
+    // at a sibling relationship owned by the host part.
+    for part_index in 1usize.. {
+        let Some(source_relation_id) = properties.get(&format!("part{part_index}.relId")) else {
+            break;
+        };
+        validate_embedded_relationship_id(source_relation_id, "inlinedparts top-level part")?;
+        let data_uri = properties
+            .get(&format!("part{part_index}.data"))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "inlinedparts part{part_index} requires data"
+                ))
+            })?;
+        let (content_type, bytes) =
+            parse_embedded_data_uri(data_uri, "inlinedparts top-level part")?;
+        if bytes.is_empty() {
+            return Err(HandlerError::InvalidArgument(format!(
+                "inlinedparts part{part_index} requires a non-empty data URI"
+            )));
+        }
+        let (part_path, relationship_type) =
+            allocate_inlined_part(package, content_type, InlinedPartLevel::TopLevel)?;
+        let fresh_relation_id = next_docx_rel_id(package, &host_rels_path);
+        let target = relative_relationship_target(host_part, &part_path);
+        inject_docx_relationship(
+            package,
+            &host_rels_path,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+                fresh_relation_id,
+                relationship_type,
+                escape_attr(&target)
+            ),
+        )?;
+        ensure_content_type_override(package, &format!("/{part_path}"), content_type)?;
+        id_map.push((source_relation_id.clone(), fresh_relation_id));
+        pending.push((part_index, part_path, content_type.to_string(), bytes));
+    }
+
+    // Host-owned external relationships also receive fresh ids and participate
+    // in the same rewrite map as top-level parts.
+    let mut external_index = 1usize;
+    while let Some(source_id) = properties.get(&format!("ext{}.relId", external_index)) {
+        let relationship_type = properties
+            .get(&format!("ext{}.type", external_index))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "inlinedparts ext{} requires type",
+                    external_index
+                ))
+            })?;
+        let target = properties
+            .get(&format!("ext{}.target", external_index))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "inlinedparts ext{} requires target",
+                    external_index
+                ))
+            })?;
+        validate_embedded_relationship_id(source_id, "inlinedparts external")?;
+        let new_id = next_docx_rel_id(package, &host_rels_path);
+        let external = format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\" TargetMode=\"External\"/>",
+            new_id,
+            escape_attr(relationship_type),
+            escape_attr(target)
+        );
+        inject_docx_relationship(package, &host_rels_path, &external)?;
+        id_map.push((source_id.clone(), new_id));
+        external_index += 1;
+    }
+
+    if id_map.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "inlinedparts requires at least one partN payload or extN relationship".to_string(),
+        ));
+    }
+
+    // Pass 2: write top-level payloads using the complete host id map, then
+    // recreate their nested graphs with source ids pinned at each local scope.
+    for (part_index, part_path, content_type, bytes) in pending {
+        let payload = if content_type.to_ascii_lowercase().ends_with("+xml") {
+            rewrite_inlined_relationship_ids(&String::from_utf8_lossy(&bytes), &id_map).into_bytes()
+        } else {
+            bytes
+        };
+        package
+            .write_part(&part_path, payload)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        materialize_inlined_children(package, properties, part_index, &part_path)?;
+        materialize_inlined_part_externals(package, properties, part_index, &part_path)?;
+    }
+
+    Ok(rewrite_inlined_relationship_ids(run_xml, &id_map))
+}
+
+#[derive(Clone, Copy)]
+enum InlinedPartLevel {
+    TopLevel,
+    Nested,
+}
+
+fn allocate_inlined_part(
+    package: &OxmlPackage,
+    content_type: &str,
+    level: InlinedPartLevel,
+) -> Result<(String, &'static str), HandlerError> {
+    const CONTROL_REL: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/control";
+    const ACTIVEX_BINARY_REL: &str =
+        "http://schemas.microsoft.com/office/2006/relationships/activeXControlBinary";
+    const OLE_REL: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject";
+
+    let spec = match content_type {
+        "application/vnd.ms-office.activeX+xml" if matches!(level, InlinedPartLevel::TopLevel) => {
+            ("word/activeX/activeX", ".xml", CONTROL_REL)
+        }
+        "application/vnd.ms-office.activeX" | "application/vnd.ms-office.activeX+xml"
+            if matches!(level, InlinedPartLevel::Nested) =>
+        {
+            ("word/activeX/activeX", ".bin", ACTIVEX_BINARY_REL)
+        }
+        "application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml" => {
+            ("word/diagrams/data", ".xml", DOCX_DIAGRAM_DATA_REL_TYPE)
+        }
+        "application/vnd.openxmlformats-officedocument.drawingml.diagramLayout+xml" => {
+            ("word/diagrams/layout", ".xml", DOCX_DIAGRAM_LAYOUT_REL_TYPE)
+        }
+        "application/vnd.openxmlformats-officedocument.drawingml.diagramStyle+xml" => (
+            "word/diagrams/quickStyle",
+            ".xml",
+            DOCX_DIAGRAM_STYLE_REL_TYPE,
+        ),
+        "application/vnd.openxmlformats-officedocument.drawingml.diagramColors+xml" => {
+            ("word/diagrams/colors", ".xml", DOCX_DIAGRAM_COLORS_REL_TYPE)
+        }
+        "application/vnd.ms-office.drawingml.diagramDrawing+xml" => (
+            "word/diagrams/drawing",
+            ".xml",
+            DOCX_DIAGRAM_DRAWING_REL_TYPE,
+        ),
+        "application/inkml+xml" if matches!(level, InlinedPartLevel::TopLevel) => {
+            ("customXml/ink", ".xml", DOCX_CUSTOM_XML_REL_TYPE)
+        }
+        DOCX_CHART_CONTENT_TYPE => ("word/charts/chart", ".xml", DOCX_CHART_REL_TYPE),
+        "application/vnd.ms-office.chartcolorstyle+xml" => (
+            "word/charts/colors",
+            ".xml",
+            DOCX_CHART_COLOR_STYLE_REL_TYPE,
+        ),
+        "application/vnd.ms-office.chartstyle+xml" => {
+            ("word/charts/style", ".xml", DOCX_CHART_STYLE_REL_TYPE)
+        }
+        "application/vnd.openxmlformats-officedocument.themeOverride+xml"
+            if matches!(level, InlinedPartLevel::Nested) =>
+        {
+            (
+                "word/theme/themeOverride",
+                ".xml",
+                DOCX_CHART_THEME_OVERRIDE_REL_TYPE,
+            )
+        }
+        "application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml"
+            if matches!(level, InlinedPartLevel::Nested) =>
+        {
+            (
+                "word/drawings/drawing",
+                ".xml",
+                DOCX_CHART_USER_SHAPES_REL_TYPE,
+            )
+        }
+        ct if ct.starts_with("image/") => {
+            let extension = image_extension_for_content_type(ct).ok_or_else(|| {
+                HandlerError::UnsupportedMode(format!(
+                    "inlinedparts does not support image content type '{ct}'"
+                ))
+            })?;
+            let suffix = match extension {
+                "jpeg" => ".jpeg",
+                "png" => ".png",
+                "gif" => ".gif",
+                "bmp" => ".bmp",
+                "tiff" => ".tiff",
+                "webp" => ".webp",
+                "svg" => ".svg",
+                "ico" => ".ico",
+                "emf" => ".emf",
+                "wmf" => ".wmf",
+                _ => unreachable!(),
+            };
+            ("word/media/image", suffix, DOCX_IMAGE_REL_TYPE)
+        }
+        ct if is_embedded_package_content_type(ct) => (
+            "word/embeddings/package",
+            embedded_package_extension(ct),
+            DOCX_PACKAGE_REL_TYPE,
+        ),
+        ct if is_embedded_ole_content_type(ct) => ("word/embeddings/oleObject", ".bin", OLE_REL),
+        _ => {
+            return Err(HandlerError::UnsupportedMode(format!(
+                "inlinedparts does not support {} content type '{}'",
+                if matches!(level, InlinedPartLevel::TopLevel) {
+                    "top-level"
+                } else {
+                    "nested"
+                },
+                content_type
+            )))
+        }
+    };
+    Ok((next_indexed_part_path(package, spec.0, spec.1), spec.2))
+}
+
+fn materialize_inlined_children(
+    package: &mut OxmlPackage,
+    properties: &HashMap<String, String>,
+    part_index: usize,
+    parent_path: &str,
+) -> Result<(), HandlerError> {
+    for child_index in 1usize.. {
+        let Some(source_id) = properties.get(&format!("part{part_index}.child{child_index}.relId"))
+        else {
+            break;
+        };
+        validate_embedded_relationship_id(source_id, "inlinedparts child")?;
+        let data_uri = properties
+            .get(&format!("part{part_index}.child{child_index}.data"))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "inlinedparts part{part_index}.child{child_index} requires data"
+                ))
+            })?;
+        let (content_type, bytes) = parse_embedded_data_uri(data_uri, "inlinedparts child")?;
+        if bytes.is_empty() {
+            return Err(HandlerError::InvalidArgument(format!(
+                "inlinedparts part{part_index}.child{child_index} requires a non-empty data URI"
+            )));
+        }
+        let (child_path, relationship_type) =
+            allocate_inlined_part(package, content_type, InlinedPartLevel::Nested)?;
+        attach_inlined_nested_part(
+            package,
+            parent_path,
+            &child_path,
+            source_id,
+            relationship_type,
+            content_type,
+            bytes,
+        )?;
+
+        for grandchild_index in 1usize.. {
+            let Some(grandchild_id) = properties.get(&format!(
+                "part{part_index}.child{child_index}.gc{grandchild_index}.relId"
+            )) else {
+                break;
+            };
+            validate_embedded_relationship_id(grandchild_id, "inlinedparts grandchild")?;
+            let grandchild_uri = properties
+                .get(&format!(
+                    "part{part_index}.child{child_index}.gc{grandchild_index}.data"
+                ))
+                .ok_or_else(|| {
+                    HandlerError::InvalidArgument(format!(
+                        "inlinedparts part{part_index}.child{child_index}.gc{grandchild_index} requires data"
+                    ))
+                })?;
+            let (grandchild_content_type, grandchild_bytes) =
+                parse_embedded_data_uri(grandchild_uri, "inlinedparts grandchild")?;
+            if grandchild_bytes.is_empty() {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "inlinedparts part{part_index}.child{child_index}.gc{grandchild_index} requires a non-empty data URI"
+                )));
+            }
+            let (grandchild_path, grandchild_relationship_type) =
+                allocate_inlined_part(package, grandchild_content_type, InlinedPartLevel::Nested)?;
+            attach_inlined_nested_part(
+                package,
+                &child_path,
+                &grandchild_path,
+                grandchild_id,
+                grandchild_relationship_type,
+                grandchild_content_type,
+                grandchild_bytes,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attach_inlined_nested_part(
+    package: &mut OxmlPackage,
+    parent_path: &str,
+    child_path: &str,
+    relationship_id: &str,
+    relationship_type: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) -> Result<(), HandlerError> {
+    package
+        .write_part(child_path, bytes)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    ensure_content_type_override(package, &format!("/{child_path}"), content_type)?;
+    let target = relative_relationship_target(parent_path, child_path);
+    let relationship = format!(
+        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+        relationship_id,
+        relationship_type,
+        escape_attr(&target)
+    );
+    upsert_docx_relationship(
+        package,
+        &docx_relationships_path(parent_path),
+        relationship_id,
+        &relationship,
+    )
+}
+
+fn materialize_inlined_part_externals(
+    package: &mut OxmlPackage,
+    properties: &HashMap<String, String>,
+    part_index: usize,
+    part_path: &str,
+) -> Result<(), HandlerError> {
+    for external_index in 1usize.. {
+        let Some(source_id) =
+            properties.get(&format!("part{part_index}.ext{external_index}.relId"))
+        else {
+            break;
+        };
+        validate_embedded_relationship_id(source_id, "inlinedparts part external")?;
+        let relationship_type = properties
+            .get(&format!("part{part_index}.ext{external_index}.type"))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "inlinedparts part{part_index}.ext{external_index} requires type"
+                ))
+            })?;
+        let target = properties
+            .get(&format!("part{part_index}.ext{external_index}.target"))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "inlinedparts part{part_index}.ext{external_index} requires target"
+                ))
+            })?;
+        let relationship = format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\" TargetMode=\"External\"/>",
+            source_id,
+            escape_attr(relationship_type),
+            escape_attr(target)
+        );
+        upsert_docx_relationship(
+            package,
+            &docx_relationships_path(part_path),
+            source_id,
+            &relationship,
+        )?;
+    }
+    Ok(())
+}
+
+fn is_embedded_package_content_type(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.macroEnabled.main+xml"
+            | "application/vnd.ms-excel.sheet.macroEnabled.12"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+}
+
+fn embedded_package_extension(content_type: &str) -> &'static str {
+    match content_type {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.macroEnabled.main+xml"
+        | "application/vnd.ms-excel.sheet.macroEnabled.12" => ".xlsm",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => ".pptx",
+        _ => ".bin",
+    }
+}
+
+fn is_embedded_ole_content_type(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        "application/vnd.openxmlformats-officedocument.oleObject"
+            | "application/vnd.ms-excel"
+            | "application/msword"
+            | "application/vnd.ms-powerpoint"
+            | "application/vnd.ms-office"
+    ) || content_type.starts_with("application/vnd.ms-")
+}
+
+fn next_indexed_part_path(package: &OxmlPackage, prefix: &str, suffix: &str) -> String {
+    for index in 1usize.. {
+        let path = format!("{prefix}{index}{suffix}");
+        if !package.has_part(&path) {
+            return path;
+        }
+    }
+    unreachable!("usize indices are finite")
+}
+
+fn relative_relationship_target(source_part: &str, target_part: &str) -> String {
+    let source_directory: Vec<_> = source_part
+        .rsplit_once('/')
+        .map(|(directory, _)| directory.split('/').collect())
+        .unwrap_or_default();
+    let target_components: Vec<_> = target_part.split('/').collect();
+    let common = source_directory
+        .iter()
+        .zip(&target_components)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut components = vec![".."; source_directory.len().saturating_sub(common)];
+    components.extend_from_slice(&target_components[common..]);
+    components.join("/")
+}
+
+fn rewrite_inlined_relationship_ids(xml: &str, id_map: &[(String, String)]) -> String {
+    let mut rewritten = xml.to_string();
+    for (index, (old_id, _)) in id_map.iter().enumerate() {
+        rewritten = rewritten.replace(
+            &format!("\"{}\"", old_id),
+            &format!("\"__OCLI_REL_{}__\"", index),
+        );
+    }
+    for (index, (_, new_id)) in id_map.iter().enumerate() {
+        rewritten = rewritten.replace(
+            &format!("\"__OCLI_REL_{}__\"", index),
+            &format!("\"{}\"", new_id),
+        );
+    }
+    rewritten
+}
+
+/// Attach the itemProps sidecar belonging to a previously restored custom XML
+/// item.  C# addresses its host by the main-document customXml relationship
+/// id, then supplies the source itemProps relationship id in `xpath`.
+pub(crate) fn attach_custom_xml_properties_binary(
+    package: &mut OxmlPackage,
+    item_relationship_id: &str,
+    properties_relationship_id: &str,
+    data_uri: &str,
+) -> Result<(), HandlerError> {
+    validate_embedded_relationship_id(item_relationship_id, "customXml")?;
+    validate_embedded_relationship_id(properties_relationship_id, "customXml itemProps")?;
+    let (content_type, bytes) = parse_embedded_data_uri(data_uri, "customXml itemProps")?;
+    let document_rels = package
+        .part_rels(DOCX_DOCUMENT_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let item_relation = document_rels.get(item_relationship_id).ok_or_else(|| {
+        HandlerError::PathNotFound(format!(
+            "customXml relationship '{}' was not restored before itemProps",
+            item_relationship_id
+        ))
+    })?;
+    if item_relation.type_uri != DOCX_CUSTOM_XML_REL_TYPE
+        || item_relation.target_mode.eq_ignore_ascii_case("external")
+    {
+        return Err(HandlerError::InvalidPath(format!(
+            "relationship '{}' is not an internal customXml item",
+            item_relationship_id
+        )));
+    }
+    let item_part = package.resolve_rel_target(DOCX_DOCUMENT_PART, &item_relation.target);
+    let index =
+        custom_xml_index_from_path(&item_part).unwrap_or_else(|| next_custom_xml_index(package));
+    let properties_part = format!("customXml/itemProps{}.xml", index);
+    package
+        .write_part(&properties_part, bytes)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    let relationship = format!(
+        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"itemProps{}.xml\"/>",
+        properties_relationship_id, DOCX_CUSTOM_XML_PROPS_REL_TYPE, index
+    );
+    let item_rels_path = docx_relationships_path(&item_part);
+    upsert_docx_relationship(
+        package,
+        &item_rels_path,
+        properties_relationship_id,
+        &relationship,
+    )?;
+    ensure_content_type_override(package, &format!("/{}", properties_part), content_type)
+}
+
+fn validate_embedded_relationship_id(
+    relationship_id: &str,
+    resource_name: &str,
+) -> Result<(), HandlerError> {
+    if relationship_id.is_empty()
+        || relationship_id
+            .chars()
+            .any(|ch| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+    {
+        return Err(HandlerError::InvalidArgument(format!(
+            "{resource_name} embed-binary requires a safe relationship id in xpath"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_embedded_data_uri<'a>(
+    data_uri: &'a str,
+    resource_name: &str,
+) -> Result<(&'a str, Vec<u8>), HandlerError> {
+    let (content_type, encoded) = data_uri
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .and_then(|(head, body)| head.strip_suffix(";base64").map(|kind| (kind, body)))
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(format!(
+                "{resource_name} embed-binary requires a data:<content-type>;base64,... payload"
+            ))
+        })?;
+    let bytes = base64_decode(encoded).map_err(|_| {
+        HandlerError::InvalidArgument(format!(
+            "{resource_name} embed-binary has invalid base64 data"
+        ))
+    })?;
+    if bytes.is_empty() {
+        return Err(HandlerError::InvalidArgument(format!(
+            "{resource_name} embed-binary requires non-empty data"
+        )));
+    }
+    Ok((content_type, bytes))
+}
+
+fn next_custom_xml_index(package: &OxmlPackage) -> usize {
+    let mut index = 1usize;
+    while package.has_part(&format!("customXml/item{}.xml", index)) {
+        index += 1;
+    }
+    index
+}
+
+fn custom_xml_index_from_path(path: &str) -> Option<usize> {
+    let filename = path.rsplit('/').next()?;
+    let number = filename.strip_prefix("item")?.strip_suffix(".xml")?;
+    number.parse().ok()
+}
+
 fn ensure_default_content_type(
     package: &mut OxmlPackage,
     extension: &str,
@@ -6844,6 +8274,18 @@ pub fn add_image_part_aware(
     parent: &str,
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
+    add_image_part_aware_on_part(package, DOCX_DOCUMENT_PART, parent, properties)
+}
+
+/// Host-part variant of [`add_image_part_aware`]. Header and footer drawings
+/// resolve their image relationship against the header/footer XML part rather
+/// than the main document, while media binaries remain package-global.
+pub fn add_image_part_aware_on_part(
+    package: &mut OxmlPackage,
+    host_part: &str,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
     use std::path::Path;
 
     // Resolve extension and content type.
@@ -6905,22 +8347,22 @@ pub fn add_image_part_aware(
         let _ = package.write_part(&media_path, bytes);
     }
 
-    // Wire document.xml.rels → image relationship.
-    let doc_rels_path = "word/_rels/document.xml.rels";
-    let image_rel_id = next_docx_rel_id(package, doc_rels_path);
-    let rel_target = format!("media/image{}.{}", image_idx, ext_norm);
+    // Wire the owning part's .rels → image relationship.
+    let doc_rels_path = docx_relationships_path(host_part);
+    let image_rel_id = next_docx_rel_id(package, &doc_rels_path);
+    let rel_target = relative_relationship_target(host_part, &media_path);
     let rel_xml = format!(
         "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"{}\"/>",
         image_rel_id, rel_target
     );
-    inject_docx_relationship(package, doc_rels_path, &rel_xml)?;
+    inject_docx_relationship(package, &doc_rels_path, &rel_xml)?;
 
     // Update [Content_Types].xml with the image extension's Default entry.
     update_docx_content_types_for_image(package, ext_norm, content_type)?;
 
-    // Insert <w:drawing> into the target paragraph (or body) of word/document.xml.
+    // Insert <w:drawing> into the target paragraph (or body) of the host part.
     let doc_xml = package
-        .read_part_xml("word/document.xml")
+        .read_part_xml(host_part)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
 
     // docPr id — use the image index so it stays unique across the document.
@@ -6941,7 +8383,7 @@ pub fn add_image_part_aware(
         &drawing_xml,
     )?);
     package
-        .write_part_xml("word/document.xml", &new_doc_xml)
+        .write_part_xml(host_part, &new_doc_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     Ok(format!("{}/drawing[{}]", parent, image_idx))
@@ -6963,6 +8405,18 @@ pub fn add_image_part_aware(
 ///   width, height                (EMU or "1in"/"2cm"; default 4in × 3in)
 pub fn add_chart_part_aware(
     package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    add_chart_part_aware_on_part(package, DOCX_DOCUMENT_PART, parent, properties)
+}
+
+/// Host-part variant of [`add_chart_part_aware`]. Charts are shared package
+/// parts but their relationship is scoped to the main document, a header, or
+/// a footer that contains the drawing.
+pub fn add_chart_part_aware_on_part(
+    package: &mut OxmlPackage,
+    host_part: &str,
     parent: &str,
     properties: &HashMap<String, String>,
 ) -> Result<String, HandlerError> {
@@ -7009,22 +8463,22 @@ pub fn add_chart_part_aware(
         .write_part_xml(&chart_path, &chart_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
-    // document.xml.rels → chart relationship.
-    let doc_rels_path = "word/_rels/document.xml.rels";
-    let chart_rel_id = next_docx_rel_id(package, doc_rels_path);
-    let chart_target = format!("charts/chart{}.xml", chart_idx);
+    // Owning part .rels → chart relationship.
+    let doc_rels_path = docx_relationships_path(host_part);
+    let chart_rel_id = next_docx_rel_id(package, &doc_rels_path);
+    let chart_target = relative_relationship_target(host_part, &chart_path);
     let rel_xml = format!(
         "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart\" Target=\"{}\"/>",
         chart_rel_id, chart_target
     );
-    inject_docx_relationship(package, doc_rels_path, &rel_xml)?;
+    inject_docx_relationship(package, &doc_rels_path, &rel_xml)?;
 
     // [Content_Types].xml Override for the chart part.
     update_docx_content_types_for_chart(package, &chart_path)?;
 
     // Inject <w:drawing> referencing the chart into the target paragraph.
     let doc_xml = package
-        .read_part_xml("word/document.xml")
+        .read_part_xml(host_part)
         .map_err(|e| HandlerError::OperationFailed(e.to_string()))?;
     let (width_emu, height_emu) = parse_image_dimensions_emu(properties);
     let doc_pr_id = chart_idx;
@@ -7042,7 +8496,7 @@ pub fn add_chart_part_aware(
         &drawing_xml,
     )?);
     package
-        .write_part_xml("word/document.xml", &new_doc_xml)
+        .write_part_xml(host_part, &new_doc_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     Ok(format!("{}/drawing[{}]", parent, chart_idx))
@@ -8643,15 +10097,27 @@ pub fn add_document_hyperlink_relationship(
     package: &mut OxmlPackage,
     target: &str,
 ) -> Result<String, HandlerError> {
+    add_part_hyperlink_relationship(package, DOCX_DOCUMENT_PART, target)
+}
+
+/// Add a safe external hyperlink relationship to an arbitrary Word content
+/// part. `w:hyperlink/@r:id` is resolved against the containing header/footer
+/// when the link lives outside `word/document.xml`.
+pub fn add_part_hyperlink_relationship(
+    package: &mut OxmlPackage,
+    source_part: &str,
+    target: &str,
+) -> Result<String, HandlerError> {
     handler_common::hyperlink_validator::require_safe_scheme(target, "hyperlink")
         .map_err(HandlerError::InvalidArgument)?;
-    let relationship_id = next_docx_rel_id(package, DOCX_DOCUMENT_RELS_PART);
+    let relationships_path = docx_relationships_path(source_part);
+    let relationship_id = next_docx_rel_id(package, &relationships_path);
     let relation = format!(
         "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"{}\" TargetMode=\"External\"/>",
         relationship_id,
         escape_attr(target),
     );
-    inject_docx_relationship(package, DOCX_DOCUMENT_RELS_PART, &relation)?;
+    inject_docx_relationship(package, &relationships_path, &relation)?;
     Ok(relationship_id)
 }
 
@@ -8735,6 +10201,37 @@ fn inject_docx_relationship(
         .write_part_xml(rels_path, &new_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
     Ok(())
+}
+
+/// Insert or replace a relationship by id.  Root dump replay uses this for
+/// image rIds that may collide with a blank document's style/theme rIds; those
+/// resources are replayed later and receive a fresh relationship as needed.
+fn upsert_docx_relationship(
+    package: &mut OxmlPackage,
+    rels_path: &str,
+    relationship_id: &str,
+    rel_xml: &str,
+) -> Result<(), HandlerError> {
+    let xml = package.read_part_xml(rels_path).unwrap_or_default();
+    let id_attribute = format!("Id=\"{}\"", relationship_id);
+    let existing = xml.match_indices("<Relationship").find_map(|(start, _)| {
+        let remainder = &xml[start..];
+        let tag_end = remainder.find('>')?;
+        let tag = &remainder[..=tag_end];
+        let next = remainder.as_bytes().get("<Relationship".len()).copied()?;
+        (next != b's' && tag.contains(&id_attribute)).then_some((start, start + tag_end + 1))
+    });
+    if let Some((start, end)) = existing {
+        let mut updated = String::with_capacity(xml.len() + rel_xml.len());
+        updated.push_str(&xml[..start]);
+        updated.push_str(rel_xml);
+        updated.push_str(&xml[end..]);
+        package
+            .write_part_xml(rels_path, &updated)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))
+    } else {
+        inject_docx_relationship(package, rels_path, rel_xml)
+    }
 }
 
 /// Add Default extension entry to [Content_Types].xml if the extension isn't registered.
@@ -8821,12 +10318,17 @@ fn insert_drawing_in_paragraph(
     Ok(out)
 }
 
-/// Ensure a direct XML insertion can be parsed even when the source document
-/// was created with Word's minimal namespace set.  Part-aware image/chart
-/// additions introduce DrawingML prefixes before the document is next passed
-/// through the DOM serializer, so their declarations must be available now.
+/// Ensure a direct XML insertion can be parsed even when the source Word part
+/// was created with a minimal namespace set. Part-aware image/chart additions
+/// introduce DrawingML prefixes before the part is next passed through the DOM
+/// serializer, so their declarations must be available on document/header/
+/// footer roots alike.
 fn ensure_document_root_namespaces(xml: &str) -> String {
-    let Some(root_start) = xml.find("<w:document") else {
+    let root_start = ["<w:document", "<w:hdr", "<w:ftr"]
+        .into_iter()
+        .filter_map(|marker| xml.find(marker))
+        .min();
+    let Some(root_start) = root_start else {
         return xml.to_string();
     };
     let Some(root_end_relative) = xml[root_start..].find('>') else {

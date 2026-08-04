@@ -40,6 +40,52 @@ pub fn handle_dump(
             .unwrap_or_default();
         if extension.eq_ignore_ascii_case("docx") {
             let logical_path = path.as_deref().unwrap_or("/");
+            if logical_path == "/" {
+                let handler = crate::open_handler(&cmd.file, false)?;
+                let mut items = vec![serde_json::json!({"command":"meta","dumpVersion":2})];
+                // Header/footer XML is linked by r:id from document.xml.  Replay
+                // the document first, then create each referenced part while
+                // retaining that source relationship id.
+                let document =
+                    handler.raw("word/document.xml", handler_common::RawOptions::default())?;
+                items.push(serde_json::json!({"command":"raw-set","part":"/document","xpath":"/w:document","action":"replace","xml":oxml::xml_util::strip_prolog(&document)}));
+                items.extend(docx_document_image_items(&cmd.file)?);
+                items.extend(docx_custom_xml_items(&cmd.file)?);
+                items.extend(docx_header_footer_items(&cmd.file, "header")?);
+                items.extend(docx_header_footer_items(&cmd.file, "footer")?);
+                for (part, xpath) in [
+                    ("/numbering", "/w:numbering"),
+                    ("/styles", "/w:styles"),
+                    ("/theme", "/a:theme"),
+                    ("/settings", "/w:settings"),
+                    ("/footnotes", "/w:footnotes"),
+                    ("/endnotes", "/w:endnotes"),
+                    ("/webSettings", "/w:webSettings"),
+                    ("/docProps/core.xml", "/cp:coreProperties"),
+                    ("/docProps/app.xml", "/Properties"),
+                    ("/docProps/custom.xml", "/Properties"),
+                    ("/fontTable", "/w:fonts"),
+                    ("/comments", "/w:comments"),
+                    ("/commentsExtended", "/w15:commentsEx"),
+                ] {
+                    if let Ok(xml) = handler.raw(part, handler_common::RawOptions::default()) {
+                        items.push(serde_json::json!({"command":"raw-set","part":part,"xpath":xpath,"action":"replace","xml":oxml::xml_util::strip_prolog(&xml)}));
+                        if part == "/fontTable" {
+                            items.extend(docx_font_table_binary_items(&cmd.file)?);
+                        }
+                        if part == "/numbering" {
+                            items.extend(docx_numbering_image_items(&cmd.file)?);
+                        }
+                    }
+                }
+                let output = serde_json::to_string(&items).map_err(HandlerError::JsonError)?;
+                if let Some(path) = cmd.out.filter(|path| path != "-") {
+                    std::fs::write(&path, format!("{}\n", output))
+                        .map_err(HandlerError::IoError)?;
+                    return Ok(path);
+                }
+                return Ok(output);
+            }
             if let Some(xpath) = docx_body_subtree_xpath(logical_path) {
                 let handler = crate::open_handler(&cmd.file, false)?;
                 let document =
@@ -66,10 +112,19 @@ pub fn handle_dump(
                 "/styles" => ("word/styles.xml", "/w:styles", "/styles"),
                 "/settings" => ("word/settings.xml", "/w:settings", "/settings"),
                 "/numbering" => ("word/numbering.xml", "/w:numbering", "/numbering"),
+                "/footnotes" => ("/footnotes", "/w:footnotes", "/footnotes"),
+                "/endnotes" => ("/endnotes", "/w:endnotes", "/endnotes"),
+                "/websettings" => ("/webSettings", "/w:webSettings", "/webSettings"),
                 "/comments" => ("/comments", "/w:comments", "/comments"),
+                "/commentsextended" => (
+                    "/commentsExtended",
+                    "/w15:commentsEx",
+                    "/commentsExtended",
+                ),
                 "/theme" => ("/theme", "/a:theme", "/theme"),
                 "/fonttable" => ("/fontTable", "/w:fonts", "/fontTable"),
-                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /body/p[N], /body/tbl[N], /theme, /fontTable, /styles, /settings, /numbering, and /comments; use --dom for other subtrees".to_string())),
+                path if semantic_header_footer_path(path).is_some() => (logical_path, "/", logical_path),
+                _ => return Err(HandlerError::UnsupportedMode("replayable DOCX dump supports /, /document, /body, /body/p[N], /body/tbl[N], /header[N], /footer[N], /theme, /fontTable, /styles, /settings, /numbering, /footnotes, /endnotes, /webSettings, /comments, and /commentsExtended; use --dom for other subtrees".to_string())),
             };
             let handler = crate::open_handler(&cmd.file, false)?;
             let xml = match handler.raw(part, handler_common::RawOptions::default()) {
@@ -202,6 +257,211 @@ pub fn handle_dump(
         let json = serde_json::to_string_pretty(&root).map_err(|e| HandlerError::JsonError(e))?;
         Ok(json)
     }
+}
+
+const DOCX_HEADER_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+const DOCX_FOOTER_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+const DOCX_IMAGE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const DOCX_CUSTOM_XML_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml";
+const DOCX_CUSTOM_XML_PROPS_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps";
+
+fn docx_custom_xml_items(file: &str) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let package = oxml::OxmlPackage::open(file, false)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let relationships = package
+        .part_rels("word/document.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut custom_items = relationships.by_type(DOCX_CUSTOM_XML_REL_TYPE);
+    custom_items.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut items = Vec::new();
+    for relationship in custom_items {
+        if relationship.target_mode.eq_ignore_ascii_case("external") {
+            continue;
+        }
+        let item_part = package.resolve_rel_target("word/document.xml", &relationship.target);
+        let bytes = package
+            .read_part_bytes(&item_part)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let content_type = package
+            .content_types()
+            .content_type_for(&item_part)
+            .map(String::as_str)
+            .unwrap_or("application/xml");
+        items.push(serde_json::json!({
+            "command":"raw-set",
+            "part":"/customXml",
+            "xpath":relationship.id,
+            "action":"embed-binary",
+            "xml":format!("data:{};base64,{}", content_type, base64_encode(bytes)),
+        }));
+        let item_relationships = package
+            .part_rels(&item_part)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let mut properties = item_relationships.by_type(DOCX_CUSTOM_XML_PROPS_REL_TYPE);
+        properties.sort_by(|left, right| left.id.cmp(&right.id));
+        for properties_relationship in properties {
+            if properties_relationship
+                .target_mode
+                .eq_ignore_ascii_case("external")
+            {
+                continue;
+            }
+            let properties_part =
+                package.resolve_rel_target(&item_part, &properties_relationship.target);
+            let bytes = package
+                .read_part_bytes(&properties_part)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let content_type = package
+                .content_types()
+                .content_type_for(&properties_part)
+                .map(String::as_str)
+                .unwrap_or("application/vnd.openxmlformats-officedocument.customXmlProperties+xml");
+            items.push(serde_json::json!({
+                "command":"raw-set",
+                "part":format!("/customXml/{}", relationship.id),
+                "xpath":properties_relationship.id,
+                "action":"embed-binary",
+                "xml":format!("data:{};base64,{}", content_type, base64_encode(bytes)),
+            }));
+        }
+    }
+    Ok(items)
+}
+
+fn docx_document_image_items(file: &str) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let package = oxml::OxmlPackage::open(file, false)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    docx_part_image_items(&package, "word/document.xml", "/document")
+}
+
+fn docx_part_image_items(
+    package: &oxml::OxmlPackage,
+    source_part: &str,
+    replay_part: &str,
+) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let relationships = package
+        .part_rels(source_part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut images = relationships.by_type(DOCX_IMAGE_REL_TYPE);
+    images.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut items = Vec::new();
+    for relationship in images {
+        if relationship.target_mode.eq_ignore_ascii_case("external") {
+            continue;
+        }
+        let part_path = package.resolve_rel_target(source_part, &relationship.target);
+        let bytes = package
+            .read_part_bytes(&part_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let content_type = package
+            .content_types()
+            .content_type_for(&part_path)
+            .map(String::as_str)
+            .or_else(|| image_content_type_from_path(&part_path))
+            .ok_or_else(|| {
+                HandlerError::OperationFailed(format!(
+                    "cannot determine content type for document image '{}'",
+                    part_path
+                ))
+            })?;
+        items.push(serde_json::json!({
+            "command":"raw-set",
+            "part":replay_part,
+            "xpath":relationship.id,
+            "action":"embed-binary",
+            "xml":format!("data:{};base64,{}", content_type, base64_encode(bytes)),
+        }));
+    }
+    Ok(items)
+}
+
+fn docx_numbering_image_items(file: &str) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let package = oxml::OxmlPackage::open(file, false)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    docx_part_image_items(&package, "word/numbering.xml", "/numbering")
+}
+
+fn image_content_type_from_path(path: &str) -> Option<&'static str> {
+    match path.rsplit_once('.')?.1.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        "tif" | "tiff" => Some("image/tiff"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        "ico" => Some("image/x-icon"),
+        "emf" => Some("image/x-emf"),
+        "wmf" => Some("image/x-wmf"),
+        _ => None,
+    }
+}
+
+fn docx_header_footer_items(
+    file: &str,
+    kind: &str,
+) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let relationship_type = match kind {
+        "header" => DOCX_HEADER_REL_TYPE,
+        "footer" => DOCX_FOOTER_REL_TYPE,
+        _ => {
+            return Err(HandlerError::InvalidArgument(format!(
+                "invalid header/footer kind: {kind}"
+            )))
+        }
+    };
+    let package = oxml::OxmlPackage::open(file, false)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let relationships = package
+        .part_rels("word/document.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut parts = relationships.by_type(relationship_type);
+    parts.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut items = Vec::new();
+    for (index, relationship) in parts.into_iter().enumerate() {
+        if relationship.target_mode.eq_ignore_ascii_case("external") {
+            continue;
+        }
+        let part_path = package.resolve_rel_target("word/document.xml", &relationship.target);
+        let xml = package
+            .read_part_xml(&part_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        items.push(serde_json::json!({
+            "command":"raw-set",
+            "part":format!("/{kind}[{}]", index + 1),
+            "xpath":relationship.id,
+            "action":"replace",
+            "xml":oxml::xml_util::strip_prolog(&xml),
+        }));
+        items.extend(docx_part_image_items(
+            &package,
+            &part_path,
+            &format!("/{kind}[{}]", index + 1),
+        )?);
+    }
+    Ok(items)
+}
+
+fn semantic_header_footer_path(path: &str) -> Option<()> {
+    let lower = path.trim_matches('/').to_ascii_lowercase();
+    for kind in ["header", "footer"] {
+        if let Some(index) = lower
+            .strip_prefix(kind)
+            .and_then(|suffix| suffix.strip_prefix('['))
+            .and_then(|suffix| suffix.strip_suffix(']'))
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+        {
+            if index > 0 {
+                return Some(());
+            }
+        }
+    }
+    None
 }
 
 const DOCX_FONT_REL_TYPE: &str =

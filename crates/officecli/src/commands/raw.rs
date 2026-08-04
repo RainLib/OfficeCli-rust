@@ -35,10 +35,14 @@ pub(crate) fn normalize_logical_part_path(file: &str, part: &str) -> String {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match (extension.as_str(), part) {
-        ("docx" | "docm", "/document") => "word/document.xml".to_string(),
         ("docx" | "docm", "/styles") => "word/styles.xml".to_string(),
-        ("docx" | "docm", "/settings") => "word/settings.xml".to_string(),
-        ("docx" | "docm", "/numbering") => "word/numbering.xml".to_string(),
+        // Keep semantic resource paths for the relationship-aware DOCX
+        // handler: raw-set can lazily create these parts during dump replay,
+        // and /document accepts binary relationship payloads.
+        (
+            "docx" | "docm",
+            "/document" | "/settings" | "/numbering" | "/footnotes" | "/endnotes" | "/webSettings",
+        ) => part.to_string(),
         _ => part.to_string(),
     }
 }

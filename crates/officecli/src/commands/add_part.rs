@@ -24,6 +24,9 @@ pub fn handle_add_part(cmd: AddPartCommand, format: OutputFormat) -> Result<Stri
     let handler = crate::open_handler(&cmd.file, true)?;
 
     let (rel_id, part_path) = handler.add_part(&cmd.parent, &cmd.part_type, None)?;
+    // `add_part` mutates the in-memory OOXML package, just like raw-set; make
+    // the public command durable before reporting the new relationship.
+    handler.save()?;
 
     let message = format!(
         "Created {} part: relId={} path={}",
