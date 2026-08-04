@@ -713,7 +713,7 @@ fn resolve_pivot_field_name(pt: &PivotTableDef, idx: i32) -> String {
     idx.to_string()
 }
 
-fn make_pivot_node(pt: &PivotTableDef) -> DocumentNode {
+pub(crate) fn make_pivot_node(pt: &PivotTableDef) -> DocumentNode {
     let path = format!("/pivot/\"{}\"", pt.name);
     let mut node = DocumentNode::new(&path, "pivot-table").with_text(pt.name.clone());
     node = node.with_format(
@@ -729,6 +729,8 @@ fn make_pivot_node(pt: &PivotTableDef) -> DocumentNode {
     if let Some(cid) = &pt.cache_id {
         node = node.with_format("cacheId", serde_json::Value::String(cid.clone()));
     }
+    node = node.with_format("repeatLabels", serde_json::json!(pt.repeat_labels));
+    node = node.with_format("blankRows", serde_json::json!(pt.blank_rows));
     if !pt.row_fields.is_empty() {
         let names: Vec<String> = pt
             .row_fields
@@ -764,6 +766,14 @@ fn make_pivot_node(pt: &PivotTableDef) -> DocumentNode {
             &format!("dataField{}", i + 1),
             serde_json::Value::String(composite),
         );
+        if let Some(Some(show_as)) = pt.data_field_show_as.get(i) {
+            if let Some(canonical) = canonical_show_data_as(show_as) {
+                node = node.with_format(
+                    &format!("dataField{}.showAs", i + 1),
+                    serde_json::Value::String(canonical.to_string()),
+                );
+            }
+        }
     }
     let range_info = pt.source_range.as_deref().unwrap_or("unknown");
     node = node.with_preview(format!(
@@ -771,6 +781,17 @@ fn make_pivot_node(pt: &PivotTableDef) -> DocumentNode {
         pt.name, pt.field_count, range_info
     ));
     node
+}
+
+fn canonical_show_data_as(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "normal" => None,
+        "percent" | "percentoftotal" | "percent_of_total" => Some("percent_of_total".to_string()),
+        "percentofrow" | "percent_of_row" | "percentofraw" => Some("percent_of_row".to_string()),
+        "percentofcol" | "percentofcolumn" | "percent_of_col" => Some("percent_of_col".to_string()),
+        "runtotal" | "runningtotal" | "running_total" => Some("running_total".to_string()),
+        _ => Some(value.to_string()),
+    }
 }
 
 fn make_cell_node(package: &OxmlPackage, ws: &Worksheet, cell: &Cell) -> DocumentNode {

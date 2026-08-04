@@ -206,11 +206,9 @@ pub fn eval_function(
             }
         }
 
-        // ===== Modern dynamic arrays (numeric subset) =====
-        // FormulaResult currently represents an array as a flattened numeric
-        // vector. This gives cache/evaluator parity for scalar consumers and
-        // establishes the correct values for the spill anchor; writing the
-        // remaining spill cells is deliberately handled by the worksheet layer.
+        // ===== Modern dynamic arrays =====
+        // Modern functions keep their rectangular shape and scalar types so
+        // strings, booleans and 2-D ranges can be used by later functions.
         "SEQUENCE" => Some(eval_sequence(args)),
         "SORT" => Some(eval_sort(args)),
         "SORTBY" => Some(eval_sortby(args)),
@@ -220,17 +218,10 @@ pub fn eval_function(
         "XMATCH" => Some(eval_xmatch(args)),
         "TAKE" => Some(eval_take(args)),
         "DROP" => Some(eval_drop(args)),
-        // FormulaResult arrays are presently flattened. TOCOL/TOROW therefore
-        // share the same value result, but still need dispatch for consumers of
-        // the spill anchor rather than falling through as unevaluated formulas.
-        "TOCOL" | "TOROW" => Some(FormulaResult::Array(array_values(args.first()))),
-        // Until the worksheet layer persists two-dimensional spill geometry,
-        // horizontal and vertical stacks are value-equivalent flattened arrays.
-        "HSTACK" | "VSTACK" => Some(FormulaResult::Array(
-            args.iter()
-                .flat_map(|arg| array_values(Some(arg)))
-                .collect(),
-        )),
+        "TOCOL" => Some(eval_to_col(args)),
+        "TOROW" => Some(eval_to_row(args)),
+        "HSTACK" => Some(eval_hstack(args)),
+        "VSTACK" => Some(eval_vstack(args)),
         "RANDARRAY" => Some(eval_randarray(args)),
         "CHOOSE" => {
             let idx = num(0) as usize;
@@ -633,6 +624,12 @@ fn flatten_numbers(args: &[FormulaResult]) -> Vec<f64> {
     for a in args {
         match a {
             FormulaResult::Array(arr) => result.extend(arr.iter().filter(|v| !v.is_nan())),
+            FormulaResult::Matrix(rows) => result.extend(
+                rows.iter()
+                    .flatten()
+                    .map(FormulaResult::as_number)
+                    .filter(|value| !value.is_nan()),
+            ),
             FormulaResult::Number(v) if !v.is_nan() => result.push(*v),
             FormulaResult::Bool(v) => result.push(if *v { 1.0 } else { 0.0 }),
             FormulaResult::Str(s) => {
@@ -646,14 +643,6 @@ fn flatten_numbers(args: &[FormulaResult]) -> Vec<f64> {
     result
 }
 
-fn array_values(value: Option<&FormulaResult>) -> Vec<f64> {
-    match value {
-        Some(FormulaResult::Array(values)) => values.clone(),
-        Some(value) if !value.is_error() => vec![value.as_number()],
-        _ => Vec::new(),
-    }
-}
-
 fn eval_sequence(args: &[FormulaResult]) -> FormulaResult {
     let rows = args.first().map(FormulaResult::as_number).unwrap_or(1.0) as isize;
     let columns = args.get(1).map(FormulaResult::as_number).unwrap_or(1.0) as isize;
@@ -662,78 +651,122 @@ fn eval_sequence(args: &[FormulaResult]) -> FormulaResult {
     if rows < 1 || columns < 1 {
         return FormulaResult::Error("#VALUE!".to_string());
     }
-    let count = match (rows as usize).checked_mul(columns as usize) {
+    let _count = match (rows as usize).checked_mul(columns as usize) {
         Some(count) if count <= 1_000_000 => count,
         _ => return FormulaResult::Error("#NUM!".to_string()),
     };
-    FormulaResult::Array(
-        (0..count)
-            .map(|index| start + index as f64 * step)
+    FormulaResult::Matrix(
+        (0..rows as usize)
+            .map(|row| {
+                (0..columns as usize)
+                    .map(|column| {
+                        FormulaResult::Number(
+                            start + (row * columns as usize + column) as f64 * step,
+                        )
+                    })
+                    .collect()
+            })
             .collect(),
     )
 }
 
 fn eval_sort(args: &[FormulaResult]) -> FormulaResult {
-    let mut values = array_values(args.first());
+    let mut values = rectangular_matrix(args.first());
+    if values.is_empty() {
+        return FormulaResult::Matrix(values);
+    }
+    let sort_index = args.get(1).map(FormulaResult::as_number).unwrap_or(1.0) as isize;
+    let by_column = args.get(3).is_some_and(|value| value.as_number() != 0.0);
     let descending = args.get(2).is_some_and(|value| value.as_number() < 0.0);
-    values.sort_by(|left, right| left.total_cmp(right));
+    if by_column {
+        values = transpose(&values);
+    }
+    let key = sort_index.clamp(1, values[0].len() as isize) as usize - 1;
+    values.sort_by(|left, right| compare_values(&left[key], &right[key]).cmp(&0));
     if descending {
         values.reverse();
     }
-    FormulaResult::Array(values)
+    if by_column {
+        values = transpose(&values);
+    }
+    FormulaResult::Matrix(values)
 }
 
 fn eval_sortby(args: &[FormulaResult]) -> FormulaResult {
     if args.len() < 2 {
         return FormulaResult::Error("#VALUE!".to_string());
     }
-    let values = array_values(args.first());
-    let keys = array_values(args.get(1));
+    let mut values = rectangular_matrix(args.first());
+    let keys = flatten_matrix(args.get(1));
     if values.len() != keys.len() {
         return FormulaResult::Error("#VALUE!".to_string());
     }
     let descending = args.get(2).is_some_and(|value| value.as_number() < 0.0);
-    let mut pairs: Vec<_> = values.into_iter().zip(keys).collect();
-    pairs.sort_by(|left, right| left.1.total_cmp(&right.1));
+    let mut pairs: Vec<_> = values.drain(..).zip(keys).collect();
+    pairs.sort_by(|left, right| compare_values(&left.1, &right.1).cmp(&0));
     if descending {
         pairs.reverse();
     }
-    FormulaResult::Array(pairs.into_iter().map(|(value, _)| value).collect())
+    FormulaResult::Matrix(pairs.into_iter().map(|(value, _)| value).collect())
 }
 
 fn eval_unique(args: &[FormulaResult]) -> FormulaResult {
-    let source = array_values(args.first());
+    let source = rectangular_matrix(args.first());
     let exactly_once = args.get(2).is_some_and(|value| value.as_number() != 0.0);
-    let mut result = Vec::new();
+    let mut result: Vec<Vec<FormulaResult>> = Vec::new();
     for value in &source {
-        let occurrences = source.iter().filter(|other| **other == *value).count();
-        if (!exactly_once || occurrences == 1) && !result.contains(value) {
-            result.push(*value);
+        let occurrences = source
+            .iter()
+            .filter(|other| rows_equal(other, value))
+            .count();
+        if (!exactly_once || occurrences == 1) && !result.iter().any(|row| rows_equal(row, value)) {
+            result.push(value.clone());
         }
     }
-    FormulaResult::Array(result)
+    FormulaResult::Matrix(result)
 }
 
 fn eval_filter(args: &[FormulaResult]) -> FormulaResult {
     if args.len() < 2 {
         return FormulaResult::Error("#VALUE!".to_string());
     }
-    let source = array_values(args.first());
-    let include = array_values(args.get(1));
-    if source.len() != include.len() {
+    let source = rectangular_matrix(args.first());
+    let include = flatten_matrix(args.get(1));
+    if source.is_empty() {
+        return FormulaResult::Matrix(source);
+    }
+    if include.len() == source.len() {
+        let result: Vec<_> = source
+            .into_iter()
+            .zip(include)
+            .filter_map(|(row, keep)| (keep.as_number() != 0.0).then_some(row))
+            .collect();
+        return if result.is_empty() {
+            args.get(2)
+                .cloned()
+                .unwrap_or_else(|| FormulaResult::Error("#CALC!".to_string()))
+        } else {
+            FormulaResult::Matrix(result)
+        };
+    }
+    if include.len() != source[0].len() {
         return FormulaResult::Error("#VALUE!".to_string());
     }
-    let result: Vec<f64> = source
+    let result: Vec<Vec<FormulaResult>> = source
         .into_iter()
-        .zip(include)
-        .filter_map(|(value, keep)| (keep != 0.0).then_some(value))
+        .map(|row| {
+            row.into_iter()
+                .zip(&include)
+                .filter_map(|(value, keep)| (keep.as_number() != 0.0).then_some(value))
+                .collect()
+        })
         .collect();
     if result.is_empty() {
         args.get(2)
             .cloned()
             .unwrap_or_else(|| FormulaResult::Error("#CALC!".to_string()))
     } else {
-        FormulaResult::Array(result)
+        FormulaResult::Matrix(result)
     }
 }
 
@@ -741,17 +774,23 @@ fn eval_xlookup(args: &[FormulaResult]) -> FormulaResult {
     if args.len() < 3 {
         return FormulaResult::Error("#VALUE!".to_string());
     }
-    let lookup = args[0].as_number();
-    let lookup_values = array_values(args.get(1));
-    let return_values = array_values(args.get(2));
+    let lookup = &args[0];
+    let lookup_values = flatten_matrix(args.get(1));
+    let return_values = rectangular_matrix(args.get(2));
     if lookup_values.len() != return_values.len() {
         return FormulaResult::Error("#VALUE!".to_string());
     }
     lookup_values
         .iter()
-        .position(|value| *value == lookup)
-        .and_then(|index| return_values.get(index).copied())
-        .map(FormulaResult::Number)
+        .position(|value| compare_values(value, lookup) == 0)
+        .and_then(|index| return_values.get(index).cloned())
+        .map(|row| {
+            if row.len() == 1 {
+                row[0].clone()
+            } else {
+                FormulaResult::Matrix(vec![row])
+            }
+        })
         .or_else(|| args.get(3).cloned())
         .unwrap_or_else(|| FormulaResult::Error("#N/A".to_string()))
 }
@@ -760,40 +799,40 @@ fn eval_xmatch(args: &[FormulaResult]) -> FormulaResult {
     if args.len() < 2 {
         return FormulaResult::Error("#VALUE!".to_string());
     }
-    let lookup = args[0].as_number();
-    array_values(args.get(1))
+    let lookup = &args[0];
+    flatten_matrix(args.get(1))
         .iter()
-        .position(|value| *value == lookup)
+        .position(|value| compare_values(value, lookup) == 0)
         .map(|index| FormulaResult::Number((index + 1) as f64))
         .unwrap_or_else(|| FormulaResult::Error("#N/A".to_string()))
 }
 
 fn eval_take(args: &[FormulaResult]) -> FormulaResult {
-    let values = array_values(args.first());
+    let values = rectangular_matrix(args.first());
     let rows = args.get(1).map(FormulaResult::as_number).unwrap_or(0.0) as isize;
     if rows == 0 {
         return FormulaResult::Error("#CALC!".to_string());
     }
     let count = rows.unsigned_abs().min(values.len());
     if rows > 0 {
-        FormulaResult::Array(values.into_iter().take(count).collect())
+        FormulaResult::Matrix(values.into_iter().take(count).collect())
     } else {
         let start = values.len() - count;
-        FormulaResult::Array(values.into_iter().skip(start).collect())
+        FormulaResult::Matrix(values.into_iter().skip(start).collect())
     }
 }
 
 fn eval_drop(args: &[FormulaResult]) -> FormulaResult {
-    let values = array_values(args.first());
+    let values = rectangular_matrix(args.first());
     let rows = args.get(1).map(FormulaResult::as_number).unwrap_or(0.0) as isize;
     if rows.unsigned_abs() >= values.len() {
         return FormulaResult::Error("#CALC!".to_string());
     }
     if rows >= 0 {
-        FormulaResult::Array(values.into_iter().skip(rows as usize).collect())
+        FormulaResult::Matrix(values.into_iter().skip(rows as usize).collect())
     } else {
         let count = values.len() - rows.unsigned_abs();
-        FormulaResult::Array(values.into_iter().take(count).collect())
+        FormulaResult::Matrix(values.into_iter().take(count).collect())
     }
 }
 
@@ -806,22 +845,129 @@ fn eval_randarray(args: &[FormulaResult]) -> FormulaResult {
     if rows < 1 || columns < 1 || min > max {
         return FormulaResult::Error("#VALUE!".to_string());
     }
-    let count = match (rows as usize).checked_mul(columns as usize) {
+    let _count = match (rows as usize).checked_mul(columns as usize) {
         Some(count) if count <= 1_000_000 => count,
         _ => return FormulaResult::Error("#NUM!".to_string()),
     };
-    FormulaResult::Array(
-        (0..count)
+    FormulaResult::Matrix(
+        (0..rows as usize)
             .map(|_| {
-                let value = min + rand_f64() * (max - min + if whole { 1.0 } else { 0.0 });
-                if whole {
-                    value.floor()
-                } else {
-                    value
-                }
+                (0..columns as usize)
+                    .map(|_| {
+                        let value = min + rand_f64() * (max - min + if whole { 1.0 } else { 0.0 });
+                        FormulaResult::Number(if whole { value.floor() } else { value })
+                    })
+                    .collect()
             })
             .collect(),
     )
+}
+
+fn rectangular_matrix(value: Option<&FormulaResult>) -> Vec<Vec<FormulaResult>> {
+    let mut rows = value.map(FormulaResult::as_matrix).unwrap_or_default();
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    for row in &mut rows {
+        row.resize(columns, FormulaResult::Blank);
+    }
+    rows
+}
+
+fn flatten_matrix(value: Option<&FormulaResult>) -> Vec<FormulaResult> {
+    rectangular_matrix(value).into_iter().flatten().collect()
+}
+
+fn transpose(rows: &[Vec<FormulaResult>]) -> Vec<Vec<FormulaResult>> {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    (0..columns)
+        .map(|column| {
+            rows.iter()
+                .map(|row| row.get(column).cloned().unwrap_or(FormulaResult::Blank))
+                .collect()
+        })
+        .collect()
+}
+
+fn rows_equal(left: &[FormulaResult], right: &[FormulaResult]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| compare_values(left, right) == 0)
+}
+
+fn should_skip(value: &FormulaResult, ignore: isize) -> bool {
+    (ignore == 1 || ignore == 3) && value.is_blank()
+        || (ignore == 2 || ignore == 3) && value.is_error()
+}
+
+fn eval_to_col(args: &[FormulaResult]) -> FormulaResult {
+    let ignore = args.get(1).map(FormulaResult::as_number).unwrap_or(0.0) as isize;
+    FormulaResult::Matrix(
+        flatten_matrix(args.first())
+            .into_iter()
+            .filter(|value| !should_skip(value, ignore))
+            .map(|value| vec![value])
+            .collect(),
+    )
+}
+
+fn eval_to_row(args: &[FormulaResult]) -> FormulaResult {
+    let ignore = args.get(1).map(FormulaResult::as_number).unwrap_or(0.0) as isize;
+    FormulaResult::Matrix(vec![flatten_matrix(args.first())
+        .into_iter()
+        .filter(|value| !should_skip(value, ignore))
+        .collect()])
+}
+
+fn eval_hstack(args: &[FormulaResult]) -> FormulaResult {
+    // Legacy `Array` values predate matrix geometry and historically behaved
+    // as row vectors for HSTACK. Preserve that public evaluator behavior while
+    // true Matrix values retain their declared shape.
+    let matrices: Vec<_> = args
+        .iter()
+        .map(|value| match value {
+            FormulaResult::Array(values) => {
+                vec![values.iter().copied().map(FormulaResult::Number).collect()]
+            }
+            value => rectangular_matrix(Some(value)),
+        })
+        .collect();
+    let rows = matrices.iter().map(Vec::len).max().unwrap_or(0);
+    let mut result = vec![Vec::new(); rows];
+    for matrix in matrices {
+        let columns = matrix.first().map(Vec::len).unwrap_or(0);
+        for (row_index, row) in result.iter_mut().enumerate() {
+            if let Some(values) = matrix.get(row_index) {
+                row.extend(values.clone());
+            } else {
+                row.extend(std::iter::repeat_n(
+                    FormulaResult::Error("#N/A".to_string()),
+                    columns,
+                ));
+            }
+        }
+    }
+    FormulaResult::Matrix(result)
+}
+
+fn eval_vstack(args: &[FormulaResult]) -> FormulaResult {
+    let matrices: Vec<_> = args
+        .iter()
+        .map(|value| rectangular_matrix(Some(value)))
+        .collect();
+    let columns = matrices
+        .iter()
+        .filter_map(|matrix| matrix.first().map(Vec::len))
+        .max()
+        .unwrap_or(0);
+    let mut result = Vec::new();
+    for mut matrix in matrices {
+        for row in &mut matrix {
+            row.resize(columns, FormulaResult::Error("#N/A".to_string()));
+        }
+        result.extend(matrix);
+    }
+    FormulaResult::Matrix(result)
 }
 
 fn eval_stdev(nums: &[f64], sample: bool) -> Option<FormulaResult> {
@@ -1081,7 +1227,19 @@ mod tests {
     fn numbers(result: Option<FormulaResult>) -> Vec<f64> {
         match result {
             Some(FormulaResult::Array(values)) => values,
+            Some(FormulaResult::Matrix(rows)) => rows
+                .into_iter()
+                .flatten()
+                .map(|value| value.as_number())
+                .collect(),
             other => panic!("expected numeric array, got {other:?}"),
+        }
+    }
+
+    fn matrix(result: Option<FormulaResult>) -> Vec<Vec<FormulaResult>> {
+        match result {
+            Some(FormulaResult::Matrix(rows)) => rows,
+            other => panic!("expected matrix, got {other:?}"),
         }
     }
 
@@ -1195,6 +1353,74 @@ mod tests {
                 &resolver,
             )),
             vec![2.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn modern_dynamic_functions_preserve_strings_and_two_dimensional_shape() {
+        let resolver = EmptyResolver;
+        assert_eq!(
+            matrix(eval_function(
+                "SEQUENCE",
+                &[FormulaResult::Number(2.0), FormulaResult::Number(3.0)],
+                &resolver,
+            )),
+            vec![
+                vec![
+                    FormulaResult::Number(1.0),
+                    FormulaResult::Number(2.0),
+                    FormulaResult::Number(3.0),
+                ],
+                vec![
+                    FormulaResult::Number(4.0),
+                    FormulaResult::Number(5.0),
+                    FormulaResult::Number(6.0),
+                ],
+            ]
+        );
+        assert_eq!(
+            matrix(eval_function(
+                "FILTER",
+                &[
+                    FormulaResult::Matrix(vec![
+                        vec![
+                            FormulaResult::Str("alpha".to_string()),
+                            FormulaResult::Number(1.0)
+                        ],
+                        vec![
+                            FormulaResult::Str("beta".to_string()),
+                            FormulaResult::Number(2.0)
+                        ],
+                    ]),
+                    FormulaResult::Matrix(vec![
+                        vec![FormulaResult::Bool(false)],
+                        vec![FormulaResult::Bool(true)],
+                    ]),
+                ],
+                &resolver,
+            )),
+            vec![vec![
+                FormulaResult::Str("beta".to_string()),
+                FormulaResult::Number(2.0)
+            ]]
+        );
+        assert_eq!(
+            matrix(eval_function(
+                "HSTACK",
+                &[
+                    FormulaResult::Matrix(vec![vec![FormulaResult::Str("A".to_string())]]),
+                    FormulaResult::Matrix(vec![vec![
+                        FormulaResult::Str("B".to_string()),
+                        FormulaResult::Str("C".to_string())
+                    ]]),
+                ],
+                &resolver,
+            )),
+            vec![vec![
+                FormulaResult::Str("A".to_string()),
+                FormulaResult::Str("B".to_string()),
+                FormulaResult::Str("C".to_string()),
+            ]]
         );
     }
 }

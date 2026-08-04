@@ -310,6 +310,19 @@ impl DocumentHandler for ExcelHandler {
             ));
         }
         let mut pkg = self.package.borrow_mut();
+        if action.eq_ignore_ascii_case("embed-part") {
+            let payload = xml.ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "embed-part requires a JSON payload in XML".to_string(),
+                )
+            })?;
+            return raw::embed_relationship_part(
+                &mut pkg,
+                part_path.trim_start_matches('/'),
+                xpath.trim(),
+                payload,
+            );
+        }
         let resolved = match crate::helpers::resolve_raw_part_path(&pkg, part_path) {
             Ok(path) => path,
             Err(HandlerError::PathNotFound(_))

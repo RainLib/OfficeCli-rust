@@ -15,6 +15,7 @@ use std::collections::HashMap;
 ///   row — add a row of cells (requires "row" index or uses "ref" as anchor)
 ///   column — add a column of cells
 ///   table — create a defined Excel Table (ListObject) over a range
+///   pivot | pivottable — create a native PivotTable cache and definition
 ///   chart — add a chart (bar/column/line/pie) embedded via drawing+graphicFrame
 ///   conditionalFormat | conditional-format | cf — add a conditional format rule
 ///   dataValidation | validation — add a data validation rule
@@ -33,6 +34,7 @@ pub fn add_element(
         "row" => add_row(package, parent, position, properties),
         "column" | "col" => add_column(package, parent, position, properties),
         "table" => add_table(package, parent, position, properties),
+        "pivot" | "pivottable" => add_pivot_table(package, parent, properties),
         "chart" => add_chart_real(package, parent, properties),
         "conditionalFormat" | "conditional-format" | "cf" => {
             add_conditional_format(package, parent, position, properties)
@@ -44,6 +46,1038 @@ pub fn add_element(
         "image" | "picture" => add_image_real(package, parent, properties),
         _ => Err(HandlerError::UnsupportedType(element_type.to_string())),
     }
+}
+
+/// Create a native Excel PivotTable backed by a worksheet range.
+///
+/// PivotTables are deliberately written as real OOXML parts rather than as a
+/// rendered cell block: the cache definition, cache records, workbook cache
+/// entry, worksheet relationship and pivot definition are all required for
+/// Excel to recognise the result as a PivotTable.  Excel refreshes the output
+/// on open (`refreshOnLoad=1`), which also means this stays correct when a
+/// caller changes the source data after creating the pivot.
+fn add_pivot_table(
+    package: &mut OxmlPackage,
+    parent: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let target_sheet_name = parent.trim_start_matches('/');
+    if target_sheet_name.is_empty() || target_sheet_name.contains('/') {
+        return Err(HandlerError::InvalidArgument(
+            "pivottable parent must be a worksheet path such as /Sheet1".to_string(),
+        ));
+    }
+    let source_spec = pivot_property(properties, &["source", "src"]).ok_or_else(|| {
+        HandlerError::InvalidArgument(
+            "pivottable requires 'source' property (e.g. source=Sheet1!A1:D100)".to_string(),
+        )
+    })?;
+    if source_spec.trim_start().starts_with('[') {
+        return Err(HandlerError::InvalidArgument(
+            "external workbook references are not supported in pivot source".to_string(),
+        ));
+    }
+
+    let (source_sheet_name, source_ref) = split_pivot_source(source_spec, target_sheet_name)?;
+    let (start, end) = parse_pivot_range(&source_ref)?;
+    let model = helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
+    let source_sheet = model
+        .sheets
+        .iter()
+        .find(|sheet| sheet.name == source_sheet_name)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", source_sheet_name)))?;
+    let target_sheet = model
+        .sheets
+        .iter()
+        .find(|sheet| sheet.name == target_sheet_name)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", target_sheet_name)))?;
+
+    let headers: Vec<String> = (start.col..=end.col)
+        .map(|col| {
+            source_sheet
+                .cells
+                .get(&(start.row, col))
+                .map(|cell| cell.display_value.trim().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    if headers.is_empty() || headers.iter().any(String::is_empty) {
+        return Err(HandlerError::InvalidArgument(
+            "pivot source header row must contain a name for every column".to_string(),
+        ));
+    }
+    if headers.iter().enumerate().any(|(index, header)| {
+        headers[..index]
+            .iter()
+            .any(|earlier| earlier.eq_ignore_ascii_case(header))
+    }) {
+        return Err(HandlerError::InvalidArgument(
+            "pivot source headers must be unique".to_string(),
+        ));
+    }
+    if start.row >= end.row {
+        return Err(HandlerError::InvalidArgument(
+            "pivot source must include at least one data row".to_string(),
+        ));
+    }
+    let mut data_rows: Vec<Vec<String>> = ((start.row + 1)..=end.row)
+        .map(|row| {
+            (start.col..=end.col)
+                .map(|col| {
+                    source_sheet
+                        .cells
+                        .get(&(row, col))
+                        .map(|cell| cell.display_value.clone())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect();
+
+    let row_fields = parse_pivot_field_list(
+        pivot_property(properties, &["rows", "row", "rowfield", "rowfields"]),
+        &headers,
+        "rows",
+    )?;
+    let col_fields = parse_pivot_field_list(
+        pivot_property(
+            properties,
+            &["cols", "col", "column", "columns", "colfield", "colfields"],
+        ),
+        &headers,
+        "cols",
+    )?;
+    let page_fields = parse_pivot_field_list(
+        pivot_property(
+            properties,
+            &["filters", "filter", "filterfield", "filterfields"],
+        ),
+        &headers,
+        "filters",
+    )?;
+    let mut data_fields = parse_pivot_data_fields(
+        pivot_property(
+            properties,
+            &["values", "value", "valuefield", "valuefields"],
+        ),
+        pivot_property(properties, &["aggregate"]),
+        &headers,
+    )?;
+    if data_fields.is_empty() {
+        let axis_fields: std::collections::HashSet<usize> = row_fields
+            .iter()
+            .chain(&col_fields)
+            .chain(&page_fields)
+            .copied()
+            .collect();
+        if let Some(index) = (0..headers.len()).find(|index| {
+            !axis_fields.contains(index)
+                && data_rows
+                    .iter()
+                    .all(|row| row[*index].is_empty() || row[*index].parse::<f64>().is_ok())
+        }) {
+            data_fields.push((index, "sum".to_string()));
+        }
+    }
+
+    let top_n = pivot_property(properties, &["topn"])
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0);
+    if let Some(top_n) = top_n {
+        apply_pivot_top_n(&mut data_rows, &row_fields, &data_fields, top_n);
+    }
+    let label_filter = parse_pivot_label_filter(properties, &headers)?;
+    if data_fields.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "pivottable needs values=<numeric field>:sum, or a numeric non-axis source column"
+                .to_string(),
+        ));
+    }
+
+    let anchor = pivot_property(properties, &["position", "pos"])
+        .map(|value| value.replace('$', ""))
+        .unwrap_or_else(|| format!("{}1", col_num_to_letters(end.col + 2)));
+    let anchor_ref = CellRef::parse(&anchor.to_ascii_uppercase()).ok_or_else(|| {
+        HandlerError::InvalidArgument(format!("invalid pivot position '{}'", anchor))
+    })?;
+    let pivot_name = match pivot_property(properties, &["name"]) {
+        Some(value) => {
+            let value = value.trim();
+            if value.is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
+                return Err(HandlerError::InvalidArgument(
+                    "pivot name must be non-empty, contain no control characters, and be at most 255 characters"
+                        .to_string(),
+                ));
+            }
+            value.to_string()
+        }
+        None => format!(
+            "PivotTable{}",
+            next_part_index(package, "xl/pivotTables/pivotTable")
+        ),
+    };
+    if model
+        .pivot_tables
+        .iter()
+        .any(|pivot| pivot.name.eq_ignore_ascii_case(&pivot_name))
+    {
+        return Err(HandlerError::InvalidArgument(format!(
+            "pivot table name '{}' already exists",
+            pivot_name
+        )));
+    }
+
+    let pivot_index = next_part_index(package, "xl/pivotTables/pivotTable");
+    let pivot_path = format!("xl/pivotTables/pivotTable{}.xml", pivot_index);
+    let workbook_rels_path = "xl/_rels/workbook.xml.rels";
+    // A Top-N pivot owns a cropped cache. Sharing it with an ordinary pivot
+    // with the same worksheet source would expose the cropped records to the
+    // sibling, so mirror C# and force a separate cache definition.
+    let reused_cache = (top_n.is_none() && label_filter.is_none())
+        .then(|| find_matching_pivot_cache(package, &model, &source_sheet_name, &source_ref))
+        .flatten();
+    let cache_index = next_part_index(package, "xl/pivotCache/pivotCacheDefinition");
+    let records_index = next_part_index(package, "xl/pivotCache/pivotCacheRecords");
+    let (cache_path, records_path, cache_id, cache_workbook_rel_id, writes_cache) =
+        match reused_cache {
+            Some((cache_path, cache_id)) => (
+                cache_path.clone(),
+                // This is only passed to the content-type helper, which sees
+                // the existing cache override and therefore adds nothing.
+                cache_path,
+                cache_id,
+                None,
+                false,
+            ),
+            None => (
+                format!("xl/pivotCache/pivotCacheDefinition{}.xml", cache_index),
+                format!("xl/pivotCache/pivotCacheRecords{}.xml", records_index),
+                next_pivot_cache_id(package)?,
+                Some(next_rel_id_in_part(package, workbook_rels_path)),
+                true,
+            ),
+        };
+    let worksheet_rels_path = relationships_part_path(&target_sheet.part_path);
+    let pivot_worksheet_rel_id = next_rel_id_in_part(package, &worksheet_rels_path);
+
+    let axis_fields: std::collections::HashSet<usize> = row_fields
+        .iter()
+        .chain(&col_fields)
+        .chain(&page_fields)
+        .copied()
+        .collect();
+    let numeric_fields: std::collections::HashSet<usize> = data_fields
+        .iter()
+        .map(|(field, _)| *field)
+        .filter(|field| {
+            !axis_fields.contains(field)
+                && data_rows
+                    .iter()
+                    .all(|row| row[*field].is_empty() || row[*field].parse::<f64>().is_ok())
+        })
+        .collect();
+    let (cache_xml, records_xml, field_items) = build_pivot_cache_xml(
+        &source_sheet_name,
+        &source_ref,
+        &headers,
+        &data_rows,
+        &numeric_fields,
+    );
+    let location = pivot_location_ref(
+        &anchor_ref,
+        headers.len(),
+        data_rows.len(),
+        &row_fields,
+        &col_fields,
+    );
+    let pivot_xml = build_pivot_table_xml(
+        &pivot_name,
+        cache_id,
+        &location,
+        &headers,
+        &field_items,
+        &row_fields,
+        &col_fields,
+        &page_fields,
+        &data_fields,
+        pivot_property(properties, &["style"]).unwrap_or("PivotStyleLight16"),
+    );
+    let pivot_xml = crate::mutations::apply_pivot_display_options(&pivot_xml, properties)?;
+    let pivot_xml = apply_pivot_add_filters(
+        &pivot_xml,
+        &row_fields,
+        data_fields.len(),
+        top_n,
+        label_filter.as_ref(),
+    )?;
+
+    // Every string was validated above.  Start writing only after all derived
+    // XML has been constructed so malformed user input cannot leave an
+    // orphaned half-pivot in the package.
+    if writes_cache {
+        package
+            .write_part_xml(&cache_path, &cache_xml)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        package
+            .write_part_xml(&records_path, &records_xml)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    package
+        .write_part_xml(&pivot_path, &pivot_xml)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+
+    if writes_cache {
+        let cache_workbook_rel_id = cache_workbook_rel_id.as_deref().ok_or_else(|| {
+            HandlerError::OperationFailed("missing pivot cache workbook relation ID".to_string())
+        })?;
+        inject_relationship(
+            package,
+            workbook_rels_path,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition\" Target=\"pivotCache/pivotCacheDefinition{}.xml\"/>",
+                cache_workbook_rel_id, cache_index
+            ),
+        )?;
+        inject_relationship(
+            package,
+            &relationships_part_path(&cache_path),
+            &format!(
+                "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords\" Target=\"pivotCacheRecords{}.xml\"/>",
+                records_index
+            ),
+        )?;
+    }
+    inject_relationship(
+        package,
+        &relationships_part_path(&pivot_path),
+        &format!(
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition\" Target=\"{}\"/>",
+            relative_path(&part_dir(&pivot_path), &cache_path)
+        ),
+    )?;
+    inject_relationship(
+        package,
+        &worksheet_rels_path,
+        &format!(
+            "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable\" Target=\"../pivotTables/pivotTable{}.xml\"/>",
+            pivot_worksheet_rel_id, pivot_index
+        ),
+    )?;
+
+    if writes_cache {
+        let workbook_xml = package
+            .read_part_xml("xl/workbook.xml")
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let cache_workbook_rel_id = cache_workbook_rel_id.as_deref().ok_or_else(|| {
+            HandlerError::OperationFailed("missing pivot cache workbook relation ID".to_string())
+        })?;
+        let workbook_xml =
+            insert_pivot_cache_entry(&workbook_xml, cache_id, cache_workbook_rel_id)?;
+        package
+            .write_part_xml("xl/workbook.xml", &workbook_xml)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    let worksheet_xml = package
+        .read_part_xml(&target_sheet.part_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let worksheet_xml = insert_pivot_table_part(&worksheet_xml, &pivot_worksheet_rel_id)?;
+    package
+        .write_part_xml(&target_sheet.part_path, &worksheet_xml)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    update_content_types_for_pivot(package, &pivot_path, &cache_path, &records_path)?;
+
+    Ok(format!(
+        "/{}/pivottable[{}]",
+        target_sheet_name, pivot_index
+    ))
+}
+
+fn pivot_property<'a>(properties: &'a HashMap<String, String>, names: &[&str]) -> Option<&'a str> {
+    properties.iter().find_map(|(key, value)| {
+        names
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+            .then_some(value.as_str())
+    })
+}
+
+/// Keep the largest N outer row-axis buckets using the first value field's
+/// aggregate. This matches C#'s intentionally narrow Top-N contract: no-op
+/// without a row/value axis, largest-only, deterministic ordinal tie-break.
+fn apply_pivot_top_n(
+    rows: &mut Vec<Vec<String>>,
+    row_fields: &[usize],
+    data_fields: &[(usize, String)],
+    top_n: usize,
+) {
+    let (Some(&key_field), Some((value_field, aggregate))) =
+        (row_fields.first(), data_fields.first())
+    else {
+        return;
+    };
+    let mut buckets: HashMap<String, Vec<f64>> = HashMap::new();
+    for row in rows.iter() {
+        let Some(key) = row.get(key_field).filter(|key| !key.is_empty()) else {
+            continue;
+        };
+        let Some(value) = row
+            .get(*value_field)
+            .and_then(|value| value.parse::<f64>().ok())
+        else {
+            continue;
+        };
+        buckets.entry(key.clone()).or_default().push(value);
+    }
+    if buckets.len() <= top_n {
+        return;
+    }
+    let mut ranked: Vec<(String, f64)> = buckets
+        .into_iter()
+        .map(|(key, values)| (key, reduce_pivot_top_n_values(&values, aggregate)))
+        .collect();
+    ranked.sort_by(|(left_key, left_value), (right_key, right_value)| {
+        right_value
+            .partial_cmp(left_value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    let kept: std::collections::HashSet<String> =
+        ranked.into_iter().take(top_n).map(|(key, _)| key).collect();
+    rows.retain(|row| row.get(key_field).is_some_and(|key| kept.contains(key)));
+}
+
+fn reduce_pivot_top_n_values(values: &[f64], aggregate: &str) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = values.iter().sum();
+    match aggregate.to_ascii_lowercase().as_str() {
+        "count" | "countnums" => values.len() as f64,
+        "avg" | "average" => sum / values.len() as f64,
+        "max" => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "min" => values.iter().copied().fold(f64::INFINITY, f64::min),
+        "product" => values.iter().product(),
+        "stdev" => pivot_top_n_variance(values, true).sqrt(),
+        "stdevp" => pivot_top_n_variance(values, false).sqrt(),
+        "var" => pivot_top_n_variance(values, true),
+        "varp" => pivot_top_n_variance(values, false),
+        _ => sum,
+    }
+}
+
+fn pivot_top_n_variance(values: &[f64], sample: bool) -> f64 {
+    if values.len() < if sample { 2 } else { 1 } {
+        return 0.0;
+    }
+    let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
+    let sum: f64 = values.iter().map(|value| (value - mean).powi(2)).sum();
+    sum / if sample {
+        (values.len() - 1) as f64
+    } else {
+        values.len() as f64
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PivotLabelFilter {
+    field: usize,
+    filter_type: &'static str,
+    needle: String,
+    custom_value: String,
+    not_equal: bool,
+}
+
+fn parse_pivot_label_filter(
+    properties: &HashMap<String, String>,
+    headers: &[String],
+) -> Result<Option<PivotLabelFilter>, HandlerError> {
+    let Some(spec) = pivot_property(properties, &["labelfilter"]) else {
+        return Ok(None);
+    };
+    if spec.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = spec.splitn(3, ':');
+    let (Some(field_name), Some(kind), Some(needle)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(HandlerError::InvalidArgument(format!(
+            "labelFilter must be 'field:type:value', got: '{}'",
+            spec
+        )));
+    };
+    let field = headers
+        .iter()
+        .position(|header| header == field_name.trim())
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(format!(
+                "labelFilter field '{}' not found in source headers",
+                field_name.trim()
+            ))
+        })?;
+    let needle = needle.to_string();
+    let (filter_type, custom_value, not_equal) = match kind.trim().to_ascii_lowercase().as_str() {
+        "beginswith" => ("captionBeginsWith", format!("{}*", needle), false),
+        "endswith" => ("captionEndsWith", format!("*{}", needle), false),
+        "contains" => ("captionContains", format!("*{}*", needle), false),
+        "doesnotcontain" => ("captionNotContains", format!("*{}*", needle), true),
+        "equals" => ("captionEqual", needle.clone(), false),
+        "notequals" => ("captionNotEqual", needle.clone(), true),
+        other => return Err(HandlerError::InvalidArgument(format!(
+            "labelFilter type must be one of contains/doesNotContain/beginsWith/endsWith/equals/notEquals, got: '{}'",
+            other
+        ))),
+    };
+    Ok(Some(PivotLabelFilter {
+        field,
+        filter_type,
+        needle,
+        custom_value,
+        not_equal,
+    }))
+}
+
+/// Persist C#'s `<filters>` shapes. Top-N crops cache records immediately;
+/// caption filters deliberately leave cache records intact so Excel can apply
+/// the predicate again when it refreshes from the source range.
+fn apply_pivot_add_filters(
+    xml: &str,
+    row_fields: &[usize],
+    value_field_count: usize,
+    top_n: Option<usize>,
+    label_filter: Option<&PivotLabelFilter>,
+) -> Result<String, HandlerError> {
+    let mut entries = Vec::new();
+    if let (Some(top_n), Some(&field)) = (top_n, row_fields.first()) {
+        if value_field_count > 0 {
+            entries.push(format!(
+                "<filter fld=\"{}\" type=\"count\" evalOrder=\"-1\" id=\"1\" iMeasureFld=\"0\"><autoFilter ref=\"A1\"><filterColumn colId=\"0\"><top10 val=\"{}\" filterVal=\"{}\"/></filterColumn></autoFilter></filter>",
+                field, top_n, top_n
+            ));
+        }
+    }
+    if let Some(label) = label_filter {
+        let id = entries.len() + 1;
+        let operator = if label.not_equal {
+            " operator=\"notEqual\""
+        } else {
+            ""
+        };
+        entries.push(format!(
+            "<filter fld=\"{}\" type=\"{}\" evalOrder=\"-1\" id=\"{}\" stringValue1=\"{}\"><autoFilter ref=\"A1\"><filterColumn colId=\"0\"><customFilters><customFilter val=\"{}\"{}/></customFilters></filterColumn></autoFilter></filter>",
+            label.field,
+            label.filter_type,
+            id,
+            escape_xml_attribute(&label.needle),
+            escape_xml_attribute(&label.custom_value),
+            operator
+        ));
+    }
+    if entries.is_empty() {
+        return Ok(xml.to_string());
+    }
+    let close = xml.rfind("</pivotTableDefinition>").ok_or_else(|| {
+        HandlerError::OperationFailed("malformed pivotTableDefinition".to_string())
+    })?;
+    let mut out = xml.to_string();
+    out.insert_str(
+        close,
+        &format!(
+            "<filters count=\"{}\">{}</filters>",
+            entries.len(),
+            entries.join("")
+        ),
+    );
+    Ok(out)
+}
+
+fn split_pivot_source(source: &str, default_sheet: &str) -> Result<(String, String), HandlerError> {
+    let trimmed = source.trim();
+    let (sheet, reference) = match trimmed.rsplit_once('!') {
+        Some((sheet, reference)) => (sheet.trim().trim_matches('\''), reference.trim()),
+        None => (default_sheet, trimmed),
+    };
+    if sheet.is_empty() || reference.is_empty() {
+        return Err(HandlerError::InvalidArgument(format!(
+            "invalid pivot source '{}'",
+            source
+        )));
+    }
+    Ok((sheet.to_string(), reference.replace('$', "")))
+}
+
+fn parse_pivot_range(reference: &str) -> Result<(CellRef, CellRef), HandlerError> {
+    let mut cells = reference.split(':');
+    let start = cells
+        .next()
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+        .and_then(CellRef::parse)
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(format!("invalid pivot source range '{}'", reference))
+        })?;
+    let end = cells
+        .next()
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+        .and_then(CellRef::parse)
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(format!("invalid pivot source range '{}'", reference))
+        })?;
+    if cells.next().is_some() || start.row > end.row || start.col > end.col {
+        return Err(HandlerError::InvalidArgument(format!(
+            "invalid pivot source range '{}'",
+            reference
+        )));
+    }
+    Ok((start, end))
+}
+
+fn parse_pivot_field_list(
+    raw: Option<&str>,
+    headers: &[String],
+    property: &str,
+) -> Result<Vec<usize>, HandlerError> {
+    raw.map(|raw| {
+        raw.split(',')
+            .filter(|field| !field.trim().is_empty())
+            .map(|field| pivot_field_index(field.trim(), headers, property))
+            .collect()
+    })
+    .transpose()
+    .map(|fields| fields.unwrap_or_default())
+}
+
+fn parse_pivot_data_fields(
+    raw: Option<&str>,
+    aggregate: Option<&str>,
+    headers: &[String],
+) -> Result<Vec<(usize, String)>, HandlerError> {
+    let default_aggregate = aggregate.unwrap_or("sum").trim().to_ascii_lowercase();
+    raw.map(|raw| {
+        raw.split(',')
+            .filter(|field| !field.trim().is_empty())
+            .map(|field| {
+                let (name, aggregate) = field.trim().split_once(':').unwrap_or((field.trim(), ""));
+                let aggregate = if aggregate.trim().is_empty() {
+                    default_aggregate.as_str()
+                } else {
+                    aggregate.trim()
+                }
+                .to_ascii_lowercase();
+                if !matches!(
+                    aggregate.as_str(),
+                    "sum"
+                        | "count"
+                        | "avg"
+                        | "max"
+                        | "min"
+                        | "product"
+                        | "stdev"
+                        | "stdevp"
+                        | "var"
+                        | "varp"
+                        | "countnums"
+                ) {
+                    return Err(HandlerError::InvalidArgument(format!(
+                        "unsupported pivot aggregate '{}'",
+                        aggregate
+                    )));
+                }
+                Ok((
+                    pivot_field_index(name.trim(), headers, "values")?,
+                    aggregate,
+                ))
+            })
+            .collect()
+    })
+    .transpose()
+    .map(|fields| fields.unwrap_or_default())
+}
+
+fn pivot_field_index(
+    name: &str,
+    headers: &[String],
+    property: &str,
+) -> Result<usize, HandlerError> {
+    headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(format!(
+                "pivot {} field '{}' is not present in source headers",
+                property, name
+            ))
+        })
+}
+
+pub(crate) fn next_pivot_cache_id(package: &OxmlPackage) -> Result<usize, HandlerError> {
+    let workbook = package
+        .read_part_xml("xl/workbook.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut max = 0;
+    for piece in workbook.split("cacheId=\"").skip(1) {
+        if let Some(end) = piece.find('"') {
+            max = max.max(piece[..end].parse::<usize>().unwrap_or(0));
+        }
+    }
+    Ok(max + 1)
+}
+
+/// Return an existing cache for the same worksheet source.  Excel shares a
+/// cache across compatible sibling pivots; the relationship from each pivot
+/// definition, rather than a part-number convention, is authoritative.
+fn find_matching_pivot_cache(
+    package: &OxmlPackage,
+    model: &WorkbookModel,
+    source_sheet: &str,
+    source_ref: &str,
+) -> Option<(String, usize)> {
+    let source = format!("{}!{}", source_sheet, source_ref);
+    model.pivot_tables.iter().find_map(|pivot| {
+        if !pivot
+            .source_range
+            .as_deref()
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&source))
+        {
+            return None;
+        }
+        let cache_id = pivot.cache_id.as_deref()?.parse::<usize>().ok()?;
+        let relationships = package.part_rels(&pivot.part_path).ok()?;
+        let relationship = relationships
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition")
+            .into_iter()
+            .next()?;
+        Some((
+            package.resolve_rel_target(&pivot.part_path, &relationship.target),
+            cache_id,
+        ))
+    })
+}
+
+pub(crate) fn build_pivot_cache_xml(
+    source_sheet: &str,
+    source_ref: &str,
+    headers: &[String],
+    rows: &[Vec<String>],
+    numeric_fields: &std::collections::HashSet<usize>,
+) -> (String, String, Vec<Vec<String>>) {
+    let mut field_items: Vec<Vec<String>> = vec![Vec::new(); headers.len()];
+    let mut field_indices: Vec<HashMap<String, usize>> = vec![HashMap::new(); headers.len()];
+    for row in rows {
+        for (field, value) in row.iter().enumerate() {
+            if numeric_fields.contains(&field) {
+                continue;
+            }
+            if !field_indices[field].contains_key(value) {
+                let index = field_items[field].len();
+                field_indices[field].insert(value.clone(), index);
+                field_items[field].push(value.clone());
+            }
+        }
+    }
+    let cache_fields = headers
+        .iter()
+        .enumerate()
+        .map(|(field, header)| {
+            if numeric_fields.contains(&field) {
+                return format!(
+                    "<cacheField name=\"{}\" numFmtId=\"0\"><sharedItems containsNumber=\"1\"/></cacheField>",
+                    escape_xml_attribute(header)
+                );
+            }
+            let items = field_items[field]
+                .iter()
+                .map(|value| format!("<s v=\"{}\"/>", escape_xml_attribute(value)))
+                .collect::<String>();
+            format!(
+                "<cacheField name=\"{}\" numFmtId=\"0\"><sharedItems count=\"{}\">{}</sharedItems></cacheField>",
+                escape_xml_attribute(header), field_items[field].len(), items
+            )
+        })
+        .collect::<String>();
+    let cache_xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><pivotCacheDefinition xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" refreshOnLoad=\"1\" enableRefresh=\"1\" refreshedBy=\"OfficeCLI\" recordCount=\"{}\" createdVersion=\"6\" refreshedVersion=\"6\" minRefreshableVersion=\"3\" r:id=\"rId1\"><cacheSource type=\"worksheet\"><worksheetSource ref=\"{}\" sheet=\"{}\"/></cacheSource><cacheFields count=\"{}\">{}</cacheFields></pivotCacheDefinition>",
+        rows.len(), escape_xml_attribute(source_ref), escape_xml_attribute(source_sheet), headers.len(), cache_fields
+    );
+    let records = rows
+        .iter()
+        .map(|row| {
+            let values = row
+                .iter()
+                .enumerate()
+                .map(|(field, value)| {
+                    if numeric_fields.contains(&field) {
+                        if value.is_empty() {
+                            "<m/>".to_string()
+                        } else {
+                            format!("<n v=\"{}\"/>", escape_xml_attribute(value))
+                        }
+                    } else {
+                        format!("<x v=\"{}\"/>", field_indices[field][value])
+                    }
+                })
+                .collect::<String>();
+            format!("<r>{}</r>", values)
+        })
+        .collect::<String>();
+    let records_xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><pivotCacheRecords xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"{}\">{}</pivotCacheRecords>",
+        rows.len(), records
+    );
+    (cache_xml, records_xml, field_items)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_pivot_table_xml(
+    name: &str,
+    cache_id: usize,
+    location: &str,
+    headers: &[String],
+    field_items: &[Vec<String>],
+    row_fields: &[usize],
+    col_fields: &[usize],
+    page_fields: &[usize],
+    data_fields: &[(usize, String)],
+    style: &str,
+) -> String {
+    let pivot_fields = headers
+        .iter()
+        .enumerate()
+        .map(|(field, _)| {
+            let is_data_only = data_fields.iter().any(|(index, _)| *index == field)
+                && !row_fields.contains(&field)
+                && !col_fields.contains(&field)
+                && !page_fields.contains(&field);
+            if is_data_only {
+                return "<pivotField dataField=\"1\" showAll=\"0\"/>".to_string();
+            }
+            let axis = if row_fields.contains(&field) {
+                " axis=\"axisRow\""
+            } else if col_fields.contains(&field) {
+                " axis=\"axisCol\""
+            } else if page_fields.contains(&field) {
+                " axis=\"axisPage\""
+            } else if data_fields.iter().any(|(index, _)| *index == field) {
+                " dataField=\"1\""
+            } else {
+                ""
+            };
+            let items = (0..field_items[field].len())
+                .map(|index| format!("<item x=\"{}\"/>", index))
+                .collect::<String>();
+            format!(
+                "<pivotField{} showAll=\"0\"><items count=\"{}\">{}</items></pivotField>",
+                axis,
+                field_items[field].len(),
+                items
+            )
+        })
+        .collect::<String>();
+    let axis_fields = |tag: &str, fields: &[usize]| {
+        if fields.is_empty() {
+            String::new()
+        } else {
+            let entries = fields
+                .iter()
+                .map(|field| format!("<field x=\"{}\"/>", field))
+                .collect::<String>();
+            format!("<{} count=\"{}\">{}</{}>", tag, fields.len(), entries, tag)
+        }
+    };
+    let page_fields_xml = if page_fields.is_empty() {
+        String::new()
+    } else {
+        let entries = page_fields
+            .iter()
+            .map(|field| format!("<pageField fld=\"{}\" hier=\"-1\"/>", field))
+            .collect::<String>();
+        format!(
+            "<pageFields count=\"{}\">{}</pageFields>",
+            page_fields.len(),
+            entries
+        )
+    };
+    let data_fields_xml = data_fields
+        .iter()
+        .map(|(field, aggregate)| {
+            let aggregate_xml = pivot_aggregate_xml(aggregate);
+            format!(
+                "<dataField name=\"{} of {}\" fld=\"{}\" subtotal=\"{}\"/>",
+                if aggregate == "avg" {
+                    "Average"
+                } else {
+                    aggregate
+                },
+                escape_xml_attribute(&headers[*field]),
+                field,
+                aggregate_xml
+            )
+        })
+        .collect::<String>();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><pivotTableDefinition xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" name=\"{}\" cacheId=\"{}\" dataCaption=\"Values\" updatedVersion=\"6\" minRefreshableVersion=\"3\" createdVersion=\"6\" showDrill=\"1\" useAutoFormatting=\"1\" applyNumberFormats=\"0\" applyBorderFormats=\"0\" applyFontFormats=\"0\" applyPatternFormats=\"0\" applyAlignmentFormats=\"0\" applyWidthHeightFormats=\"1\" multipleFieldFilters=\"1\"><location ref=\"{}\" firstHeaderRow=\"1\" firstDataRow=\"2\" firstDataCol=\"1\"/><pivotFields count=\"{}\">{}</pivotFields>{}{}{}<dataFields count=\"{}\">{}</dataFields><pivotTableStyleInfo name=\"{}\" showRowHeaders=\"1\" showColHeaders=\"1\" showRowStripes=\"0\" showColStripes=\"0\"/></pivotTableDefinition>",
+        escape_xml_attribute(name), cache_id, location, headers.len(), pivot_fields,
+        axis_fields("rowFields", row_fields), axis_fields("colFields", col_fields), page_fields_xml,
+        data_fields.len(), data_fields_xml, escape_xml_attribute(style)
+    )
+}
+
+fn pivot_aggregate_xml(aggregate: &str) -> &str {
+    match aggregate {
+        "avg" => "average",
+        "stdev" => "stdDev",
+        "stdevp" => "stdDevp",
+        "countnums" => "countNums",
+        other => other,
+    }
+}
+
+fn pivot_location_ref(
+    anchor: &CellRef,
+    source_columns: usize,
+    source_rows: usize,
+    row_fields: &[usize],
+    col_fields: &[usize],
+) -> String {
+    // A conservative footprint leaves enough room for every distinct source
+    // row/column while Excel refreshes the actual report into the location.
+    let width = source_columns.max(row_fields.len() + col_fields.len() + 1);
+    let height = (source_rows + 2).max(3);
+    let end = CellRef {
+        col: anchor.col + width.saturating_sub(1),
+        row: anchor.row + height.saturating_sub(1),
+    };
+    format!("{}:{}", anchor.to_string_ref(), end.to_string_ref())
+}
+
+pub(crate) fn insert_pivot_cache_entry(
+    xml: &str,
+    cache_id: usize,
+    relationship_id: &str,
+) -> Result<String, HandlerError> {
+    let entry = format!(
+        "<pivotCache cacheId=\"{}\" r:id=\"{}\"/>",
+        cache_id, relationship_id
+    );
+    if let Some(end) = xml.find("</pivotCaches>") {
+        let mut result = xml.to_string();
+        result.insert_str(end, &entry);
+        return Ok(result);
+    }
+    let close = xml
+        .rfind("</workbook>")
+        .ok_or_else(|| HandlerError::OperationFailed("malformed workbook.xml".to_string()))?;
+    let mut result = xml.to_string();
+    result.insert_str(close, &format!("<pivotCaches>{}</pivotCaches>", entry));
+    Ok(result)
+}
+
+fn insert_pivot_table_part(xml: &str, relationship_id: &str) -> Result<String, HandlerError> {
+    let xml = ensure_relationship_namespace(xml, "worksheet")?;
+    let entry = format!("<pivotTablePart r:id=\"{}\"/>", relationship_id);
+    if let Some(end) = xml.find("</pivotTableParts>") {
+        let mut result = xml.to_string();
+        result.insert_str(end, &entry);
+        let open = result[..end].rfind("<pivotTableParts").ok_or_else(|| {
+            HandlerError::OperationFailed("malformed pivotTableParts in worksheet".to_string())
+        })?;
+        let tag_end = result[open..]
+            .find('>')
+            .map(|offset| open + offset)
+            .ok_or_else(|| {
+                HandlerError::OperationFailed("malformed pivotTableParts in worksheet".to_string())
+            })?;
+        let current = result[open..=tag_end]
+            .split("count=\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .unwrap_or(0);
+        let old_tag = result[open..=tag_end].to_string();
+        result.replace_range(
+            open..=tag_end,
+            &old_tag.replacen(
+                &format!("count=\"{}\"", current),
+                &format!("count=\"{}\"", current + 1),
+                1,
+            ),
+        );
+        return Ok(result);
+    }
+    let close = xml
+        .rfind("</worksheet>")
+        .ok_or_else(|| HandlerError::OperationFailed("malformed worksheet XML".to_string()))?;
+    let mut result = xml.to_string();
+    result.insert_str(
+        close,
+        &format!("<pivotTableParts count=\"1\">{}</pivotTableParts>", entry),
+    );
+    Ok(result)
+}
+
+/// A relationship-bearing element requires a declared `r` prefix.  Some
+/// minimal producer worksheets omit it until their first related part is
+/// created, so add it lazily instead of writing a package that a namespace
+/// aware XML reader (including our own L2 get) cannot reopen.
+fn ensure_relationship_namespace(xml: &str, root_name: &str) -> Result<String, HandlerError> {
+    let root_start = xml
+        .find(&format!("<{}", root_name))
+        .ok_or_else(|| HandlerError::OperationFailed(format!("malformed {} XML", root_name)))?;
+    let root_end = xml[root_start..]
+        .find('>')
+        .map(|offset| root_start + offset)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("malformed {} XML", root_name)))?;
+    if xml[root_start..=root_end].contains("xmlns:r=") {
+        return Ok(xml.to_string());
+    }
+    let mut out = xml.to_string();
+    out.insert_str(
+        root_end,
+        " xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"",
+    );
+    Ok(out)
+}
+
+pub(crate) fn update_content_types_for_pivot(
+    package: &mut OxmlPackage,
+    pivot_path: &str,
+    cache_path: &str,
+    records_path: &str,
+) -> Result<(), HandlerError> {
+    let xml = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut out = xml;
+    for (path, content_type) in [
+        (
+            pivot_path,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml",
+        ),
+        (
+            cache_path,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml",
+        ),
+        (
+            records_path,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml",
+        ),
+    ] {
+        if !out.contains(&format!("PartName=\"/{}\"", path)) {
+            let closing = out.rfind("</Types>").ok_or_else(|| {
+                HandlerError::OperationFailed("malformed [Content_Types].xml".to_string())
+            })?;
+            out.insert_str(
+                closing,
+                &format!(
+                    "<Override PartName=\"/{}\" ContentType=\"{}\"/>",
+                    path, content_type
+                ),
+            );
+        }
+    }
+    package
+        .write_part_xml("[Content_Types].xml", &out)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))
 }
 
 /// Add a cell to a worksheet.
@@ -170,7 +1204,7 @@ fn add_cell(
     let row_num = cr.row;
     let row_pattern = format!("<row r=\"{}\"", row_num);
 
-    let modified_xml = if let Some(row_start) = xml.find(&row_pattern) {
+    let mut modified_xml = if let Some(row_start) = xml.find(&row_pattern) {
         // Existing row — insert cell at end of row
         // Find end of row opening tag
         let row_gt = xml[row_start..]
@@ -197,6 +1231,17 @@ fn add_cell(
         result.push_str(&xml[sd_end..]);
         result
     };
+
+    if let Some(formula) = formula
+        .as_deref()
+        .filter(|formula| formula::is_dynamic_array_formula(formula))
+    {
+        if let Some(result) = formula::evaluate_spill(formula, &model) {
+            crate::mutations::ensure_dynamic_spill_targets_clear(&xml, ref_str, &result, "")?;
+            modified_xml =
+                crate::mutations::persist_dynamic_spill(&modified_xml, ref_str, &result, "")?;
+        }
+    }
 
     package
         .write_part_xml(&part_path, &modified_xml)
@@ -771,7 +1816,7 @@ fn add_chart_real(
 }
 
 /// Find the next 1-based index for a part family (e.g. "xl/charts/chart" → 1, 2, ...).
-fn next_part_index(package: &OxmlPackage, family: &str) -> usize {
+pub(crate) fn next_part_index(package: &OxmlPackage, family: &str) -> usize {
     // Best-effort scan of part paths. We only need an unused index, so iterate
     // until we find one not present.
     let mut i = 1;
@@ -802,7 +1847,7 @@ fn part_dir(part: &str) -> String {
 /// Construct the relationship-part path for an OOXML package part.
 /// E.g. `xl/worksheets/sheet1.xml` becomes
 /// `xl/worksheets/_rels/sheet1.xml.rels`.
-fn relationships_part_path(part_path: &str) -> String {
+pub(crate) fn relationships_part_path(part_path: &str) -> String {
     match part_path.rsplit_once('/') {
         Some((directory, file_name)) => format!("{}/_rels/{}.rels", directory, file_name),
         None => format!("_rels/{}.rels", part_path),
@@ -810,7 +1855,7 @@ fn relationships_part_path(part_path: &str) -> String {
 }
 
 /// Compute a relative path from `from_dir` to `to_part`.
-fn relative_path(from_dir: &str, to_part: &str) -> String {
+pub(crate) fn relative_path(from_dir: &str, to_part: &str) -> String {
     // Simplified: both live under xl/, so we go up to xl/ then back down.
     // Count the number of '/' segments in from_dir to know how many ../ to add.
     let segs = from_dir.matches('/').count();
@@ -819,7 +1864,7 @@ fn relative_path(from_dir: &str, to_part: &str) -> String {
 }
 
 /// Insert a <Relationship/> into a .rels part, creating the part if missing.
-fn inject_relationship(
+pub(crate) fn inject_relationship(
     package: &mut OxmlPackage,
     rels_path: &str,
     rel_xml: &str,
@@ -848,7 +1893,7 @@ fn inject_relationship(
 }
 
 /// Find the next free rId in a .rels part (returns "rId1" if part missing).
-fn next_rel_id_in_part(package: &OxmlPackage, rels_path: &str) -> String {
+pub(crate) fn next_rel_id_in_part(package: &OxmlPackage, rels_path: &str) -> String {
     let Ok(xml) = package.read_part_xml(rels_path) else {
         return "rId1".to_string();
     };

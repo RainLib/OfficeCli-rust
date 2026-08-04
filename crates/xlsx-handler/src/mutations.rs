@@ -21,6 +21,13 @@ pub fn remove_element(
     package: &mut OxmlPackage,
     path: &str,
 ) -> Result<Option<String>, HandlerError> {
+    if let Some((sheet_name, pivot_index)) = parse_pivot_path(path) {
+        remove_pivot_table(package, &sheet_name, pivot_index)?;
+        return Ok(Some(format!(
+            "removed pivot table {} on {}",
+            pivot_index, sheet_name
+        )));
+    }
     let pc = navigation::parse_path(path)?;
 
     match (pc.sheet_name, pc.cell_ref) {
@@ -43,6 +50,299 @@ pub fn remove_element(
             "cell path requires a sheet name".to_string(),
         )),
     }
+}
+
+/// Parse the public C#-compatible `/Sheet/pivottable[N]` path.
+fn parse_pivot_path(path: &str) -> Option<(String, usize)> {
+    let normalized = path.trim_matches('/');
+    let (sheet, tail) = normalized.rsplit_once('/')?;
+    let tail = tail.to_ascii_lowercase();
+    let index = tail
+        .strip_prefix("pivottable[")
+        .or_else(|| tail.strip_prefix("pivot["))?
+        .strip_suffix(']')?
+        .parse::<usize>()
+        .ok()?;
+    (index > 0 && !sheet.is_empty()).then(|| (sheet.to_string(), index))
+}
+
+/// Remove a PivotTable and only prune its cache tree if no sibling still uses
+/// it.  Native Excel pivots may share a `pivotCacheDefinition`, so deleting a
+/// pivot must not blindly remove its cache/records or the surviving pivot is
+/// left with an unreadable relation tree.
+fn remove_pivot_table(
+    package: &mut OxmlPackage,
+    sheet_name: &str,
+    pivot_index: usize,
+) -> Result<(), HandlerError> {
+    const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let model = helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
+    let sheet = model
+        .sheets
+        .iter()
+        .find(|sheet| sheet.name == sheet_name)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
+    let worksheet_xml = package
+        .read_part_xml(&sheet.part_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let worksheet_doc = roxmltree::Document::parse(&worksheet_xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid worksheet XML: {}", error))
+    })?;
+    let parts_container = worksheet_doc
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "pivotTableParts")
+        .ok_or_else(|| HandlerError::PathNotFound(format!("pivottable[{}]", pivot_index)))?;
+    let pivot_nodes: Vec<_> = parts_container
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "pivotTablePart")
+        .collect();
+    let pivot_node = pivot_nodes
+        .get(pivot_index - 1)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("pivottable[{}]", pivot_index)))?;
+    let worksheet_rel_id = pivot_node
+        .attribute((REL_NS, "id"))
+        .or_else(|| pivot_node.attribute("r:id"))
+        .ok_or_else(|| HandlerError::OperationFailed("pivotTablePart has no r:id".to_string()))?
+        .to_string();
+    let worksheet_rels_path = relationships_part_path(&sheet.part_path);
+    let worksheet_rels = package
+        .read_part_xml(&worksheet_rels_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let pivot_path =
+        relationship_target_for_id(&worksheet_rels, &sheet.part_path, &worksheet_rel_id)?;
+    let pivot_rels_path = relationships_part_path(&pivot_path);
+    let pivot_rels = package
+        .read_part_xml(&pivot_rels_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let cache_path = relationship_target_by_type(&pivot_rels, &pivot_path, "pivotCacheDefinition")?;
+
+    // First unlink the definition from the worksheet and its owning relation.
+    let updated_worksheet = if pivot_nodes.len() == 1 {
+        remove_ranges(&worksheet_xml, vec![parts_container.range()])
+    } else {
+        let mut updated = remove_ranges(&worksheet_xml, vec![pivot_node.range()]);
+        let count = pivot_nodes.len() - 1;
+        if let Some(open_end) = updated[parts_container.range().start..]
+            .find('>')
+            .map(|offset| parts_container.range().start + offset + 1)
+        {
+            let opening = updated[parts_container.range().start..open_end].to_string();
+            let rewritten = if opening.contains("count=\"") {
+                let start = opening.find("count=\"").unwrap() + "count=\"".len();
+                let end = opening[start..]
+                    .find('"')
+                    .map(|offset| start + offset)
+                    .unwrap_or(start);
+                format!("{}{}{}", &opening[..start], count, &opening[end..])
+            } else {
+                opening.replacen('>', &format!(" count=\"{}\">", count), 1)
+            };
+            updated.replace_range(parts_container.range().start..open_end, &rewritten);
+        }
+        updated
+    };
+    package
+        .write_part_xml(&sheet.part_path, &updated_worksheet)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    package
+        .write_part_xml(
+            &worksheet_rels_path,
+            &remove_relationship_by_id(&worksheet_rels, &worksheet_rel_id)?,
+        )
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    remove_part_if_present(package, &pivot_path)?;
+    remove_part_if_present(package, &pivot_rels_path)?;
+    remove_content_type_part(package, &pivot_path)?;
+
+    // The deleted definition is now absent, so scanning all remaining pivot
+    // relationships gives an authoritative cache-sharing answer.
+    let cache_still_used = package
+        .list_parts()
+        .iter()
+        .filter(|part| part.starts_with("xl/pivotTables/") && part.ends_with(".xml"))
+        .any(|part| {
+            let rels_path = relationships_part_path(part);
+            package
+                .read_part_xml(&rels_path)
+                .ok()
+                .and_then(|rels| {
+                    relationship_target_by_type(&rels, part, "pivotCacheDefinition").ok()
+                })
+                .is_some_and(|target| target == cache_path)
+        });
+    if cache_still_used {
+        return Ok(());
+    }
+
+    let cache_rels_path = relationships_part_path(&cache_path);
+    let records_path = package
+        .read_part_xml(&cache_rels_path)
+        .ok()
+        .and_then(|rels| relationship_target_by_type(&rels, &cache_path, "pivotCacheRecords").ok());
+    let workbook_rels_path = "xl/_rels/workbook.xml.rels";
+    let workbook_rels = package
+        .read_part_xml(workbook_rels_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let cache_workbook_rel_id =
+        relationship_id_for_target(&workbook_rels, "xl/workbook.xml", &cache_path)?;
+    let workbook_xml = package
+        .read_part_xml("xl/workbook.xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let updated_workbook = remove_pivot_cache_entry(&workbook_xml, &cache_workbook_rel_id)?;
+    package
+        .write_part_xml("xl/workbook.xml", &updated_workbook)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    package
+        .write_part_xml(
+            workbook_rels_path,
+            &remove_relationship_by_id(&workbook_rels, &cache_workbook_rel_id)?,
+        )
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    remove_part_if_present(package, &cache_path)?;
+    remove_part_if_present(package, &cache_rels_path)?;
+    remove_content_type_part(package, &cache_path)?;
+    if let Some(records_path) = records_path {
+        remove_part_if_present(package, &records_path)?;
+        remove_content_type_part(package, &records_path)?;
+    }
+    Ok(())
+}
+
+fn relationship_target_for_id(
+    rels_xml: &str,
+    owner_part: &str,
+    relationship_id: &str,
+) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(rels_xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid relationships XML: {}", error))
+    })?;
+    let relationship = doc
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Relationship"
+                && node.attribute("Id") == Some(relationship_id)
+        })
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!("relationship {} not found", relationship_id))
+        })?;
+    let target = relationship
+        .attribute("Target")
+        .ok_or_else(|| HandlerError::OperationFailed("relationship has no Target".to_string()))?;
+    Ok(resolve_relationship_target(owner_part, target))
+}
+
+fn relationship_target_by_type(
+    rels_xml: &str,
+    owner_part: &str,
+    type_suffix: &str,
+) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(rels_xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid relationships XML: {}", error))
+    })?;
+    let relationship = doc
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Relationship"
+                && node
+                    .attribute("Type")
+                    .is_some_and(|relationship_type| relationship_type.ends_with(type_suffix))
+        })
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!("{} relationship not found", type_suffix))
+        })?;
+    let target = relationship
+        .attribute("Target")
+        .ok_or_else(|| HandlerError::OperationFailed("relationship has no Target".to_string()))?;
+    Ok(resolve_relationship_target(owner_part, target))
+}
+
+fn relationship_id_for_target(
+    rels_xml: &str,
+    owner_part: &str,
+    wanted_target: &str,
+) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(rels_xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid relationships XML: {}", error))
+    })?;
+    doc.descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Relationship"
+                && node.attribute("Target").is_some_and(|target| {
+                    resolve_relationship_target(owner_part, target) == wanted_target
+                })
+        })
+        .and_then(|node| node.attribute("Id"))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!("relationship to {} not found", wanted_target))
+        })
+}
+
+fn resolve_relationship_target(owner_part: &str, target: &str) -> String {
+    if let Some(absolute) = target.strip_prefix('/') {
+        return absolute.to_string();
+    }
+    let mut segments: Vec<&str> = owner_part
+        .rsplit_once('/')
+        .map(|(directory, _)| directory.split('/').collect())
+        .unwrap_or_default();
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+    segments.join("/")
+}
+
+fn remove_pivot_cache_entry(xml: &str, relationship_id: &str) -> Result<String, HandlerError> {
+    let doc = roxmltree::Document::parse(xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid workbook.xml: {}", error))
+    })?;
+    let cache = doc
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "pivotCache"
+                && (node.attribute((
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                    "id",
+                )) == Some(relationship_id)
+                    || node.attribute("r:id") == Some(relationship_id))
+        })
+        .ok_or_else(|| HandlerError::OperationFailed("pivot cache entry not found".to_string()))?;
+    Ok(remove_ranges(xml, vec![cache.range()]))
+}
+
+fn remove_part_if_present(package: &mut OxmlPackage, part_path: &str) -> Result<(), HandlerError> {
+    if package.has_part(part_path) {
+        package
+            .remove_part(part_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn remove_content_type_part(
+    package: &mut OxmlPackage,
+    part_path: &str,
+) -> Result<(), HandlerError> {
+    let content_types = package
+        .read_part_xml("[Content_Types].xml")
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let updated = remove_content_type_override(&content_types, part_path)?;
+    if updated != content_types {
+        package
+            .write_part_xml("[Content_Types].xml", &updated)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Remove a cell from a worksheet by finding and deleting its <c> element.
@@ -647,6 +947,10 @@ pub fn set_cell_properties(
         return apply_xlsx_find_replace(package, path, properties);
     }
 
+    if let Some((sheet_name, pivot_index)) = parse_pivot_path(path) {
+        return set_pivot_table_properties(package, &sheet_name, pivot_index, properties);
+    }
+
     let pc = navigation::parse_path(path)?;
 
     // Need both sheet name and cell reference for set operations
@@ -703,6 +1007,18 @@ pub fn set_cell_properties(
                     .transpose()?;
                 modified_xml =
                     set_cell_formula(&modified_xml, &cell_ref_str, &qualified, dynamic_cm, &p)?;
+                if formula::is_dynamic_array_formula(&qualified) {
+                    if let Some(result) = formula::evaluate_spill(&qualified, &model) {
+                        ensure_dynamic_spill_targets_clear(
+                            &modified_xml,
+                            &cell_ref_str,
+                            &result,
+                            &p,
+                        )?;
+                        modified_xml =
+                            persist_dynamic_spill(&modified_xml, &cell_ref_str, &result, &p)?;
+                    }
+                }
             }
             "image" => {}
             "alt" | "altText" | "alttext" | "description" | "image.alt" => {
@@ -801,6 +1117,1386 @@ pub fn set_cell_properties(
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
 
     Ok(unsupported)
+}
+
+/// Apply definition-local PivotTable settings without changing its cache
+/// schema.  C# has a wider field-area rebuild pipeline; keeping source/axis
+/// mutation out of this path until cache rebuilding is implemented prevents a
+/// structurally valid cache from being paired with incompatible pivot fields.
+fn set_pivot_table_properties(
+    package: &mut OxmlPackage,
+    sheet_name: &str,
+    pivot_index: usize,
+    properties: &HashMap<String, String>,
+) -> Result<Vec<String>, HandlerError> {
+    let model = helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
+    let pivot_path = helpers::pivot_part_path_for_sheet(package, sheet_name, pivot_index)?;
+    let pivot = model
+        .pivot_tables
+        .iter()
+        .find(|pivot| pivot.part_path == pivot_path)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("pivottable[{}]", pivot_index)))?;
+    let mut xml = package
+        .read_part_xml(&pivot_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let area_properties: HashMap<String, String> = properties
+        .iter()
+        .filter_map(|(key, value)| {
+            let canonical = canonical_pivot_property(key);
+            matches!(
+                canonical.as_str(),
+                "rows" | "cols" | "filters" | "values" | "aggregate"
+            )
+            .then_some((canonical, value.clone()))
+        })
+        .collect();
+    let mut refreshed_source = false;
+    if let Some(source) = properties.iter().find_map(|(key, value)| {
+        (canonical_pivot_property(key) == "source").then_some(value.as_str())
+    }) {
+        xml = refresh_pivot_cache_from_source(
+            package,
+            &model,
+            pivot,
+            &pivot_path,
+            source,
+            &area_properties,
+            &xml,
+        )?;
+        refreshed_source = true;
+    }
+    if !area_properties.is_empty() && !refreshed_source {
+        xml = rebuild_pivot_field_areas(&xml, pivot, &area_properties)?;
+    }
+    let mut root_attrs: Vec<(&str, String)> = Vec::new();
+    let mut style_attrs: Vec<(&str, String)> = Vec::new();
+    let mut unsupported = Vec::new();
+
+    for (key, value) in properties {
+        if let Some(index) = pivot_data_field_show_as_index(key) {
+            xml = set_pivot_data_field_show_as(&xml, index, value)?;
+            continue;
+        }
+        match canonical_pivot_property(key).as_str() {
+            "name" => {
+                let name = validate_pivot_name(value)?;
+                if model.pivot_tables.iter().any(|other| {
+                    other.part_path != pivot.part_path && other.name.eq_ignore_ascii_case(&name)
+                }) {
+                    return Err(HandlerError::InvalidArgument(format!(
+                        "pivot table name '{}' already exists",
+                        name
+                    )));
+                }
+                root_attrs.push(("name", name));
+            }
+            "style" => style_attrs.push(("name", value.clone())),
+            "showrowstripes" => {
+                style_attrs.push(("showRowStripes", pivot_bool(value)?.to_string()))
+            }
+            "showcolstripes" => {
+                style_attrs.push(("showColStripes", pivot_bool(value)?.to_string()))
+            }
+            "showrowheaders" => {
+                style_attrs.push(("showRowHeaders", pivot_bool(value)?.to_string()))
+            }
+            "showcolheaders" => {
+                style_attrs.push(("showColHeaders", pivot_bool(value)?.to_string()))
+            }
+            "showlastcolumn" => {
+                style_attrs.push(("showLastColumn", pivot_bool(value)?.to_string()))
+            }
+            "showdrill" => root_attrs.push(("showDrill", pivot_bool(value)?.to_string())),
+            "mergelabels" => root_attrs.push(("mergeItem", pivot_bool(value)?.to_string())),
+            "grandtotalcaption" => root_attrs.push(("grandTotalCaption", value.trim().to_string())),
+            "rowgrandtotals" => root_attrs.push(("rowGrandTotals", pivot_bool(value)?.to_string())),
+            "colgrandtotals" => root_attrs.push(("colGrandTotals", pivot_bool(value)?.to_string())),
+            "grandtotals" => {
+                let (row, col) = match value.trim().to_ascii_lowercase().as_str() {
+                    "both" | "on" | "true" | "1" | "yes" => (true, true),
+                    "none" | "off" | "false" | "0" | "no" => (false, false),
+                    "rows" => (true, false),
+                    "cols" | "columns" => (false, true),
+                    _ => {
+                        return Err(HandlerError::InvalidArgument(format!(
+                            "invalid grandTotals value '{}'",
+                            value
+                        )))
+                    }
+                };
+                root_attrs.push(("rowGrandTotals", row.to_string()));
+                root_attrs.push(("colGrandTotals", col.to_string()));
+            }
+            "layout" => match value.trim().to_ascii_lowercase().as_str() {
+                "compact" => {
+                    root_attrs.push(("compact", "1".to_string()));
+                    root_attrs.push(("compactData", "1".to_string()));
+                    root_attrs.push(("outline", "1".to_string()));
+                    root_attrs.push(("outlineData", "1".to_string()));
+                }
+                "outline" => {
+                    root_attrs.push(("compact", "0".to_string()));
+                    root_attrs.push(("compactData", "0".to_string()));
+                    root_attrs.push(("outline", "1".to_string()));
+                    root_attrs.push(("outlineData", "1".to_string()));
+                }
+                "tabular" => {
+                    root_attrs.push(("compact", "0".to_string()));
+                    root_attrs.push(("compactData", "0".to_string()));
+                    root_attrs.push(("outline", "0".to_string()));
+                    root_attrs.push(("outlineData", "0".to_string()));
+                }
+                _ => {
+                    return Err(HandlerError::InvalidArgument(format!(
+                        "invalid pivot layout '{}'; expected compact, outline, or tabular",
+                        value
+                    )))
+                }
+            },
+            "subtotals" | "defaultsubtotal" => {
+                let enabled = pivot_bool(value)?;
+                xml =
+                    set_all_pivot_field_attributes(&xml, "defaultSubtotal", &enabled.to_string())?;
+            }
+            "showdataas" => {
+                xml = set_pivot_show_data_as(&xml, value)?;
+            }
+            "repeatlabels" => {
+                xml = set_pivot_repeat_labels(&xml, pivot_bool(value)?)?;
+            }
+            "blankrows" => {
+                xml = set_pivot_blank_rows(&xml, pivot_bool(value)?)?;
+            }
+            // Field areas are rebuilt atomically above. A source refresh uses
+            // the new cache schema; definition-only edits use the existing
+            // one.
+            "rows" | "cols" | "filters" | "values" | "aggregate" => {}
+            "source" => {}
+            "sort" | "topn" | "labelfilter" | "calculatedfield" => unsupported.push(key.clone()),
+            _ => unsupported.push(key.clone()),
+        }
+    }
+    if !root_attrs.is_empty() {
+        xml = set_first_element_attributes(&xml, "pivotTableDefinition", &root_attrs)?;
+    }
+    if !style_attrs.is_empty() {
+        xml = set_or_insert_pivot_style(&xml, &style_attrs)?;
+    }
+    package
+        .write_part_xml(&pivot_path, &xml)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(unsupported)
+}
+
+fn canonical_pivot_property(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "src" => "source".to_string(),
+        "row" | "rowfield" | "rowfields" => "rows".to_string(),
+        "col" | "column" | "columns" | "colfield" | "colfields" | "columnfield"
+        | "columnfields" => "cols".to_string(),
+        "filter" | "filterfield" | "filterfields" => "filters".to_string(),
+        "value" | "valuefield" | "valuefields" => "values".to_string(),
+        "showcolumnstripes" | "bandedrows" => "showrowstripes".to_string(),
+        "bandedcols" | "bandedcolumns" => "showcolstripes".to_string(),
+        "showcolumnheaders" => "showcolheaders".to_string(),
+        "columngrandtotals" => "colgrandtotals".to_string(),
+        "repeatitemlabels" | "repeatalllabels" | "filldownlabels" => "repeatlabels".to_string(),
+        "insertblankrow" | "insertblankrows" | "blankrow" | "blankline" | "blanklines" => {
+            "blankrows".to_string()
+        }
+        key => key.to_string(),
+    }
+}
+
+fn validate_pivot_name(value: &str) -> Result<String, HandlerError> {
+    let name = value.trim();
+    if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
+        return Err(HandlerError::InvalidArgument(
+            "pivot name must be non-empty, contain no control characters, and be at most 255 characters"
+                .to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn pivot_bool(value: &str) -> Result<bool, HandlerError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(HandlerError::InvalidArgument(format!(
+            "invalid pivot boolean '{}'",
+            value
+        ))),
+    }
+}
+
+fn set_pivot_show_data_as(xml: &str, value: &str) -> Result<String, HandlerError> {
+    let modes: Vec<Option<&str>> = value
+        .split(',')
+        .map(|mode| pivot_show_data_as_ooxml(mode.trim()))
+        .collect::<Result<_, _>>()?;
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let mut ranges: Vec<Range<usize>> = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "dataField")
+        .map(|node| node.range())
+        .collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut out = xml.to_string();
+    for (index, range) in ranges.into_iter().enumerate().rev() {
+        let Some(mode) = modes.get(index) else {
+            continue;
+        };
+        out = remove_opening_tag_attributes(&out, range.clone(), &["showDataAs"])?;
+        if let Some(mode) = mode {
+            out = rewrite_opening_tag_attributes(
+                &out,
+                range,
+                &[("showDataAs", (*mode).to_string())],
+            )?;
+        }
+    }
+    Ok(out)
+}
+
+fn pivot_show_data_as_ooxml(value: &str) -> Result<Option<&'static str>, HandlerError> {
+    match value.to_ascii_lowercase().as_str() {
+        "" | "normal" => Ok(None),
+        "percent_of_total" | "percentoftotal" | "percent" => Ok(Some("percent")),
+        "percent_of_row" | "percentofrow" => Ok(Some("percentOfRow")),
+        "percent_of_col" | "percent_of_column" | "percentofcol" | "percentofcolumn" => {
+            Ok(Some("percentOfCol"))
+        }
+        "running_total" | "runningtotal" | "runtotal" => Ok(Some("runTotal")),
+        "difference" | "diff" | "percent_diff" | "percentdiff" | "index" => {
+            Err(HandlerError::InvalidArgument(format!(
+                "showDataAs '{}' is not yet supported by the renderer",
+                value
+            )))
+        }
+        _ => Err(HandlerError::InvalidArgument(format!(
+            "invalid showDataAs: '{}'. Valid: normal, percent_of_total, percent_of_row, percent_of_col, running_total",
+            value
+        ))),
+    }
+}
+
+fn pivot_data_field_show_as_index(key: &str) -> Option<usize> {
+    let lower = key.to_ascii_lowercase();
+    let suffix = ".showas";
+    let ordinal = lower
+        .strip_prefix("datafield")?
+        .strip_suffix(suffix)?
+        .parse::<usize>()
+        .ok()?;
+    (ordinal > 0).then_some(ordinal - 1)
+}
+
+/// Write-side counterpart to the `dataFieldN.showAs` values returned by Get.
+/// Unlike the positional `showDataAs=a,b` form, this changes one field and
+/// leaves every sibling data-field display mode untouched.
+fn set_pivot_data_field_show_as(
+    xml: &str,
+    index: usize,
+    value: &str,
+) -> Result<String, HandlerError> {
+    let mode = pivot_show_data_as_ooxml(value.trim())?;
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let field = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "dataField")
+        .nth(index)
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument(format!(
+                "dataField{}.showAs: index out of range",
+                index + 1
+            ))
+        })?;
+    let out = remove_opening_tag_attributes(xml, field.range(), &["showDataAs"])?;
+    if let Some(mode) = mode {
+        rewrite_opening_tag_attributes(&out, field.range(), &[("showDataAs", mode.to_string())])
+    } else {
+        Ok(out)
+    }
+}
+
+const PIVOT_REPEAT_LABELS_EXT_URI: &str = "{962EF5D1-5CA2-4c93-8EF4-DBF5C05439D2}";
+const PIVOT_X14_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+
+/// Update the Office 2010 pivot extension used by Excel's “Repeat All Item
+/// Labels” option without replacing unrelated extLst payloads from a producer.
+pub(crate) fn set_pivot_repeat_labels(xml: &str, enabled: bool) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let old_extensions: Vec<Range<usize>> = document
+        .descendants()
+        .filter(|node| {
+            node.is_element()
+                && node.tag_name().name() == "ext"
+                && node.attribute("uri") == Some(PIVOT_REPEAT_LABELS_EXT_URI)
+        })
+        .map(|node| node.range())
+        .collect();
+    let mut out = remove_ranges(xml, old_extensions);
+    if !enabled {
+        return Ok(out);
+    }
+    let extension = format!(
+        "<ext uri=\"{}\"><x14:pivotTableDefinition xmlns:x14=\"{}\" fillDownLabelsDefault=\"1\"/></ext>",
+        PIVOT_REPEAT_LABELS_EXT_URI, PIVOT_X14_NS
+    );
+    let document = roxmltree::Document::parse(&out)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    if let Some(ext_list) = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "extLst")
+    {
+        let end = out[ext_list.range()]
+            .rfind("</")
+            .map(|offset| ext_list.range().start + offset)
+            .ok_or_else(|| HandlerError::OperationFailed("malformed pivot extLst".to_string()))?;
+        out.insert_str(end, &extension);
+        return Ok(out);
+    }
+    let root = document.root_element();
+    let end = out[root.range()]
+        .rfind("</")
+        .map(|offset| root.range().start + offset)
+        .ok_or_else(|| HandlerError::OperationFailed("malformed pivot definition".to_string()))?;
+    out.insert_str(end, &format!("<extLst>{}</extLst>", extension));
+    Ok(out)
+}
+
+/// Set `insertBlankRow` on the outermost row-axis field, the OOXML location
+/// used by Excel for “Insert Blank Line After Each Item”.
+pub(crate) fn set_pivot_blank_rows(xml: &str, enabled: bool) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let row_field = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "rowFields")
+        .and_then(|rows| {
+            rows.children()
+                .find(|node| node.is_element() && node.tag_name().name() == "field")
+        });
+    let Some(row_field) = row_field else {
+        return Ok(xml.to_string());
+    };
+    let field_index = row_field
+        .attribute("x")
+        .or_else(|| row_field.attribute("idx"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| HandlerError::OperationFailed("invalid pivot row field".to_string()))?;
+    let pivot_fields = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "pivotFields")
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("pivot definition has no pivotFields".to_string())
+        })?;
+    let pivot_field = pivot_fields
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "pivotField")
+        .nth(field_index)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("pivot row field index is invalid".to_string())
+        })?;
+    if enabled {
+        rewrite_opening_tag_attributes(
+            xml,
+            pivot_field.range(),
+            &[("insertBlankRow", "1".to_string())],
+        )
+    } else {
+        remove_opening_tag_attributes(xml, pivot_field.range(), &["insertBlankRow"])
+    }
+}
+
+pub(crate) fn apply_pivot_display_options(
+    xml: &str,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    let option = |name: &str| {
+        properties
+            .iter()
+            .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
+    };
+    let mut out = xml.to_string();
+    if let Some(value) = option("repeatlabels")
+        .or_else(|| option("repeatitemlabels"))
+        .or_else(|| option("repeatalllabels"))
+        .or_else(|| option("filldownlabels"))
+    {
+        out = set_pivot_repeat_labels(&out, pivot_bool(value)?)?;
+    }
+    if let Some(value) = option("blankrows")
+        .or_else(|| option("insertblankrow"))
+        .or_else(|| option("insertblankrows"))
+        .or_else(|| option("blankrow"))
+        .or_else(|| option("blankline"))
+        .or_else(|| option("blanklines"))
+    {
+        out = set_pivot_blank_rows(&out, pivot_bool(value)?)?;
+    }
+    Ok(out)
+}
+
+/// Refresh a pivot cache from a replacement worksheet range.  A source change
+/// on a shared cache uses copy-on-write: siblings keep their original source
+/// and records while the edited PivotTable receives a fresh cache part and
+/// workbook-level cache id.
+///
+/// Header changes are supported. Existing field assignments retain their
+/// numeric field positions unless the same `set` provides a replacement
+/// `rows`/`cols`/`filters`/`values` property; narrowing a source therefore
+/// fails before any package write when an un-restated assignment would fall
+/// outside the new field count, matching the C# safety policy.
+fn refresh_pivot_cache_from_source(
+    package: &mut OxmlPackage,
+    model: &WorkbookModel,
+    pivot: &PivotTableDef,
+    pivot_path: &str,
+    source_spec: &str,
+    area_properties: &HashMap<String, String>,
+    pivot_xml: &str,
+) -> Result<String, HandlerError> {
+    let (source_sheet, source_ref) = parse_pivot_source_for_refresh(source_spec, pivot)?;
+    let (start, end) = parse_pivot_refresh_range(&source_ref)?;
+    if start.row >= end.row {
+        return Err(HandlerError::InvalidArgument(
+            "pivot source must include at least one data row".to_string(),
+        ));
+    }
+    let source = model
+        .sheets
+        .iter()
+        .find(|sheet| sheet.name == source_sheet)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", source_sheet)))?;
+    let headers: Vec<String> = (start.col..=end.col)
+        .map(|col| {
+            source
+                .cells
+                .get(&(start.row, col))
+                .map(|cell| cell.display_value.trim().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    if headers.is_empty() || headers.iter().any(String::is_empty) {
+        return Err(HandlerError::InvalidArgument(
+            "pivot source header row must contain a name for every column".to_string(),
+        ));
+    }
+    if headers.iter().enumerate().any(|(index, header)| {
+        headers[..index]
+            .iter()
+            .any(|earlier| earlier.eq_ignore_ascii_case(header))
+    }) {
+        return Err(HandlerError::InvalidArgument(
+            "pivot source headers must be unique".to_string(),
+        ));
+    }
+    let rows: Vec<Vec<String>> = ((start.row + 1)..=end.row)
+        .map(|row| {
+            (start.col..=end.col)
+                .map(|col| {
+                    source
+                        .cells
+                        .get(&(row, col))
+                        .map(|cell| cell.display_value.clone())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect();
+    let (row_fields, col_fields, page_fields, data_fields) =
+        refreshed_pivot_field_areas(pivot, &headers, area_properties)?;
+    let axis_fields: std::collections::HashSet<usize> = row_fields
+        .iter()
+        .chain(&col_fields)
+        .chain(&page_fields)
+        .copied()
+        .collect();
+    let numeric_fields: std::collections::HashSet<usize> = data_fields
+        .iter()
+        .map(|(field, _)| *field)
+        .filter(|field| {
+            !axis_fields.contains(field)
+                && rows
+                    .iter()
+                    .all(|row| row[*field].is_empty() || row[*field].parse::<f64>().is_ok())
+        })
+        .collect();
+    let (mut cache_xml, records_xml, field_items) = crate::add::build_pivot_cache_xml(
+        &source_sheet,
+        &source_ref,
+        &headers,
+        &rows,
+        &numeric_fields,
+    );
+
+    let pivot_rels_path = relationships_part_path(pivot_path);
+    let pivot_rels = package
+        .read_part_xml(&pivot_rels_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let old_cache_path =
+        relationship_target_by_type(&pivot_rels, pivot_path, "pivotCacheDefinition")?;
+    let referrers = count_pivot_cache_referrers(package, &old_cache_path);
+    let (cache_path, records_path, cache_id, cache_rel_id, is_copy_on_write) = if referrers > 1 {
+        let cache_index =
+            crate::add::next_part_index(package, "xl/pivotCache/pivotCacheDefinition");
+        let records_index = crate::add::next_part_index(package, "xl/pivotCache/pivotCacheRecords");
+        (
+            format!("xl/pivotCache/pivotCacheDefinition{}.xml", cache_index),
+            format!("xl/pivotCache/pivotCacheRecords{}.xml", records_index),
+            crate::add::next_pivot_cache_id(package)?,
+            "rId1".to_string(),
+            true,
+        )
+    } else {
+        let cache_rels_path = relationships_part_path(&old_cache_path);
+        let cache_rels = package
+            .read_part_xml(&cache_rels_path)
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let records_path =
+            relationship_target_by_type(&cache_rels, &old_cache_path, "pivotCacheRecords")?;
+        let records_rel_id = relationship_id_by_type(&cache_rels, "pivotCacheRecords")?;
+        (
+            old_cache_path,
+            records_path,
+            pivot
+                .cache_id
+                .as_deref()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("pivot cache ID is invalid".to_string())
+                })?,
+            records_rel_id,
+            false,
+        )
+    };
+    cache_xml = cache_xml.replace("r:id=\"rId1\"", &format!("r:id=\"{}\"", cache_rel_id));
+    package
+        .write_part_xml(&cache_path, &cache_xml)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    package
+        .write_part_xml(&records_path, &records_xml)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+
+    let mut updated_pivot_xml = rebuild_refreshed_pivot_definition(
+        pivot_xml,
+        pivot,
+        &headers,
+        &field_items,
+        &row_fields,
+        &col_fields,
+        &page_fields,
+        &data_fields,
+    )?;
+    if is_copy_on_write {
+        let records_index = records_path
+            .rsplit_once("pivotCacheRecords")
+            .and_then(|(_, tail)| tail.strip_suffix(".xml"))
+            .ok_or_else(|| HandlerError::OperationFailed("invalid records path".to_string()))?;
+        crate::add::inject_relationship(
+            package,
+            &relationships_part_path(&cache_path),
+            &format!(
+                "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords\" Target=\"pivotCacheRecords{}.xml\"/>",
+                records_index
+            ),
+        )?;
+        let cache_index = cache_path
+            .rsplit_once("pivotCacheDefinition")
+            .and_then(|(_, tail)| tail.strip_suffix(".xml"))
+            .ok_or_else(|| HandlerError::OperationFailed("invalid cache path".to_string()))?;
+        let workbook_rels_path = "xl/_rels/workbook.xml.rels";
+        let workbook_rel_id = crate::add::next_rel_id_in_part(package, workbook_rels_path);
+        crate::add::inject_relationship(
+            package,
+            workbook_rels_path,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition\" Target=\"pivotCache/pivotCacheDefinition{}.xml\"/>",
+                workbook_rel_id, cache_index
+            ),
+        )?;
+        let workbook_xml = package
+            .read_part_xml("xl/workbook.xml")
+            .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+        let workbook_xml =
+            crate::add::insert_pivot_cache_entry(&workbook_xml, cache_id, &workbook_rel_id)?;
+        package
+            .write_part_xml("xl/workbook.xml", &workbook_xml)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        let target = crate::add::relative_path("xl/pivotTables", &cache_path);
+        let pivot_rels =
+            rewrite_relationship_target_by_type(&pivot_rels, "pivotCacheDefinition", &target)?;
+        package
+            .write_part_xml(&pivot_rels_path, &pivot_rels)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        updated_pivot_xml = set_first_element_attributes(
+            &updated_pivot_xml,
+            "pivotTableDefinition",
+            &[("cacheId", cache_id.to_string())],
+        )?;
+        crate::add::update_content_types_for_pivot(
+            package,
+            pivot_path,
+            &cache_path,
+            &records_path,
+        )?;
+    }
+    Ok(updated_pivot_xml)
+}
+
+type PivotFieldAreas = (Vec<usize>, Vec<usize>, Vec<usize>, Vec<(usize, String)>);
+
+/// Resolve the field areas to apply after a source refresh. Existing areas
+/// keep their positional field references, while properties supplied in this
+/// same Set call are parsed against the replacement headers. This deliberately
+/// validates before writing cache XML so a narrowed source cannot leave a
+/// half-updated PivotTable behind.
+fn refreshed_pivot_field_areas(
+    pivot: &PivotTableDef,
+    headers: &[String],
+    properties: &HashMap<String, String>,
+) -> Result<PivotFieldAreas, HandlerError> {
+    let old_fields = |fields: &[i32], area: &str| -> Result<Vec<usize>, HandlerError> {
+        fields
+            .iter()
+            .filter(|field| **field >= 0)
+            .map(|field| {
+                let field = *field as usize;
+                (field < headers.len()).then_some(field).ok_or_else(|| {
+                    HandlerError::InvalidArgument(format!(
+                        "{} field index {} is out of range after source changed to {} column(s); restate {}= in the same set",
+                        area,
+                        field,
+                        headers.len(),
+                        area
+                    ))
+                })
+            })
+            .collect()
+    };
+    let rows = properties
+        .get("rows")
+        .map(|value| parse_cached_pivot_fields(value, headers, "rows"))
+        .transpose()?
+        .unwrap_or(old_fields(&pivot.row_fields, "rows")?);
+    let cols = properties
+        .get("cols")
+        .map(|value| parse_cached_pivot_fields(value, headers, "cols"))
+        .transpose()?
+        .unwrap_or(old_fields(&pivot.col_fields, "cols")?);
+    let filters = properties
+        .get("filters")
+        .map(|value| parse_cached_pivot_fields(value, headers, "filters"))
+        .transpose()?
+        .unwrap_or(old_fields(&pivot.page_fields, "filters")?);
+    let mut values = properties
+        .get("values")
+        .map(|value| parse_cached_pivot_values(value, headers, None))
+        .transpose()?
+        .unwrap_or_else(|| {
+            pivot
+                .data_fields
+                .iter()
+                .filter_map(|(_, aggregate, field)| {
+                    (*field >= 0).then_some((*field as usize, aggregate.clone()))
+                })
+                .collect()
+        });
+    if !properties.contains_key("values") {
+        for (field, _) in &values {
+            if *field >= headers.len() {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "values field index {} is out of range after source changed to {} column(s); restate values= in the same set",
+                    field,
+                    headers.len()
+                )));
+            }
+        }
+    }
+    if let Some(aggregate) = properties.get("aggregate") {
+        let aggregate = normalize_pivot_aggregate(aggregate)?;
+        for (_, value_aggregate) in &mut values {
+            *value_aggregate = aggregate.clone();
+        }
+    }
+    Ok((rows, cols, filters, values))
+}
+
+/// Replace only the schema-dependent definition children after the cache has
+/// been rebuilt. Root attributes, location, style, extLst and unknown producer
+/// extensions remain in place, which is materially safer than replacing the
+/// complete pivotTableDefinition XML.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_refreshed_pivot_definition(
+    xml: &str,
+    pivot: &PivotTableDef,
+    headers: &[String],
+    field_items: &[Vec<String>],
+    rows: &[usize],
+    cols: &[usize],
+    filters: &[usize],
+    values: &[(usize, String)],
+) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let pivot_fields = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "pivotFields")
+        .ok_or_else(|| {
+            HandlerError::OperationFailed("pivot definition has no pivotFields".to_string())
+        })?;
+    let entries = headers
+        .iter()
+        .enumerate()
+        .map(|(field, _)| {
+            let data_only = values.iter().any(|(index, _)| *index == field)
+                && !rows.contains(&field)
+                && !cols.contains(&field)
+                && !filters.contains(&field);
+            if data_only {
+                return "<pivotField dataField=\"1\" showAll=\"0\"/>".to_string();
+            }
+            let axis = if rows.contains(&field) {
+                " axis=\"axisRow\""
+            } else if cols.contains(&field) {
+                " axis=\"axisCol\""
+            } else if filters.contains(&field) {
+                " axis=\"axisPage\""
+            } else if values.iter().any(|(index, _)| *index == field) {
+                " dataField=\"1\""
+            } else {
+                ""
+            };
+            let items = field_items
+                .get(field)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(index, _)| format!("<item x=\"{}\"/>", index))
+                .collect::<String>();
+            let item_count = field_items.get(field).map_or(0, Vec::len);
+            format!(
+                "<pivotField{} showAll=\"0\"><items count=\"{}\">{}</items></pivotField>",
+                axis, item_count, items
+            )
+        })
+        .collect::<String>();
+    let replacement = format!(
+        "<pivotFields count=\"{}\">{}</pivotFields>",
+        headers.len(),
+        entries
+    );
+    let out = apply_replacements(xml, vec![(pivot_fields.range(), replacement)]);
+    let out = replace_pivot_field_area_elements(&out, rows, cols, filters, values, headers)?;
+    let out = restore_refreshed_data_field_show_as(&out, pivot, values)?;
+    let out = set_pivot_repeat_labels(&out, pivot.repeat_labels)?;
+    set_pivot_blank_rows(&out, pivot.blank_rows)
+}
+
+fn restore_refreshed_data_field_show_as(
+    xml: &str,
+    pivot: &PivotTableDef,
+    values: &[(usize, String)],
+) -> Result<String, HandlerError> {
+    let mut modes = Vec::with_capacity(values.len());
+    for (field, aggregate) in values {
+        let mode = pivot
+            .data_fields
+            .iter()
+            .enumerate()
+            .find(|(_, (_, old_aggregate, old_field))| {
+                *old_field == *field as i32 && old_aggregate.eq_ignore_ascii_case(aggregate)
+            })
+            .and_then(|(index, _)| pivot.data_field_show_as.get(index))
+            .cloned()
+            .flatten();
+        modes.push(mode);
+    }
+    if modes.iter().all(Option::is_none) {
+        return Ok(xml.to_string());
+    }
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let mut ranges: Vec<Range<usize>> = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "dataField")
+        .map(|node| node.range())
+        .collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut out = xml.to_string();
+    for (index, range) in ranges.into_iter().enumerate().rev() {
+        let Some(Some(mode)) = modes.get(index) else {
+            continue;
+        };
+        out = rewrite_opening_tag_attributes(&out, range, &[("showDataAs", mode.clone())])?;
+    }
+    Ok(out)
+}
+
+fn parse_pivot_source_for_refresh(
+    source: &str,
+    pivot: &PivotTableDef,
+) -> Result<(String, String), HandlerError> {
+    let source = source.trim();
+    if source.is_empty() || source.starts_with('[') {
+        return Err(HandlerError::InvalidArgument(
+            "pivot source must be a non-empty local worksheet range".to_string(),
+        ));
+    }
+    let (sheet, reference) = match source.rsplit_once('!') {
+        Some((sheet, reference)) => (sheet.trim().trim_matches('\''), reference.trim()),
+        None => (
+            pivot
+                .source_range
+                .as_deref()
+                .and_then(|source| source.rsplit_once('!').map(|(sheet, _)| sheet))
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("pivot cache has no worksheet source".to_string())
+                })?,
+            source,
+        ),
+    };
+    if sheet.is_empty() || reference.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "invalid pivot source".to_string(),
+        ));
+    }
+    Ok((sheet.to_string(), reference.replace('$', "")))
+}
+
+fn parse_pivot_refresh_range(reference: &str) -> Result<(CellRef, CellRef), HandlerError> {
+    let mut cells = reference.split(':');
+    let parse = |value: Option<&str>| {
+        value
+            .map(str::to_ascii_uppercase)
+            .as_deref()
+            .and_then(CellRef::parse)
+    };
+    let start = parse(cells.next()).ok_or_else(|| {
+        HandlerError::InvalidArgument(format!("invalid pivot source range '{}'", reference))
+    })?;
+    let end = parse(cells.next()).ok_or_else(|| {
+        HandlerError::InvalidArgument(format!("invalid pivot source range '{}'", reference))
+    })?;
+    if cells.next().is_some() || start.row > end.row || start.col > end.col {
+        return Err(HandlerError::InvalidArgument(format!(
+            "invalid pivot source range '{}'",
+            reference
+        )));
+    }
+    Ok((start, end))
+}
+
+fn count_pivot_cache_referrers(package: &OxmlPackage, cache_path: &str) -> usize {
+    package
+        .list_parts()
+        .iter()
+        .filter(|part| part.starts_with("xl/pivotTables/") && part.ends_with(".xml"))
+        .filter(|part| {
+            package
+                .read_part_xml(&relationships_part_path(part))
+                .ok()
+                .and_then(|rels| {
+                    relationship_target_by_type(&rels, part, "pivotCacheDefinition").ok()
+                })
+                .is_some_and(|target| target == cache_path)
+        })
+        .count()
+}
+
+fn relationship_id_by_type(rels_xml: &str, type_suffix: &str) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(rels_xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid relationships XML: {}", error))
+    })?;
+    document
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Relationship"
+                && node
+                    .attribute("Type")
+                    .is_some_and(|relationship_type| relationship_type.ends_with(type_suffix))
+        })
+        .and_then(|node| node.attribute("Id"))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!("{} relationship not found", type_suffix))
+        })
+}
+
+fn rewrite_relationship_target_by_type(
+    rels_xml: &str,
+    type_suffix: &str,
+    target: &str,
+) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(rels_xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid relationships XML: {}", error))
+    })?;
+    let relationship = document
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Relationship"
+                && node
+                    .attribute("Type")
+                    .is_some_and(|relationship_type| relationship_type.ends_with(type_suffix))
+        })
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(format!("{} relationship not found", type_suffix))
+        })?;
+    rewrite_opening_tag_attributes(
+        rels_xml,
+        relationship.range(),
+        &[("Target", target.to_string())],
+    )
+}
+
+/// Reassign existing cache fields to the pivot row/column/page/data areas.
+/// This changes only the definition; cacheFields and cacheRecords remain
+/// intact, so field names are validated against the cache's authoritative
+/// order and no stale records can be introduced.
+fn rebuild_pivot_field_areas(
+    xml: &str,
+    pivot: &crate::dom_types::PivotTableDef,
+    properties: &HashMap<String, String>,
+) -> Result<String, HandlerError> {
+    if pivot.cache_fields.is_empty() {
+        return Err(HandlerError::OperationFailed(
+            "pivot cache fields are unavailable; cannot rebuild pivot areas".to_string(),
+        ));
+    }
+    let rows = properties
+        .get("rows")
+        .map(|value| parse_cached_pivot_fields(value, &pivot.cache_fields, "rows"))
+        .transpose()?
+        .unwrap_or_else(|| {
+            pivot
+                .row_fields
+                .iter()
+                .map(|field| *field as usize)
+                .collect()
+        });
+    let cols = properties
+        .get("cols")
+        .map(|value| parse_cached_pivot_fields(value, &pivot.cache_fields, "cols"))
+        .transpose()?
+        .unwrap_or_else(|| {
+            pivot
+                .col_fields
+                .iter()
+                .map(|field| *field as usize)
+                .collect()
+        });
+    let filters = properties
+        .get("filters")
+        .map(|value| parse_cached_pivot_fields(value, &pivot.cache_fields, "filters"))
+        .transpose()?
+        .unwrap_or_else(|| {
+            pivot
+                .page_fields
+                .iter()
+                .map(|field| *field as usize)
+                .collect()
+        });
+    let values = properties
+        .get("values")
+        .map(|value| parse_cached_pivot_values(value, &pivot.cache_fields, None))
+        .transpose()?
+        .unwrap_or_else(|| {
+            pivot
+                .data_fields
+                .iter()
+                .filter(|(_, _, field)| *field >= 0)
+                .map(|(_, aggregate, field)| (*field as usize, aggregate.clone()))
+                .collect()
+        });
+    let values = if let Some(aggregate) = properties.get("aggregate") {
+        let aggregate = normalize_pivot_aggregate(aggregate)?;
+        values
+            .into_iter()
+            .map(|(field, _)| (field, aggregate.clone()))
+            .collect()
+    } else {
+        values
+    };
+    let field_count = pivot.cache_fields.len();
+    for field in rows
+        .iter()
+        .chain(&cols)
+        .chain(&filters)
+        .chain(values.iter().map(|(field, _)| field))
+    {
+        if *field >= field_count {
+            return Err(HandlerError::InvalidArgument(
+                "pivot field index out of range".to_string(),
+            ));
+        }
+    }
+    let mut out = rewrite_pivot_field_axis_attributes(xml, &rows, &cols, &filters, &values)?;
+    out = replace_pivot_field_area_elements(
+        &out,
+        &rows,
+        &cols,
+        &filters,
+        &values,
+        &pivot.cache_fields,
+    )?;
+    Ok(out)
+}
+
+fn parse_cached_pivot_fields(
+    value: &str,
+    headers: &[String],
+    property: &str,
+) -> Result<Vec<usize>, HandlerError> {
+    let mut fields = Vec::new();
+    for field in value.split(',').filter(|field| !field.trim().is_empty()) {
+        let name = field.trim();
+        let index = headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "pivot {} field '{}' is not present in cache headers",
+                    property, name
+                ))
+            })?;
+        if !fields.contains(&index) {
+            fields.push(index);
+        }
+    }
+    Ok(fields)
+}
+
+fn parse_cached_pivot_values(
+    value: &str,
+    headers: &[String],
+    default_aggregate: Option<&str>,
+) -> Result<Vec<(usize, String)>, HandlerError> {
+    let mut fields = Vec::new();
+    for field in value.split(',').filter(|field| !field.trim().is_empty()) {
+        let (name, aggregate) = field.trim().split_once(':').unwrap_or((field.trim(), ""));
+        let index = headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case(name.trim()))
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!(
+                    "pivot values field '{}' is not present in cache headers",
+                    name.trim()
+                ))
+            })?;
+        let aggregate = if aggregate.trim().is_empty() {
+            default_aggregate.unwrap_or("sum")
+        } else {
+            aggregate.trim()
+        };
+        fields.push((index, normalize_pivot_aggregate(aggregate)?));
+    }
+    Ok(fields)
+}
+
+fn normalize_pivot_aggregate(value: &str) -> Result<String, HandlerError> {
+    let aggregate = value.trim().to_ascii_lowercase();
+    if matches!(
+        aggregate.as_str(),
+        "sum"
+            | "count"
+            | "avg"
+            | "max"
+            | "min"
+            | "product"
+            | "stdev"
+            | "stdevp"
+            | "var"
+            | "varp"
+            | "countnums"
+    ) {
+        Ok(aggregate)
+    } else {
+        Err(HandlerError::InvalidArgument(format!(
+            "unsupported pivot aggregate '{}'",
+            value
+        )))
+    }
+}
+
+fn rewrite_pivot_field_axis_attributes(
+    xml: &str,
+    rows: &[usize],
+    cols: &[usize],
+    filters: &[usize],
+    values: &[(usize, String)],
+) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let mut ranges: Vec<Range<usize>> = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "pivotField")
+        .map(|node| node.range())
+        .collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut out = xml.to_string();
+    for (index, range) in ranges.into_iter().enumerate().rev() {
+        out = remove_opening_tag_attributes(&out, range.clone(), &["axis", "dataField"])?;
+        let axis = if rows.contains(&index) {
+            Some("axisRow")
+        } else if cols.contains(&index) {
+            Some("axisCol")
+        } else if filters.contains(&index) {
+            Some("axisPage")
+        } else {
+            None
+        };
+        let mut attributes = Vec::new();
+        if let Some(axis) = axis {
+            attributes.push(("axis", axis.to_string()));
+        }
+        if values.iter().any(|(field, _)| *field == index) {
+            attributes.push(("dataField", "1".to_string()));
+        }
+        if !attributes.is_empty() {
+            out = rewrite_opening_tag_attributes(&out, range, &attributes)?;
+        }
+    }
+    Ok(out)
+}
+
+fn replace_pivot_field_area_elements(
+    xml: &str,
+    rows: &[usize],
+    cols: &[usize],
+    filters: &[usize],
+    values: &[(usize, String)],
+    headers: &[String],
+) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let ranges: Vec<Range<usize>> = document
+        .descendants()
+        .filter(|node| {
+            node.is_element()
+                && matches!(
+                    node.tag_name().name(),
+                    "rowFields" | "colFields" | "pageFields" | "dataFields"
+                )
+        })
+        .map(|node| node.range())
+        .collect();
+    let mut out = remove_ranges(xml, ranges);
+    let fields = |tag: &str, values: &[usize]| {
+        (!values.is_empty()).then(|| {
+            let entries = values
+                .iter()
+                .map(|field| format!("<field x=\"{}\"/>", field))
+                .collect::<String>();
+            format!("<{} count=\"{}\">{}</{}>", tag, values.len(), entries, tag)
+        })
+    };
+    let pages = (!filters.is_empty()).then(|| {
+        let entries = filters
+            .iter()
+            .map(|field| format!("<pageField fld=\"{}\" hier=\"-1\"/>", field))
+            .collect::<String>();
+        format!(
+            "<pageFields count=\"{}\">{}</pageFields>",
+            filters.len(),
+            entries
+        )
+    });
+    let data_entries = values
+        .iter()
+        .map(|(field, aggregate)| {
+            let display = if aggregate == "avg" {
+                "Average"
+            } else {
+                aggregate
+            };
+            format!(
+                "<dataField name=\"{} of {}\" fld=\"{}\" subtotal=\"{}\"/>",
+                escape_pivot_xml_attribute(display),
+                escape_pivot_xml_attribute(&headers[*field]),
+                field,
+                pivot_aggregate_ooxml(aggregate)
+            )
+        })
+        .collect::<String>();
+    let area_xml = format!(
+        "{}{}{}<dataFields count=\"{}\">{}</dataFields>",
+        fields("rowFields", rows).unwrap_or_default(),
+        fields("colFields", cols).unwrap_or_default(),
+        pages.unwrap_or_default(),
+        values.len(),
+        data_entries
+    );
+    let anchor = out.find("</pivotFields>").ok_or_else(|| {
+        HandlerError::OperationFailed("pivot definition has no pivotFields".to_string())
+    })? + "</pivotFields>".len();
+    out.insert_str(anchor, &area_xml);
+    Ok(out)
+}
+
+fn pivot_aggregate_ooxml(aggregate: &str) -> &str {
+    match aggregate {
+        "avg" => "average",
+        "stdev" => "stdDev",
+        "stdevp" => "stdDevp",
+        "countnums" => "countNums",
+        other => other,
+    }
+}
+
+fn remove_opening_tag_attributes(
+    xml: &str,
+    node_range: Range<usize>,
+    names: &[&str],
+) -> Result<String, HandlerError> {
+    let opening_end = xml[node_range.clone()]
+        .find('>')
+        .map(|offset| node_range.start + offset + 1)
+        .ok_or_else(|| HandlerError::OperationFailed("malformed pivot XML tag".to_string()))?;
+    let opening = &xml[node_range.start..opening_end];
+    let mut rewritten = opening.to_string();
+    for name in names {
+        let needle = format!(" {}=\"", name);
+        while let Some(start) = rewritten.find(&needle) {
+            let value_start = start + needle.len();
+            let value_end = rewritten[value_start..]
+                .find('"')
+                .map(|offset| value_start + offset + 1)
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("malformed pivot attribute".to_string())
+                })?;
+            rewritten.replace_range(start..value_end, "");
+        }
+    }
+    let mut out = xml.to_string();
+    out.replace_range(node_range.start..opening_end, &rewritten);
+    Ok(out)
+}
+
+fn set_first_element_attributes(
+    xml: &str,
+    element_name: &str,
+    attributes: &[(&str, String)],
+) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let node = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == element_name)
+        .ok_or_else(|| HandlerError::OperationFailed(format!("missing {}", element_name)))?;
+    rewrite_opening_tag_attributes(xml, node.range(), attributes)
+}
+
+fn set_all_pivot_field_attributes(
+    xml: &str,
+    attribute: &str,
+    value: &str,
+) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    let mut ranges: Vec<Range<usize>> = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "pivotField")
+        .map(|node| node.range())
+        .collect();
+    ranges.sort_by(|left, right| right.start.cmp(&left.start));
+    let mut out = xml.to_string();
+    for range in ranges {
+        out = rewrite_opening_tag_attributes(&out, range, &[(attribute, value.to_string())])?;
+    }
+    Ok(out)
+}
+
+fn set_or_insert_pivot_style(
+    xml: &str,
+    attributes: &[(&str, String)],
+) -> Result<String, HandlerError> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|error| HandlerError::OperationFailed(format!("invalid pivot XML: {}", error)))?;
+    if let Some(node) = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "pivotTableStyleInfo")
+    {
+        return rewrite_opening_tag_attributes(xml, node.range(), attributes);
+    }
+    let root = document.root_element();
+    let root_xml = &xml[root.range()];
+    let closing = root_xml.rfind("</").ok_or_else(|| {
+        HandlerError::OperationFailed("malformed pivotTableDefinition XML".to_string())
+    })? + root.range().start;
+    let mut attrs = vec![
+        ("name", "PivotStyleLight16".to_string()),
+        ("showRowHeaders", "1".to_string()),
+        ("showColHeaders", "1".to_string()),
+        ("showRowStripes", "0".to_string()),
+        ("showColStripes", "0".to_string()),
+    ];
+    for (key, value) in attributes {
+        if let Some(existing) = attrs.iter_mut().find(|(existing, _)| *existing == *key) {
+            existing.1 = value.clone();
+        } else {
+            attrs.push((key, value.clone()));
+        }
+    }
+    let rendered = attrs
+        .iter()
+        .map(|(key, value)| format!(" {}=\"{}\"", key, escape_pivot_xml_attribute(value)))
+        .collect::<String>();
+    let mut out = xml.to_string();
+    out.insert_str(closing, &format!("<pivotTableStyleInfo{}/>", rendered));
+    Ok(out)
+}
+
+fn rewrite_opening_tag_attributes(
+    xml: &str,
+    node_range: Range<usize>,
+    attributes: &[(&str, String)],
+) -> Result<String, HandlerError> {
+    let opening_end = xml[node_range.clone()]
+        .find('>')
+        .map(|offset| node_range.start + offset + 1)
+        .ok_or_else(|| HandlerError::OperationFailed("malformed pivot XML tag".to_string()))?;
+    let opening = &xml[node_range.start..opening_end];
+    let self_closing = opening.ends_with("/>");
+    let suffix = if self_closing { "/>" } else { ">" };
+    let mut rewritten = opening.trim_end_matches(suffix).to_string();
+    for (name, value) in attributes {
+        let needle = format!("{}=\"", name);
+        if let Some(value_start) = rewritten.find(&needle).map(|index| index + needle.len()) {
+            let value_end = rewritten[value_start..]
+                .find('"')
+                .map(|offset| value_start + offset)
+                .ok_or_else(|| {
+                    HandlerError::OperationFailed("malformed pivot attribute".to_string())
+                })?;
+            rewritten.replace_range(value_start..value_end, &escape_pivot_xml_attribute(value));
+        } else {
+            rewritten.push_str(&format!(
+                " {}=\"{}\"",
+                name,
+                escape_pivot_xml_attribute(value)
+            ));
+        }
+    }
+    rewritten.push_str(suffix);
+    let mut out = xml.to_string();
+    out.replace_range(node_range.start..opening_end, &rewritten);
+    Ok(out)
+}
+
+fn escape_pivot_xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// Helper to detect namespacing prefix (e.g., "x:") used in worksheet XML.
@@ -914,6 +2610,75 @@ fn set_cell_formula(
         let cell_attributes = with_dynamic_cm("", dynamic_cm);
         insert_new_cell(xml, cell_ref, "", "", Some(formula), &cell_attributes, p)
     }
+}
+
+/// Materialize cached values for a calculated dynamic spill. The anchor keeps
+/// its formula; descendants are ordinary cache cells so non-Excel consumers
+/// can read the complete result before Excel recalculates the workbook.
+pub(crate) fn persist_dynamic_spill(
+    xml: &str,
+    anchor: &str,
+    result: &formula::FormulaResult,
+    p: &str,
+) -> Result<String, HandlerError> {
+    let formula::FormulaResult::Matrix(rows) = result else {
+        return Ok(xml.to_string());
+    };
+    let anchor = CellRef::parse(anchor)
+        .ok_or_else(|| HandlerError::InvalidPath("invalid dynamic spill anchor".to_string()))?;
+    let mut output = xml.to_string();
+    for (row_offset, values) in rows.iter().enumerate() {
+        for (column_offset, value) in values.iter().enumerate() {
+            if row_offset == 0 && column_offset == 0 {
+                continue;
+            }
+            let reference = CellRef {
+                row: anchor.row + row_offset,
+                col: anchor.col + column_offset,
+            }
+            .to_string_ref();
+            let cache = value.to_cell_value_text();
+            output = set_cell_value(&output, &reference, &cache, &[], p)?;
+        }
+    }
+    Ok(output)
+}
+
+pub(crate) fn ensure_dynamic_spill_targets_clear(
+    xml: &str,
+    anchor: &str,
+    result: &formula::FormulaResult,
+    p: &str,
+) -> Result<(), HandlerError> {
+    let formula::FormulaResult::Matrix(rows) = result else {
+        return Ok(());
+    };
+    let anchor = CellRef::parse(anchor)
+        .ok_or_else(|| HandlerError::InvalidPath("invalid dynamic spill anchor".to_string()))?;
+    for (row_offset, values) in rows.iter().enumerate() {
+        for (column_offset, _) in values.iter().enumerate() {
+            if row_offset == 0 && column_offset == 0 {
+                continue;
+            }
+            let reference = CellRef {
+                row: anchor.row + row_offset,
+                col: anchor.col + column_offset,
+            }
+            .to_string_ref();
+            let pattern = format!("<{}c r=\"{}\"", p, reference);
+            if let Some(start) = xml.find(&pattern) {
+                let end = find_cell_element_end(xml, start, p)?;
+                if !xml[start..end].trim_end().ends_with("/>") {
+                    return Err(HandlerError::OperationFailed(format!(
+                        "#SPILL! dynamic array at {} is blocked by {}",
+                        anchor.to_string_ref(),
+                        reference
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn set_in_cell_image(

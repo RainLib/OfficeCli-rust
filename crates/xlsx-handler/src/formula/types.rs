@@ -1,13 +1,18 @@
 //! Formula evaluator core types.
 
 /// Result of a formula evaluation. Can be numeric, string, boolean, error, or blank.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FormulaResult {
     Number(f64),
     Str(String),
     Bool(bool),
     Error(String),
+    /// A legacy one-dimensional numeric array.  Keep this variant for the
+    /// established aggregate/lookup evaluator while modern spill functions
+    /// use `Matrix` to retain both shape and scalar types.
     Array(Vec<f64>),
+    /// A rectangular dynamic-array result, in row-major order.
+    Matrix(Vec<Vec<FormulaResult>>),
     Blank,
 }
 
@@ -25,7 +30,7 @@ impl FormulaResult {
         matches!(self, Self::Error(_))
     }
     pub fn is_array(&self) -> bool {
-        matches!(self, Self::Array(_))
+        matches!(self, Self::Array(_) | Self::Matrix(_))
     }
     pub fn is_blank(&self) -> bool {
         matches!(self, Self::Blank)
@@ -46,6 +51,11 @@ impl FormulaResult {
             Self::Blank => 0.0,
             Self::Error(_) => 0.0,
             Self::Array(a) => a.first().copied().unwrap_or(0.0),
+            Self::Matrix(rows) => rows
+                .first()
+                .and_then(|row| row.first())
+                .map(FormulaResult::as_number)
+                .unwrap_or(0.0),
         }
     }
 
@@ -64,6 +74,11 @@ impl FormulaResult {
             Self::Error(e) => e.clone(),
             Self::Blank => String::new(),
             Self::Array(a) => a.first().map(|v| format_number(*v)).unwrap_or_default(),
+            Self::Matrix(rows) => rows
+                .first()
+                .and_then(|row| row.first())
+                .map(FormulaResult::as_string)
+                .unwrap_or_default(),
         }
     }
 
@@ -97,7 +112,30 @@ impl FormulaResult {
             Self::Error(e) => e.clone(),
             Self::Blank => "0".to_string(),
             Self::Array(a) => a.first().map(|v| format_number(*v)).unwrap_or_default(),
+            Self::Matrix(rows) => rows
+                .first()
+                .and_then(|row| row.first())
+                .map(FormulaResult::to_cell_value_text)
+                .unwrap_or_default(),
         }
+    }
+
+    /// Return a matrix preserving scalar types. Scalar values become 1×1;
+    /// legacy numeric arrays become an n×1 column for compatibility.
+    pub fn as_matrix(&self) -> Vec<Vec<FormulaResult>> {
+        match self {
+            Self::Matrix(rows) => rows.clone(),
+            Self::Array(values) => values
+                .iter()
+                .copied()
+                .map(|value| vec![Self::Number(value)])
+                .collect(),
+            value => vec![vec![value.clone()]],
+        }
+    }
+
+    pub fn matrix(rows: Vec<Vec<FormulaResult>>) -> Self {
+        Self::Matrix(rows)
     }
 }
 

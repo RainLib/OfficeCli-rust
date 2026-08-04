@@ -282,6 +282,19 @@ impl DocumentHandler for PptxHandler {
             ));
         }
         let mut package = self.package.borrow_mut();
+        if action.eq_ignore_ascii_case("embed-part") {
+            let payload = xml.ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "embed-part requires a JSON payload in XML".to_string(),
+                )
+            })?;
+            return crate::raw::embed_relationship_part(
+                &mut package,
+                part_path.trim_start_matches('/'),
+                xpath.trim(),
+                payload,
+            );
+        }
         let resolved = match resolve_raw_part_path(&package, part_path) {
             Ok(path) => path,
             Err(HandlerError::PathNotFound(_))

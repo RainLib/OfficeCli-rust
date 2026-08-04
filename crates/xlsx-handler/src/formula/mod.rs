@@ -31,3 +31,14 @@ pub fn evaluate_with_resolver(formula: &str, resolver: &dyn CellResolver) -> For
         Err(_) => FormulaResult::Error("#NAME?".to_string()),
     }
 }
+
+/// Evaluate a formula while retaining any dynamic-array matrix result.
+pub fn evaluate_spill(
+    formula: &str,
+    model: &crate::dom_types::WorkbookModel,
+) -> Option<FormulaResult> {
+    let resolver = WorkbookResolver::new(model);
+    parser::FormulaParser::new(formula, &resolver)
+        .ok()?
+        .evaluate_spill()
+}

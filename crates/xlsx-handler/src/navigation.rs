@@ -141,6 +141,18 @@ pub fn get_node_at_path(
 ) -> Result<DocumentNode, HandlerError> {
     let model = helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
 
+    if let Some((sheet_name, index)) = parse_pivot_path(path) {
+        let part_path = helpers::pivot_part_path_for_sheet(package, &sheet_name, index)?;
+        let pivot = model
+            .pivot_tables
+            .iter()
+            .find(|pivot| pivot.part_path == part_path)
+            .ok_or_else(|| HandlerError::PathNotFound(format!("pivottable[{}]", index)))?;
+        let mut node = crate::query::make_pivot_node(pivot);
+        node.path = format!("/{}/pivottable[{}]", sheet_name, index);
+        return Ok(node);
+    }
+
     let pc = parse_path(path)?;
 
     match (pc.sheet_name, pc.cell_ref, pc.property) {
@@ -313,6 +325,19 @@ pub fn get_node_at_path(
             prop, prop
         ))),
     }
+}
+
+fn parse_pivot_path(path: &str) -> Option<(String, usize)> {
+    let trimmed = path.trim_matches('/');
+    let (sheet, tail) = trimmed.rsplit_once('/')?;
+    let tail = tail.to_ascii_lowercase();
+    let index = tail
+        .strip_prefix("pivottable[")
+        .or_else(|| tail.strip_prefix("pivot["))?
+        .strip_suffix(']')?
+        .parse::<usize>()
+        .ok()?;
+    (index > 0 && !sheet.is_empty()).then(|| (sheet.to_string(), index))
 }
 
 fn cell_type_label(vt: &CellValueType) -> &'static str {

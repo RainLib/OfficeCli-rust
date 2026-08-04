@@ -667,6 +667,11 @@ fn parse_pivot_tables(package: &OxmlPackage) -> Vec<PivotTableDef> {
         let mut col_fields: Vec<i32> = Vec::new();
         let mut page_fields: Vec<i32> = Vec::new();
         let mut data_fields: Vec<(String, String, i32)> = Vec::new();
+        let mut data_field_show_as: Vec<Option<String>> = Vec::new();
+        let repeat_labels = xml.contains("fillDownLabelsDefault=\"1\"")
+            || xml.contains("fillDownLabelsDefault=\"true\"");
+        let blank_rows =
+            xml.contains("insertBlankRow=\"1\"") || xml.contains("insertBlankRow=\"true\"");
         // Track which "fields container" we're currently inside so that
         // nested <field idx="N"/> / <pageField fld="N"/> events route correctly.
         let mut container_scope: PivotFieldsContainer = PivotFieldsContainer::None;
@@ -741,6 +746,7 @@ fn parse_pivot_tables(package: &OxmlPackage) -> Vec<PivotTableDef> {
                             let mut df_name = String::new();
                             let mut df_func = "sum".to_string();
                             let mut df_field: i32 = 0;
+                            let mut df_show_as: Option<String> = None;
                             for attr in e.attributes().filter_map(|a| a.ok()) {
                                 let key = attr.key.as_ref();
                                 let val = String::from_utf8_lossy(attr.value.as_ref());
@@ -748,10 +754,12 @@ fn parse_pivot_tables(package: &OxmlPackage) -> Vec<PivotTableDef> {
                                     b"name" => df_name = val.to_string(),
                                     b"subtotal" => df_func = val.to_string(),
                                     b"fld" => df_field = val.parse().unwrap_or(0),
+                                    b"showDataAs" => df_show_as = Some(val.to_string()),
                                     _ => {}
                                 }
                             }
                             data_fields.push((df_name, df_func, df_field));
+                            data_field_show_as.push(df_show_as);
                         }
                         _ => {}
                     }
@@ -791,10 +799,58 @@ fn parse_pivot_tables(package: &OxmlPackage) -> Vec<PivotTableDef> {
             col_fields,
             page_fields,
             data_fields,
+            data_field_show_as,
+            repeat_labels,
+            blank_rows,
         });
     }
 
     pivot_tables
+}
+
+/// Resolve the Nth PivotTable referenced by one worksheet.  The public L2
+/// path is sheet-scoped (`/Sheet1/pivottable[1]`), while pivot definitions are
+/// stored in a separate package folder, so the worksheet's r:id relation is
+/// the authoritative bridge between those two views.
+pub(crate) fn pivot_part_path_for_sheet(
+    package: &OxmlPackage,
+    sheet_name: &str,
+    index: usize,
+) -> Result<String, HandlerError> {
+    if index == 0 {
+        return Err(HandlerError::InvalidArgument(
+            "pivottable indexes are 1-based".to_string(),
+        ));
+    }
+    let sheet = build_workbook_model(package)
+        .map_err(HandlerError::OperationFailed)?
+        .sheets
+        .into_iter()
+        .find(|sheet| sheet.name == sheet_name)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
+    let xml = package
+        .read_part_xml(&sheet.part_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let document = roxmltree::Document::parse(&xml).map_err(|error| {
+        HandlerError::OperationFailed(format!("invalid worksheet XML: {}", error))
+    })?;
+    const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let relationship_id = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "pivotTablePart")
+        .nth(index - 1)
+        .and_then(|node| {
+            node.attribute((REL_NS, "id"))
+                .or_else(|| node.attribute("r:id"))
+        })
+        .ok_or_else(|| HandlerError::PathNotFound(format!("pivottable[{}]", index)))?;
+    let relationships = package
+        .part_rels(&sheet.part_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let relationship = relationships.get(relationship_id).ok_or_else(|| {
+        HandlerError::OperationFailed(format!("relationship {} not found", relationship_id))
+    })?;
+    Ok(package.resolve_rel_target(&sheet.part_path, &relationship.target))
 }
 
 /// Which pivotFields container the parser is currently inside.
@@ -806,10 +862,13 @@ enum PivotFieldsContainer {
     Page,
 }
 
-/// Extract the `idx` attribute from a `<field idx="N"/>` event.
+/// Extract the pivot-field index from a `<field x="N"/>` event.
+///
+/// OOXML's rowFields/colFields use `x`; a few producer variants use `idx`,
+/// so accept both when reading an externally-authored package.
 fn read_field_idx(e: &quick_xml::events::BytesStart<'_>) -> Option<i32> {
     for attr in e.attributes().filter_map(|a| a.ok()) {
-        if attr.key.as_ref() == b"idx" {
+        if matches!(attr.key.as_ref(), b"x" | b"idx") {
             return String::from_utf8_lossy(attr.value.as_ref()).parse().ok();
         }
     }
@@ -962,7 +1021,31 @@ fn resolve_pivot_cache_via_rels(package: &OxmlPackage, pivot_part_path: &str) ->
         }
     }
     let raw = target?;
-    Some(normalize_part_target(&raw))
+    Some(resolve_part_target_from(pivot_part_path, &raw))
+}
+
+/// Resolve an OPC relationship target against its owning part.  Pivot cache
+/// definitions are normally referenced from `xl/pivotTables/*` with a target
+/// such as `../pivotCache/pivotCacheDefinition1.xml`; returning that raw
+/// target made the parser silently miss otherwise valid native pivots.
+fn resolve_part_target_from(owner_part: &str, target: &str) -> String {
+    if let Some(stripped) = target.strip_prefix('/') {
+        return stripped.to_string();
+    }
+    let mut segments: Vec<&str> = owner_part
+        .rsplit_once('/')
+        .map(|(directory, _)| directory.split('/').collect())
+        .unwrap_or_default();
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
 }
 
 /// Construct the path to the `_rels/pivotTableN.xml.rels` part for a given
@@ -973,16 +1056,6 @@ fn pivot_part_rels_path(pivot_part_path: &str) -> Option<String> {
     let dir = &pivot_part_path[..slash];
     let file = &pivot_part_path[slash + 1..];
     Some(format!("{}/_rels/{}.rels", dir, file))
-}
-
-/// Normalize a rels `Target` value into a package-relative path.
-/// Handles absolute (`/pivotCache/...`), relative (`pivotCacheDefinition1.xml`),
-/// and parent (`../pivotCache/...`) forms.
-fn normalize_part_target(target: &str) -> String {
-    if let Some(stripped) = target.strip_prefix('/') {
-        return stripped.to_string();
-    }
-    target.to_string()
 }
 
 /// Parse every ListObject (Excel "Table") from `xl/tables/tableN.xml` parts.
@@ -1253,18 +1326,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_target_handles_absolute_and_relative() {
+    fn resolve_target_handles_absolute_and_relative() {
         assert_eq!(
-            normalize_part_target("/pivotCache/x.xml"),
+            resolve_part_target_from("xl/pivotTables/pivotTable1.xml", "/pivotCache/x.xml"),
             "pivotCache/x.xml"
         );
         assert_eq!(
-            normalize_part_target("pivotCache/x.xml"),
-            "pivotCache/x.xml"
+            resolve_part_target_from("xl/pivotTables/pivotTable1.xml", "pivotCache/x.xml"),
+            "xl/pivotTables/pivotCache/x.xml"
         );
         assert_eq!(
-            normalize_part_target("../pivotCache/x.xml"),
-            "../pivotCache/x.xml"
+            resolve_part_target_from("xl/pivotTables/pivotTable1.xml", "../pivotCache/x.xml"),
+            "xl/pivotCache/x.xml"
         );
     }
 

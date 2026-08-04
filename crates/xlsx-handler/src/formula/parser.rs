@@ -41,15 +41,29 @@ impl<'a> FormulaParser<'a> {
 
     /// Parse and evaluate the formula.
     pub fn evaluate(&mut self) -> Option<FormulaResult> {
+        let result = self.evaluate_spill();
+        // Top-level arrays collapse to their spill anchor value when a scalar
+        // consumer evaluates them.  The full matrix remains available to
+        // modern functions while parsing their arguments.
+        match result {
+            Some(FormulaResult::Array(ref a)) if !a.is_empty() => Some(FormulaResult::Number(a[0])),
+            Some(FormulaResult::Matrix(ref rows)) => rows
+                .first()
+                .and_then(|row| row.first())
+                .cloned()
+                .or(Some(FormulaResult::Blank)),
+            other => other,
+        }
+    }
+
+    /// Evaluate without collapsing a dynamic array to its anchor. Worksheet
+    /// writers use this to persist a complete cached spill range.
+    pub fn evaluate_spill(&mut self) -> Option<FormulaResult> {
         let result = self.parse_expression();
         if self.pos != self.tokens.len() {
             return None; // unconsumed tokens
         }
-        // Top-level Array collapses to scalar (first element)
-        match result {
-            Some(FormulaResult::Array(ref a)) if !a.is_empty() => Some(FormulaResult::Number(a[0])),
-            other => other,
-        }
+        result
     }
 
     // ─── Precedence levels ────────────────────────────────────────────
@@ -254,14 +268,12 @@ impl<'a> FormulaParser<'a> {
             TokenType::Range => {
                 self.pos += 1;
                 let cells = self.resolver.expand_range(&tok.value);
-                let values: Vec<f64> = cells.iter().map(|(_, v)| v.as_number()).collect();
-                Some(FormulaResult::Array(values))
+                Some(range_cells_to_matrix(cells))
             }
             TokenType::SheetRange => {
                 self.pos += 1;
                 let cells = self.resolver.expand_range(&tok.value);
-                let values: Vec<f64> = cells.iter().map(|(_, v)| v.as_number()).collect();
-                Some(FormulaResult::Array(values))
+                Some(range_cells_to_matrix(cells))
             }
             TokenType::ArrayLit => {
                 self.pos += 1;
@@ -324,28 +336,60 @@ impl<'a> FormulaParser<'a> {
 
 fn parse_array_constant(body: &str) -> FormulaResult {
     let rows: Vec<&str> = body.split(';').collect();
-    let row_cells: Vec<Vec<&str>> = rows.iter().map(|r| r.split(',').collect()).collect();
-    let mut values = Vec::new();
-    for row in &row_cells {
-        for cell in row {
+    let max_columns = rows
+        .iter()
+        .map(|row| row.split(',').count())
+        .max()
+        .unwrap_or(1);
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut output_row = Vec::with_capacity(max_columns);
+        for cell in row.split(',') {
             let s = cell.trim();
             if s.is_empty() {
-                values.push(0.0);
+                output_row.push(FormulaResult::Blank);
             } else if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                // String cell in array — skip for numeric output
-                values.push(0.0);
+                output_row.push(FormulaResult::Str(s[1..s.len() - 1].replace("\"\"", "\"")));
             } else if s.eq_ignore_ascii_case("TRUE") {
-                values.push(1.0);
+                output_row.push(FormulaResult::Bool(true));
             } else if s.eq_ignore_ascii_case("FALSE") {
-                values.push(0.0);
+                output_row.push(FormulaResult::Bool(false));
             } else if let Ok(n) = s.parse::<f64>() {
-                values.push(n);
+                output_row.push(FormulaResult::Number(n));
             } else {
-                values.push(0.0);
+                output_row.push(FormulaResult::Error("#VALUE!".to_string()));
             }
         }
+        output_row.resize(max_columns, FormulaResult::Blank);
+        values.push(output_row);
     }
-    FormulaResult::Array(values)
+    FormulaResult::Matrix(values)
+}
+
+fn range_cells_to_matrix(cells: Vec<(String, FormulaResult)>) -> FormulaResult {
+    if cells.is_empty() {
+        return FormulaResult::Matrix(Vec::new());
+    }
+
+    let refs: Vec<_> = cells
+        .iter()
+        .filter_map(|(cell_ref, value)| {
+            parse_ref(cell_ref).map(|(column, row)| (row, col_to_index(&column), value.clone()))
+        })
+        .collect();
+    let (Some(min_row), Some(max_row), Some(min_col), Some(max_col)) = (
+        refs.iter().map(|(row, _, _)| *row).min(),
+        refs.iter().map(|(row, _, _)| *row).max(),
+        refs.iter().map(|(_, col, _)| *col).min(),
+        refs.iter().map(|(_, col, _)| *col).max(),
+    ) else {
+        return FormulaResult::Matrix(cells.into_iter().map(|(_, value)| vec![value]).collect());
+    };
+    let mut rows = vec![vec![FormulaResult::Blank; max_col - min_col + 1]; max_row - min_row + 1];
+    for (row, col, value) in refs {
+        rows[row - min_row][col - min_col] = value;
+    }
+    FormulaResult::Matrix(rows)
 }
 
 // ─── Comparison helper ──────────────────────────────────────────────────

@@ -4293,6 +4293,241 @@ fn test_batch_inlinedparts_replays_smartart_nested_rendered_drawing() {
 }
 
 #[test]
+fn test_batch_inlinedparts_accepts_table_cell_parent() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("inlinedparts_table_cell.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add", &p, "/body", "--type", "table", "--prop", "rows=1", "--prop", "cols=1",
+        ])
+        .assert()
+        .success();
+    let run = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape><v:imagedata r:id="rIdCellImage"/></v:shape></w:pict></w:r>"#;
+    let commands = serde_json::json!([{"command":"add","parent":"/body/tbl[1]/tr[1]/tc[1]","type":"inlinedparts","props":{
+        "runXml":run,
+        "part1.relId":"rIdCellImage","part1.data":"data:image/png;base64,AAECAw=="}}]).to_string();
+    officecli()
+        .args(["batch", &p, &commands])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let relationships = package.part_rels("word/document.xml").unwrap();
+    let image_id = relationships
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+        .into_iter()
+        .next()
+        .unwrap()
+        .id
+        .clone();
+    let document = package.read_part_xml("word/document.xml").unwrap();
+    assert!(document.contains(&format!("r:id=\"{}\"", image_id)));
+    assert!(document.contains("<w:tc"));
+}
+
+#[test]
+fn test_batch_inlinedparts_accepts_comment_paragraph_parent() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("inlinedparts_comment.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/p[1]",
+            "--type",
+            "comment",
+            "--prop",
+            "text=review",
+            "--prop",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    let run = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape><v:imagedata r:id="rIdCommentImage"/></v:shape></w:pict></w:r>"#;
+    let commands = serde_json::json!([{"command":"add","parent":"/comments/comment[@commentId=0]/p[1]","type":"inlinedparts","props":{
+        "runXml":run,
+        "part1.relId":"rIdCommentImage","part1.data":"data:image/png;base64,AAECAw=="}}]).to_string();
+    officecli()
+        .args(["batch", &p, &commands])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let relationships = package.part_rels("word/comments.xml").unwrap();
+    let image = relationships
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+        .into_iter()
+        .next()
+        .unwrap();
+    let comments = package.read_part_xml("word/comments.xml").unwrap();
+    assert!(comments.contains(&format!("r:id=\"{}\"", image.id)));
+    let image_part = package.resolve_rel_target("word/comments.xml", &image.target);
+    assert_eq!(
+        package.read_part_bytes(&image_part).unwrap().as_slice(),
+        &[0, 1, 2, 3]
+    );
+}
+
+#[test]
+fn test_batch_inlinedparts_accepts_footnote_and_endnote_paragraph_parents() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("inlinedparts_notes.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    for (root, selector, body) in [
+        (
+            "/footnotes",
+            "/w:footnotes",
+            r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Footnote</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
+        ),
+        (
+            "/endnotes",
+            "/w:endnotes",
+            r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="1"><w:p><w:r><w:t>Endnote</w:t></w:r></w:p></w:endnote></w:endnotes>"#,
+        ),
+    ] {
+        officecli()
+            .args(["raw-set", &p, root, selector, "replace", "--xml", body])
+            .assert()
+            .success();
+    }
+    let run = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape><v:imagedata r:id="rIdNoteImage"/></v:shape></w:pict></w:r>"#;
+    for note_root in ["footnotes", "endnotes"] {
+        let commands = serde_json::json!([{"command":"add","parent":format!("/{note_root}/1/p[1]"),"type":"inlinedparts","props":{
+            "runXml":run,
+            "part1.relId":"rIdNoteImage",
+            "part1.data":"data:image/png;base64,AAECAw=="}}]).to_string();
+        officecli()
+            .args(["batch", &p, &commands])
+            .assert()
+            .success();
+    }
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    for part in ["word/footnotes.xml", "word/endnotes.xml"] {
+        let relationships = package.part_rels(part).unwrap();
+        let image = relationships
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing image relationship in {part}: {:?}",
+                    relationships.all()
+                )
+            });
+        let notes = package.read_part_xml(part).unwrap();
+        assert!(notes.contains(&format!("r:id=\"{}\"", image.id)));
+        let image_part = package.resolve_rel_target(part, &image.target);
+        assert_eq!(
+            package.read_part_bytes(&image_part).unwrap().as_slice(),
+            &[0, 1, 2, 3]
+        );
+    }
+}
+
+#[test]
+fn test_dump_docx_root_replays_comment_and_notes_image_relationship_hosts() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_inlined_hosts_source.docx");
+    let target = tmp.path().join("dump_inlined_hosts_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    for (root, selector, body) in [
+        (
+            "/footnotes",
+            "/w:footnotes",
+            r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Footnote</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
+        ),
+        (
+            "/endnotes",
+            "/w:endnotes",
+            r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="1"><w:p><w:r><w:t>Endnote</w:t></w:r></w:p></w:endnote></w:endnotes>"#,
+        ),
+    ] {
+        officecli()
+            .args([
+                "raw-set",
+                &source_path,
+                root,
+                selector,
+                "replace",
+                "--xml",
+                body,
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args([
+            "add",
+            &source_path,
+            "/body/p[1]",
+            "--type",
+            "comment",
+            "--prop",
+            "text=Comment",
+            "--prop",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    let run = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape><v:imagedata r:id="rIdHostImage"/></v:shape></w:pict></w:r>"#;
+    let commands = serde_json::json!([
+        {"command":"add","parent":"/comments/comment[@commentId=0]/p[1]","type":"inlinedparts","props":{"runXml":run,"part1.relId":"rIdHostImage","part1.data":"data:image/png;base64,AAECAw=="}},
+        {"command":"add","parent":"/footnotes/1/p[1]","type":"inlinedparts","props":{"runXml":run,"part1.relId":"rIdHostImage","part1.data":"data:image/png;base64,AAECAw=="}},
+        {"command":"add","parent":"/endnotes/1/p[1]","type":"inlinedparts","props":{"runXml":run,"part1.relId":"rIdHostImage","part1.data":"data:image/png;base64,AAECAw=="}}
+    ])
+    .to_string();
+    officecli()
+        .args(["batch", &source_path, &commands])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&target_path, false).unwrap();
+    for part in [
+        "word/comments.xml",
+        "word/footnotes.xml",
+        "word/endnotes.xml",
+    ] {
+        let relationships = package.part_rels(part).unwrap();
+        let relationship = relationships
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+            .into_iter()
+            .next()
+            .unwrap();
+        let image_part = package.resolve_rel_target(part, &relationship.target);
+        assert_eq!(
+            package.read_part_bytes(&image_part).unwrap().as_slice(),
+            &[0, 1, 2, 3]
+        );
+    }
+}
+
+#[test]
 fn test_batch_inlinedparts_replays_activex_child_and_grandchild_graph() {
     let tmp = temp_dir();
     let path = tmp.path().join("inlinedparts_activex.docx");
@@ -4405,6 +4640,107 @@ fn test_batch_inlinedparts_replays_mixed_chart_image_and_ole_graph() {
     for stale in ["rIdChart", "rIdImage", "rIdOle"] {
         assert!(!document.contains(stale));
     }
+}
+
+#[test]
+fn test_dump_docx_root_recursively_replays_activex_and_smartart_graphs() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_recursive_graph_source.docx");
+    let target = tmp.path().join("dump_recursive_graph_target.docx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    let activex = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:control r:id="rIdControl"/></w:r>"#;
+    let diagram = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><w:drawing><dgm:relIds r:dm="rIdData"/></w:drawing></w:r>"#;
+    let chart_ole = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:drawing><c:chart r:id="rIdChart"/></w:drawing><w:pict><v:shape><o:OLEObject r:id="rIdOle"/></v:shape></w:pict></w:r>"#;
+    let commands = serde_json::json!([
+        {"command":"add","parent":"/body/p[1]","type":"inlinedparts","props":{
+            "runXml":activex,
+            "part1.relId":"rIdControl","part1.data":"data:application/vnd.ms-office.activeX+xml;base64,PGF4Om9jeCB4bWxuczpheD0idXJuOnRlc3QiIHhtbG5zOnI9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9vZmZpY2VEb2N1bWVudC8yMDA2L3JlbGF0aW9uc2hpcHMiIHI6aWQ9InJJZEJpbmFyeSIvPg==",
+            "part1.child1.relId":"rIdBinary","part1.child1.data":"data:application/vnd.ms-office.activeX+xml;base64,AAECAw==",
+            "part1.child1.gc1.relId":"rIdGrandchild","part1.child1.gc1.data":"data:application/vnd.ms-office.activeX;base64,BAUGBw=="}},
+        {"command":"add","parent":"/body/p[1]","type":"inlinedparts","props":{
+            "runXml":diagram,
+            "part1.relId":"rIdData","part1.data":"data:application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml;base64,PGRnbTpkYXRhTW9kZWxYTUwgeG1sbnM6ZGdtPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvZHJhd2luZ21sLzIwMDYvZGlhZ3JhbSIvPg==",
+            "part1.child1.relId":"rIdRendered","part1.child1.data":"data:application/vnd.ms-office.drawingml.diagramDrawing+xml;base64,PGRzcDpkcmF3aW5nIHhtbG5zOmRzcD0iaHR0cDovL3NjaGVtYXMubWljcm9zb2Z0LmNvbS9vZmZpY2UvZHJhd2luZy8yMDA4L2RpYWdyYW0iLz4="}},
+        {"command":"add","parent":"/body/p[1]","type":"inlinedparts","props":{
+            "runXml":chart_ole,
+            "part1.relId":"rIdChart","part1.data":"data:application/vnd.openxmlformats-officedocument.drawingml.chart+xml;base64,PGM6Y2hhcnRTcGFjZSB4bWxuczpjPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvZHJhd2luZ21sLzIwMDYvY2hhcnQiLz4=",
+            "part2.relId":"rIdOle","part2.data":"data:application/vnd.openxmlformats-officedocument.oleObject;base64,BAUGBw=="}}
+    ]).to_string();
+    officecli()
+        .args(["batch", &source_path, &commands])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(std::str::from_utf8(&dump)
+        .unwrap()
+        .contains("\"action\":\"embed-part\""));
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&target_path, false).unwrap();
+    let document_rels = package.part_rels("word/document.xml").unwrap();
+    let control = document_rels
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/control")
+        .into_iter()
+        .next()
+        .unwrap();
+    let control_part = package.resolve_rel_target("word/document.xml", &control.target);
+    let binary = package
+        .part_rels(&control_part)
+        .unwrap()
+        .get("rIdBinary")
+        .unwrap()
+        .clone();
+    let binary_part = package.resolve_rel_target(&control_part, &binary.target);
+    assert!(package
+        .part_rels(&binary_part)
+        .unwrap()
+        .get("rIdGrandchild")
+        .is_some());
+    let data = document_rels
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData")
+        .into_iter()
+        .next()
+        .unwrap();
+    let data_part = package.resolve_rel_target("word/document.xml", &data.target);
+    assert!(package
+        .part_rels(&data_part)
+        .unwrap()
+        .get("rIdRendered")
+        .is_some());
+    assert_eq!(
+        document_rels
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart")
+            .len(),
+        1
+    );
+    let ole = document_rels
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject")
+        .into_iter()
+        .next()
+        .unwrap();
+    let ole_part = package.resolve_rel_target("word/document.xml", &ole.target);
+    assert_eq!(
+        package.read_part_bytes(&ole_part).unwrap().as_slice(),
+        &[4, 5, 6, 7]
+    );
 }
 
 #[test]
@@ -5403,6 +5739,466 @@ fn test_docx_header_footer_content_supports_l2_set_add_remove_move_and_query() {
 }
 
 #[test]
+fn test_docx_move_rehomes_header_and_document_relationships_without_rid_collisions() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("cross_host_move.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body",
+            "--type",
+            "header",
+            "--prop",
+            "text=Header image",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/header[1]/p[1]",
+            "--type",
+            "image",
+            "--prop",
+            "payloadBase64=AAECAw==",
+            "--prop",
+            "format=png",
+        ])
+        .assert()
+        .success();
+    // Force a destination-local rId allocation before moving the header node.
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/p[1]",
+            "--type",
+            "image",
+            "--prop",
+            "payloadBase64=BAUGBw==",
+            "--prop",
+            "format=png",
+        ])
+        .assert()
+        .success();
+    let before = oxml::OxmlPackage::open(&p, false).unwrap();
+    let header_part = before.resolve_rel_target(
+        "word/document.xml",
+        &before
+            .part_rels("word/document.xml")
+            .unwrap()
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/header")
+            .into_iter()
+            .next()
+            .unwrap()
+            .target,
+    );
+    let header_image_id = before
+        .part_rels(&header_part)
+        .unwrap()
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+        .into_iter()
+        .next()
+        .unwrap()
+        .id
+        .clone();
+    officecli()
+        .args(["move", &p, "/header[1]/p[1]", "--target", "/body"])
+        .assert()
+        .success();
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let document_rels = package.part_rels("word/document.xml").unwrap();
+    let image_ids: Vec<_> = document_rels
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+        .into_iter()
+        .map(|rel| rel.id.clone())
+        .collect();
+    assert_eq!(image_ids.len(), 2);
+    assert!(!image_ids.contains(&header_image_id));
+    let document = package.read_part_xml("word/document.xml").unwrap();
+    assert!(image_ids
+        .iter()
+        .any(|id| document.contains(&format!("r:embed=\"{id}\""))));
+    assert!(!package
+        .read_part_xml(&header_part)
+        .unwrap()
+        .contains("Header image"));
+}
+
+#[test]
+fn test_docx_move_rehomes_header_to_footer_relationships_without_rid_collisions() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("header_footer_cross_move.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    for kind in ["header", "footer"] {
+        officecli()
+            .args(["add", &p, "/body", "--type", kind, "--prop", "text=Host"])
+            .assert()
+            .success();
+    }
+    for host in ["/header[1]/p[1]", "/footer[1]/p[1]"] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                host,
+                "--type",
+                "image",
+                "--prop",
+                "payloadBase64=AAECAw==",
+                "--prop",
+                "format=png",
+            ])
+            .assert()
+            .success();
+    }
+    let before = oxml::OxmlPackage::open(&p, false).unwrap();
+    let document_rels = before.part_rels("word/document.xml").unwrap();
+    let header_part = before.resolve_rel_target(
+        "word/document.xml",
+        &document_rels
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/header")
+            .into_iter()
+            .next()
+            .unwrap()
+            .target,
+    );
+    let header_id = before
+        .part_rels(&header_part)
+        .unwrap()
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+        .into_iter()
+        .next()
+        .unwrap()
+        .id
+        .clone();
+    officecli()
+        .args(["move", &p, "/header[1]/p[1]", "--target", "/footer[1]"])
+        .assert()
+        .success();
+    let after = oxml::OxmlPackage::open(&p, false).unwrap();
+    let footer_part = after.resolve_rel_target(
+        "word/document.xml",
+        &after
+            .part_rels("word/document.xml")
+            .unwrap()
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer")
+            .into_iter()
+            .next()
+            .unwrap()
+            .target,
+    );
+    let footer_rels = after.part_rels(&footer_part).unwrap();
+    assert_eq!(
+        footer_rels
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+            .len(),
+        2
+    );
+    let migrated_id = footer_rels
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+        .into_iter()
+        .find(|relationship| relationship.id != header_id)
+        .unwrap()
+        .id
+        .clone();
+    assert!(after
+        .read_part_xml(&footer_part)
+        .unwrap()
+        .contains(&format!("r:embed=\"{migrated_id}\"")));
+    assert!(!after.read_part_xml(&header_part).unwrap().contains("Host"));
+}
+
+#[test]
+fn test_docx_move_rehomes_comment_and_note_relationships_to_document() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("comment_note_cross_move.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/p[1]",
+            "--type",
+            "comment",
+            "--prop",
+            "text=Comment",
+            "--prop",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli().args(["raw-set", &p, "/footnotes", "/w:footnotes", "replace", "--xml", r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>"#]).assert().success();
+    let run = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape><v:imagedata r:id="rIdImage"/></v:shape></w:pict></w:r>"#;
+    for parent in ["/comments/comment[@commentId=0]/p[1]", "/footnotes/1/p[1]"] {
+        let commands = serde_json::json!([{"command":"add","parent":parent,"type":"inlinedparts","props":{"runXml":run,"part1.relId":"rIdImage","part1.data":"data:image/png;base64,AAECAw=="}}]).to_string();
+        officecli()
+            .args(["batch", &p, &commands])
+            .assert()
+            .success();
+        officecli()
+            .args(["move", &p, parent, "--target", "/body"])
+            .assert()
+            .success();
+    }
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    assert_eq!(
+        package
+            .part_rels("word/document.xml")
+            .unwrap()
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+            .len(),
+        2
+    );
+    assert!(!package
+        .read_part_xml("word/comments.xml")
+        .unwrap()
+        .contains("r:embed"));
+    assert!(!package
+        .read_part_xml("word/footnotes.xml")
+        .unwrap()
+        .contains("r:embed"));
+}
+
+#[test]
+fn test_docx_move_rehomes_document_relationships_to_comment_and_endnote() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("document_to_logical_move.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/p[1]",
+            "--type",
+            "comment",
+            "--prop",
+            "text=Comment",
+            "--prop",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    officecli().args(["raw-set", &p, "/endnotes", "/w:endnotes", "replace", "--xml", r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="1"><w:p><w:r><w:t>Endnote</w:t></w:r></w:p></w:endnote></w:endnotes>"#]).assert().success();
+    for target in ["/comments/comment[@commentId=0]", "/endnotes/1"] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "/body",
+                "--type",
+                "paragraph",
+                "--prop",
+                "text=Move",
+            ])
+            .assert()
+            .success();
+        let source = officecli()
+            .args([
+                "add",
+                &p,
+                "/body/p[2]",
+                "--type",
+                "image",
+                "--prop",
+                "payloadBase64=AAECAw==",
+                "--prop",
+                "format=png",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert!(!source.is_empty());
+        officecli()
+            .args(["move", &p, "/body/p[2]", "--target", target])
+            .assert()
+            .success();
+    }
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    for part in ["word/comments.xml", "word/endnotes.xml"] {
+        assert_eq!(
+            package
+                .part_rels(part)
+                .unwrap()
+                .by_type(
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+                )
+                .len(),
+            1
+        );
+        assert!(package.read_part_xml(part).unwrap().contains("r:embed"));
+    }
+}
+
+#[test]
+fn test_docx_move_reparents_relationship_runs_through_every_non_body_host() {
+    fn append_image_part(path: &str, parent: &str) {
+        let run = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape><v:imagedata r:id="rIdSeed"/></v:shape></w:pict></w:r>"#;
+        let commands = serde_json::json!([{
+            "command": "add",
+            "parent": parent,
+            "type": "inlinedparts",
+            "props": {
+                "runXml": run,
+                "part1.relId": "rIdSeed",
+                "part1.data": "data:image/png;base64,AAECAw=="
+            }
+        }])
+        .to_string();
+        officecli()
+            .args(["batch", path, &commands])
+            .assert()
+            .success();
+    }
+
+    let tmp = temp_dir();
+    let path = tmp.path().join("all_non_body_host_moves.docx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    for kind in ["header", "footer"] {
+        officecli()
+            .args(["add", &p, "/body", "--type", kind, "--prop", "text=Host"])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/body/p[1]",
+            "--type",
+            "comment",
+            "--prop",
+            "text=Comment host",
+            "--prop",
+            "author=Ada",
+        ])
+        .assert()
+        .success();
+    for (part, root, xml) in [
+        (
+            "/footnotes",
+            "/w:footnotes",
+            r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Footnote host</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
+        ),
+        (
+            "/endnotes",
+            "/w:endnotes",
+            r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="1"><w:p><w:r><w:t>Endnote host</w:t></w:r></w:p></w:endnote></w:endnotes>"#,
+        ),
+    ] {
+        officecli()
+            .args(["raw-set", &p, part, root, "replace", "--xml", xml])
+            .assert()
+            .success();
+    }
+
+    // Give every target host pre-existing local relationships. The increasing
+    // counts force each re-parent step to allocate a non-conflicting rId and
+    // rewrite both the image and external-link attributes in the moved run.
+    for (parent, count) in [
+        ("/comments/comment[@commentId=0]/p[1]", 2),
+        ("/footer[1]/p[1]", 4),
+        ("/footnotes/1/p[1]", 6),
+        ("/endnotes/1/p[1]", 8),
+    ] {
+        for _ in 0..count {
+            append_image_part(&p, parent);
+        }
+    }
+
+    let moving_run = r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:pict><v:shape><v:imagedata r:id="rIdImage"/></v:shape></w:pict><w:drawing><a:hlinkClick r:id="rIdExternal"/></w:drawing></w:r>"#;
+    let commands = serde_json::json!([{
+        "command": "add",
+        "parent": "/header[1]/p[1]",
+        "type": "inlinedparts",
+        "props": {
+            "runXml": moving_run,
+            "part1.relId": "rIdImage",
+            "part1.data": "data:image/png;base64,BAUGBw==",
+            "ext1.relId": "rIdExternal",
+            "ext1.type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+            "ext1.target": "https://example.test/moved"
+        }
+    }])
+    .to_string();
+    officecli()
+        .args(["batch", &p, &commands])
+        .assert()
+        .success();
+
+    // The run starts with rId1/rId2 in header.xml, then crosses every
+    // relationship-owning host. These explicit paragraph targets also ensure
+    // a run is never inserted directly under a comment/note root.
+    for (source, target) in [
+        (
+            "/header[1]/p[1]/r[2]",
+            "/comments/comment[@commentId=0]/p[1]",
+        ),
+        (
+            "/comments/comment[@commentId=0]/p[1]/r[4]",
+            "/footer[1]/p[1]",
+        ),
+        ("/footer[1]/p[1]/r[6]", "/footnotes/1/p[1]"),
+        ("/footnotes/1/p[1]/r[8]", "/endnotes/1/p[1]"),
+        ("/endnotes/1/p[1]/r[10]", "/header[1]/p[1]"),
+    ] {
+        officecli()
+            .args(["move", &p, source, "--target", target])
+            .assert()
+            .success();
+    }
+
+    let package = oxml::OxmlPackage::open(&p, false).unwrap();
+    let document_rels = package.part_rels("word/document.xml").unwrap();
+    let header_part = package.resolve_rel_target(
+        "word/document.xml",
+        &document_rels
+            .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/header")
+            .into_iter()
+            .next()
+            .unwrap()
+            .target,
+    );
+    let header_xml = package.read_part_xml(&header_part).unwrap();
+    let header_rels = package.part_rels(&header_part).unwrap();
+    let image = header_rels
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+        .into_iter()
+        .find(|relationship| header_xml.contains(&format!("r:id=\"{}\"", relationship.id)))
+        .unwrap();
+    let link = header_rels
+        .by_type("http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink")
+        .into_iter()
+        .find(|relationship| header_xml.contains(&format!("r:id=\"{}\"", relationship.id)))
+        .unwrap();
+    assert_eq!(link.target, "https://example.test/moved");
+    assert!(link.target_mode.eq_ignore_ascii_case("external"));
+    assert!(image.id != "rId1");
+    for part in [
+        "word/comments.xml",
+        "word/footer1.xml",
+        "word/footnotes.xml",
+        "word/endnotes.xml",
+    ] {
+        assert!(!package
+            .read_part_xml(part)
+            .unwrap()
+            .contains("https://example.test/moved"));
+    }
+}
+
+#[test]
 fn test_docx_header_footer_typed_image_chart_and_hyperlink_use_own_relationship_parts() {
     let tmp = temp_dir();
     let path = tmp.path().join("header_footer_typed_media.docx");
@@ -5564,6 +6360,64 @@ fn test_dump_xlsx_batch_replays_into_fresh_workbook() {
 }
 
 #[test]
+fn test_dump_xlsx_batch_replays_recursive_chart_and_drawing_relationships() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_chart_source.xlsx");
+    let target = tmp.path().join("dump_chart_target.xlsx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &source_path,
+            "/Sheet1",
+            "--type",
+            "chart",
+            "--prop",
+            "title=Recursive chart",
+            "--prop",
+            "categories=A1:A3",
+            "--prop",
+            "values=B1:B3",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dump_text = std::str::from_utf8(&dump).unwrap();
+    assert!(dump_text.contains("xl/drawings/drawing1.xml"));
+    assert!(dump_text.contains("xl/charts/chart1.xml"));
+
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, dump_text])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &target_path, "xl/charts/chart1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Recursive chart"));
+    officecli()
+        .args(["raw", &target_path, "xl/drawings/_rels/drawing1.xml.rels"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("charts/chart1.xml"));
+}
+
+#[test]
 fn test_dump_xlsx_batch_creates_missing_worksheets() {
     let tmp = temp_dir();
     let source = tmp.path().join("dump_workbook_source.xlsx");
@@ -5697,6 +6551,61 @@ fn test_dump_pptx_batch_replays_into_fresh_deck() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Round trip"));
+}
+
+#[test]
+fn test_dump_pptx_batch_replays_recursive_chart_relationships() {
+    let tmp = temp_dir();
+    let source = tmp.path().join("dump_chart_source.pptx");
+    let target = tmp.path().join("dump_chart_target.pptx");
+    let source_path = source.to_string_lossy().to_string();
+    let target_path = target.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &source_path])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &source_path,
+            "/slide[1]",
+            "--type",
+            "chart",
+            "--prop",
+            "title=Recursive chart",
+            "--prop",
+            "values=2,4,8",
+        ])
+        .assert()
+        .success();
+    let dump = officecli()
+        .args(["dump", &source_path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dump_text = std::str::from_utf8(&dump).unwrap();
+    assert!(dump_text.contains("ppt/charts/chart1.xml"));
+
+    officecli()
+        .args(["create", &target_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &target_path, dump_text])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &target_path, "ppt/charts/chart1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Recursive chart"));
+    officecli()
+        .args(["raw", &target_path, "ppt/slides/_rels/slide1.xml.rels"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("../charts/chart1.xml"));
 }
 
 #[test]
@@ -6201,8 +7110,8 @@ fn test_xlsx_modern_formula_ooxml_round_trip() {
             "--type-name",
             "cell",
             "--properties",
-            "ref=A1",
-            "formula=SEQUENCE(2)",
+            "ref=C1",
+            "formula=SEQUENCE(2,2)",
         ])
         .assert()
         .success();
@@ -6214,9 +7123,18 @@ fn test_xlsx_modern_formula_ooxml_round_trip() {
         .args(["raw", &p, "xl/worksheets/sheet1.xml"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("_xlfn.SEQUENCE(2)"))
+        .stdout(predicate::str::contains("_xlfn.SEQUENCE(2,2)"))
         .stdout(predicate::str::contains("cm=\"1\""))
-        .stdout(predicate::str::contains("t=\"array\" ref=\"A1\""))
+        .stdout(predicate::str::contains("t=\"array\" ref=\"C1\""))
+        .stdout(predicate::str::contains(
+            r#"<c r="D1"><v>2.00000000000000</v>"#,
+        ))
+        .stdout(predicate::str::contains(
+            r#"<c r="C2"><v>3.00000000000000</v>"#,
+        ))
+        .stdout(predicate::str::contains(
+            r#"<c r="D2"><v>4.00000000000000</v>"#,
+        ))
         .stdout(predicate::str::contains(
             r#"<c r="B1" cm="1"><f t="array" ref="B1">_xlfn.SEQUENCE(3)</f>"#,
         ));
@@ -6232,10 +7150,42 @@ fn test_xlsx_modern_formula_ooxml_round_trip() {
         .success()
         .stdout(predicate::str::contains("relationships/sheetMetadata"));
     officecli()
-        .args(["--json", "get", &p, "/Sheet1/A1"])
+        .args(["--json", "get", &p, "/Sheet1/C1"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""formula": "SEQUENCE(2)""#));
+        .stdout(predicate::str::contains(r#""formula": "SEQUENCE(2,2)""#));
+}
+
+#[test]
+fn test_xlsx_dynamic_array_spill_rejects_occupied_cells() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("dynamic_spill_collision.xlsx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["set", &p, "/Sheet1/B1", "value=occupied"])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/Sheet1",
+            "--type-name",
+            "cell",
+            "--properties",
+            "ref=A1",
+            "formula=SEQUENCE(1,2)",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("#SPILL!"));
+    officecli()
+        .args(["get", &p, "/Sheet1/B1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("occupied"));
 }
 
 #[test]
@@ -6349,8 +7299,10 @@ fn test_xlsx_password_clear_keeps_session_explicit_structure_lock() {
 fn test_xlsx_in_cell_rich_value_image_lifecycle() {
     let tmp = temp_dir();
     let path = tmp.path().join("in_cell_image.xlsx");
+    let replay = tmp.path().join("in_cell_image_replay.xlsx");
     let image = tmp.path().join("pixel.png");
     let p = path.to_string_lossy().to_string();
+    let replay_path = replay.to_string_lossy().to_string();
     std::fs::write(
         &image,
         [
@@ -6444,6 +7396,27 @@ fn test_xlsx_in_cell_rich_value_image_lifecycle() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Text: 20"));
+    let dump = officecli()
+        .args(["dump", &p])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli()
+        .args(["create", &replay_path])
+        .assert()
+        .success();
+    officecli()
+        .args(["batch", &replay_path, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &replay_path, "/Sheet1/B2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""type": "Image""#))
+        .stdout(predicate::str::contains(r#""alt": "Product photo""#));
     officecli()
         .args(["set", &p, "/Sheet1/B2", "image=none"])
         .assert()
@@ -6510,6 +7483,509 @@ fn test_xlsx_detected_table_query_and_row_predicate() {
         .assert()
         .success()
         .stdout(predicate::str::contains("header-sniff"));
+}
+
+#[test]
+fn test_xlsx_native_pivottable_cache_records_and_dump_replay() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_native_pivot.xlsx");
+    let replay_path = tmp.path().join("test_xlsx_native_pivot_replay.xlsx");
+    let p = path.to_string_lossy().to_string();
+    let replay = replay_path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    for (cell_ref, value) in [
+        ("A1", "Region"),
+        ("B1", "Sales"),
+        ("A2", "East"),
+        ("B2", "12"),
+        ("A3", "West"),
+        ("B3", "20"),
+        ("A4", "East"),
+        ("B4", "8"),
+    ] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/Sheet1",
+                "--type-name",
+                "cell",
+                "--properties",
+                &format!("ref={cell_ref}"),
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/Sheet1",
+            "--type-name",
+            "pivottable",
+            "--properties",
+            "source=Sheet1!A1:B4",
+            "position=D1",
+            "rows=Region",
+            "values=Sales:sum",
+            "name=SalesByRegion",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/Sheet1/pivottable[1]"));
+    officecli()
+        .args(["--json", "query", &p, "pivot"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SalesByRegion"))
+        .stdout(predicate::str::contains(r#""source": "Sheet1!A1:B4""#))
+        .stdout(predicate::str::contains(r#""rows": "Region""#));
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#""path": "/Sheet1/pivottable[1]""#,
+        ))
+        .stdout(predicate::str::contains("SalesByRegion"));
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/Sheet1/pivottable[1]",
+            "name=SalesByRegionUpdated",
+            "style=PivotStyleMedium9",
+            "showRowStripes=true",
+            "layout=tabular",
+            "showDrill=false",
+            "mergeLabels=true",
+            "grandTotals=none",
+            "defaultSubtotal=false",
+            "repeatLabels=true",
+            "blankRows=true",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SalesByRegionUpdated"));
+    officecli()
+        .args(["raw", &p, "xl/pivotTables/pivotTable1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("name=\"SalesByRegionUpdated\""))
+        .stdout(predicate::str::contains("compact=\"0\""))
+        .stdout(predicate::str::contains("showDrill=\"false\""))
+        .stdout(predicate::str::contains("mergeItem=\"true\""))
+        .stdout(predicate::str::contains("showRowStripes=\"true\""))
+        .stdout(predicate::str::contains("defaultSubtotal=\"false\""))
+        .stdout(predicate::str::contains("fillDownLabelsDefault=\"1\""))
+        .stdout(predicate::str::contains("insertBlankRow=\"1\""));
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""repeatLabels": true"#))
+        .stdout(predicate::str::contains(r#""blankRows": true"#));
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/Sheet1/pivottable[1]",
+            "rows=",
+            "filters=Region",
+            "values=Sales:avg",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""filters": "Region""#))
+        .stdout(predicate::str::contains("Average of Sales:average:Sales"));
+    officecli()
+        .args(["raw", &p, "xl/pivotTables/pivotTable1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<pageFields count=\"1\""))
+        .stdout(predicate::str::contains("<pageField fld=\"0\""))
+        .stdout(predicate::str::contains("subtotal=\"average\""));
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/Sheet1/pivottable[1]",
+            "showDataAs=percent_of_total",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#""dataField1.showAs": "percent_of_total""#,
+        ));
+    officecli()
+        .args(["raw", &p, "xl/pivotTables/pivotTable1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("showDataAs=\"percent\""));
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/Sheet1/pivottable[1]",
+            "dataField1.showAs=running_total",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#""dataField1.showAs": "running_total""#,
+        ));
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/Sheet1",
+            "--type-name",
+            "pivottable",
+            "--properties",
+            "source=Sheet1!A1:B4",
+            "position=H1",
+            "filters=Region",
+            "values=Sales:avg",
+            "name=SecondPivot",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/Sheet1/pivottable[2]"));
+    officecli()
+        .args(["--json", "query", &p, "pivot"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""matches": 2"#))
+        .stdout(predicate::str::contains("SecondPivot"));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheDefinition2.xml"])
+        .assert()
+        .failure();
+    officecli()
+        .args(["set", &p, "/Sheet1/pivottable[1]", "source=Sheet1!A1:B3"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""source": "Sheet1!A1:B3""#))
+        .stdout(predicate::str::contains(r#""cacheId": "2""#));
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[2]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""source": "Sheet1!A1:B4""#))
+        .stdout(predicate::str::contains(r#""cacheId": "1""#));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheDefinition2.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "<worksheetSource ref=\"A1:B3\" sheet=\"Sheet1\"",
+        ));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheRecords2.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("count=\"2\""));
+    // C# `set source` rebuilds CacheFields/PivotFields for a changed header
+    // schema. The new value field is supplied in the same call, so no stale
+    // field index can survive the three-column refresh.
+    for (cell_ref, value) in [("C1", "Units"), ("C2", "4"), ("C3", "7")] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "--parent",
+                "/Sheet1",
+                "--type-name",
+                "cell",
+                "--properties",
+                &format!("ref={cell_ref}"),
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/Sheet1/pivottable[1]",
+            "source=Sheet1!A1:C3",
+            "filters=Region",
+            "values=Units:sum",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""source": "Sheet1!A1:C3""#))
+        .stdout(predicate::str::contains("sum of Units:sum:Units"));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheDefinition2.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "<worksheetSource ref=\"A1:C3\" sheet=\"Sheet1\"",
+        ))
+        .stdout(predicate::str::contains("<cacheField name=\"Units\""));
+    officecli()
+        .args(["raw", &p, "xl/pivotTables/pivotTable1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<pivotFields count=\"3\""))
+        .stdout(predicate::str::contains("fld=\"2\" subtotal=\"sum\""));
+    // Narrowing without restating the no-longer-valid Units field is rejected
+    // before writes. Restating values in the same set then succeeds.
+    officecli()
+        .args(["set", &p, "/Sheet1/pivottable[1]", "source=Sheet1!A1:B3"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("restate values="));
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/Sheet1/pivottable[1]",
+            "source=Sheet1!A1:B3",
+            "filters=Region",
+            "values=Sales:avg",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""repeatLabels": true"#));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheDefinition1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "<worksheetSource ref=\"A1:B4\" sheet=\"Sheet1\"",
+        ))
+        .stdout(predicate::str::contains("<cacheField name=\"Region\""));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheRecords1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<pivotCacheRecords"))
+        .stdout(predicate::str::contains("count=\"3\""))
+        .stdout(predicate::str::contains("<n v=\"12\"/>"));
+    officecli().args(["validate", &p]).assert().success();
+
+    let dump = officecli()
+        .args(["dump", &p])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    officecli().args(["create", &replay]).assert().success();
+    officecli()
+        .args(["batch", &replay, std::str::from_utf8(&dump).unwrap()])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &replay, "pivot"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SalesByRegionUpdated"))
+        .stdout(predicate::str::contains("SecondPivot"))
+        .stdout(predicate::str::contains(r#""matches": 2"#));
+
+    officecli()
+        .args(["remove", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed pivot table 1"));
+    officecli()
+        .args(["--json", "query", &p, "pivot"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""matches": 1"#))
+        .stdout(predicate::str::contains("SecondPivot"));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheDefinition1.xml"])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheDefinition2.xml"])
+        .assert()
+        .failure();
+    officecli()
+        .args(["remove", &p, "/Sheet1/pivottable[1]"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "query", &p, "pivot"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""matches": 0"#));
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheDefinition1.xml"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_xlsx_pivottable_top_n_crops_cache_and_writes_refresh_filter() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_pivot_top_n.xlsx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    for (cell_ref, value) in [
+        ("A1", "Region"),
+        ("B1", "Sales"),
+        ("A2", "North"),
+        ("B2", "10"),
+        ("A3", "South"),
+        ("B3", "30"),
+        ("A4", "East"),
+        ("B4", "20"),
+    ] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "/Sheet1",
+                "--type",
+                "cell",
+                "--prop",
+                &format!("ref={cell_ref}"),
+                "--prop",
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/Sheet1",
+            "--type",
+            "pivottable",
+            "--prop",
+            "source=Sheet1!A1:B4",
+            "--prop",
+            "position=D1",
+            "--prop",
+            "rows=Region",
+            "--prop",
+            "values=Sales:sum",
+            "--prop",
+            "topN=1",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheRecords1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("count=\"1\""))
+        .stdout(predicate::str::contains("<n v=\"30\"/>"));
+    officecli()
+        .args(["raw", &p, "xl/pivotTables/pivotTable1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("type=\"count\""))
+        .stdout(predicate::str::contains(
+            "<top10 val=\"1\" filterVal=\"1\"/>",
+        ));
+    officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_xlsx_pivottable_label_filter_keeps_cache_and_writes_caption_filter() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("test_xlsx_pivot_label_filter.xlsx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    for (cell_ref, value) in [
+        ("A1", "Region"),
+        ("B1", "Sales"),
+        ("A2", "North"),
+        ("B2", "10"),
+        ("A3", "South"),
+        ("B3", "30"),
+        ("A4", "East"),
+        ("B4", "20"),
+    ] {
+        officecli()
+            .args([
+                "add",
+                &p,
+                "/Sheet1",
+                "--type",
+                "cell",
+                "--prop",
+                &format!("ref={cell_ref}"),
+                "--prop",
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args([
+            "add",
+            &p,
+            "/Sheet1",
+            "--type",
+            "pivottable",
+            "--prop",
+            "source=Sheet1!A1:B4",
+            "--prop",
+            "position=D1",
+            "--prop",
+            "rows=Region",
+            "--prop",
+            "values=Sales:sum",
+            "--prop",
+            "labelFilter=Region:beginsWith:N",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["raw", &p, "xl/pivotCache/pivotCacheRecords1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("count=\"3\""));
+    officecli()
+        .args(["raw", &p, "xl/pivotTables/pivotTable1.xml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("type=\"captionBeginsWith\""))
+        .stdout(predicate::str::contains("stringValue1=\"N\""))
+        .stdout(predicate::str::contains("<customFilter val=\"N*\"/>"));
+    officecli().args(["validate", &p]).assert().success();
 }
 
 #[test]

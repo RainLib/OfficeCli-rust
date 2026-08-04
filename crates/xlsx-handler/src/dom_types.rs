@@ -193,6 +193,12 @@ pub struct PivotTableDef {
     pub page_fields: Vec<i32>,
     /// Data field specs: (name, function, source_field_index).
     pub data_fields: Vec<(String, String, i32)>,
+    /// Optional `showDataAs` mode, parallel to `data_fields`.
+    pub data_field_show_as: Vec<Option<String>>,
+    /// `x14:pivotTableDefinition fillDownLabelsDefault` extension.
+    pub repeat_labels: bool,
+    /// `insertBlankRow` on the outermost row-axis PivotField.
+    pub blank_rows: bool,
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use clap::Args;
 use handler_common::HandlerError;
+use std::collections::HashSet;
 
 /// Export full document structure and content as JSON
 #[derive(Args)]
@@ -49,6 +50,7 @@ pub fn handle_dump(
                 let document =
                     handler.raw("word/document.xml", handler_common::RawOptions::default())?;
                 items.push(serde_json::json!({"command":"raw-set","part":"/document","xpath":"/w:document","action":"replace","xml":oxml::xml_util::strip_prolog(&document)}));
+                items.extend(docx_recursive_relationship_items(&cmd.file)?);
                 items.extend(docx_document_image_items(&cmd.file)?);
                 items.extend(docx_custom_xml_items(&cmd.file)?);
                 items.extend(docx_header_footer_items(&cmd.file, "header")?);
@@ -75,6 +77,18 @@ pub fn handle_dump(
                         }
                         if part == "/numbering" {
                             items.extend(docx_numbering_image_items(&cmd.file)?);
+                        }
+                        if let Some(source_part) = match part {
+                            "/comments" => Some("word/comments.xml"),
+                            "/footnotes" => Some("word/footnotes.xml"),
+                            "/endnotes" => Some("word/endnotes.xml"),
+                            _ => None,
+                        } {
+                            let package =
+                                oxml::OxmlPackage::open(&cmd.file, false).map_err(|error| {
+                                    HandlerError::OperationFailed(error.to_string())
+                                })?;
+                            items.extend(docx_part_image_items(&package, source_part, part)?);
                         }
                     }
                 }
@@ -173,6 +187,10 @@ pub fn handle_dump(
             // target, and raw-set creates those semantic sheet parts first.
             let workbook = handler.raw("/workbook", handler_common::RawOptions::default())?;
             items.push(serde_json::json!({"command":"raw-set","part":"/workbook","xpath":"/workbook","action":"replace","xml":oxml::xml_util::strip_prolog(&workbook)}));
+            // Preserve drawings, chart sidecars, richData/metadata, embedded
+            // workbooks and external links instead of limiting replay to sheet
+            // XML. Parent edges are emitted before their descendants.
+            items.extend(recursive_relationship_items(&cmd.file, "xl/workbook.xml")?);
             let output = serde_json::to_string(&items).map_err(HandlerError::JsonError)?;
             if let Some(path) = cmd.out.filter(|path| path != "-") {
                 std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
@@ -213,6 +231,13 @@ pub fn handle_dump(
                 handler_common::RawOptions::default(),
             )?;
             items.push(serde_json::json!({"command":"raw-set","part":"/presentation","xpath":"/presentation","action":"replace","xml":oxml::xml_util::strip_prolog(&presentation)}));
+            // A presentation's resource graph includes slide/master/layout
+            // edges plus opaque chart, media, OLE, SmartArt, model3d and p15
+            // extension sidecars. Emit it verbatim for lossless replay.
+            items.extend(recursive_relationship_items(
+                &cmd.file,
+                "ppt/presentation.xml",
+            )?);
             let output = serde_json::to_string(&items).map_err(HandlerError::JsonError)?;
             if let Some(path) = cmd.out.filter(|path| path != "-") {
                 std::fs::write(&path, format!("{}\n", output)).map_err(HandlerError::IoError)?;
@@ -337,6 +362,127 @@ fn docx_document_image_items(file: &str) -> Result<Vec<serde_json::Value>, Handl
     let package = oxml::OxmlPackage::open(file, false)
         .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
     docx_part_image_items(&package, "word/document.xml", "/document")
+}
+
+/// Emit every relationship reachable from the main document as a physical-part
+/// replay edge.  This complements the C# structured emitter for opaque OOXML
+/// resources (Chart sidecars, SmartArt, ActiveX, OLE and producer extensions)
+/// whose XML is intentionally preserved verbatim.  Parent edges precede child
+/// edges so replay creates the owning part before its `.rels` is attached.
+fn docx_recursive_relationship_items(file: &str) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let package = oxml::OxmlPackage::open(file, false)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    emit_docx_relationship_edges(&package, "word/document.xml", &mut seen, &mut items)?;
+    Ok(items)
+}
+
+fn emit_docx_relationship_edges(
+    package: &oxml::OxmlPackage,
+    source_part: &str,
+    seen: &mut HashSet<(String, String)>,
+    items: &mut Vec<serde_json::Value>,
+) -> Result<(), HandlerError> {
+    let relationships = package
+        .part_rels(source_part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut edges: Vec<_> = relationships.all().values().collect();
+    edges.sort_by(|left, right| left.id.cmp(&right.id));
+    for edge in edges {
+        if !seen.insert((source_part.to_string(), edge.id.clone())) {
+            continue;
+        }
+        let mut payload = serde_json::json!({
+            "type": edge.type_uri,
+            "target": edge.target,
+            "targetMode": edge.target_mode,
+        });
+        if !edge.target_mode.eq_ignore_ascii_case("external") {
+            let part_path = package.resolve_rel_target(source_part, &edge.target);
+            let bytes = package
+                .read_part_bytes(&part_path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let content_type = package
+                .content_types()
+                .content_type_for(&part_path)
+                .map(String::as_str)
+                .unwrap_or("application/octet-stream");
+            payload["partPath"] = serde_json::Value::String(part_path.clone());
+            payload["contentType"] = serde_json::Value::String(content_type.to_string());
+            payload["data"] = serde_json::Value::String(format!(
+                "data:{};base64,{}",
+                content_type,
+                base64_encode(bytes)
+            ));
+            items.push(serde_json::json!({"command":"raw-set","part":source_part,"xpath":edge.id,"action":"embed-part","xml":payload.to_string()}));
+            emit_docx_relationship_edges(package, &part_path, seen, items)?;
+        } else {
+            items.push(serde_json::json!({"command":"raw-set","part":source_part,"xpath":edge.id,"action":"embed-part","xml":payload.to_string()}));
+        }
+    }
+    Ok(())
+}
+
+/// Format-neutral version of the opaque OOXML relationship emitter. XLSX and
+/// PPTX use the same package graph semantics as DOCX; their handlers consume
+/// the physical source part names with the `embed-part` raw action.
+fn recursive_relationship_items(
+    file: &str,
+    root_part: &str,
+) -> Result<Vec<serde_json::Value>, HandlerError> {
+    let package = oxml::OxmlPackage::open(file, false)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    emit_relationship_edges(&package, root_part, &mut seen, &mut items)?;
+    Ok(items)
+}
+
+fn emit_relationship_edges(
+    package: &oxml::OxmlPackage,
+    source_part: &str,
+    seen: &mut HashSet<(String, String)>,
+    items: &mut Vec<serde_json::Value>,
+) -> Result<(), HandlerError> {
+    let relationships = package
+        .part_rels(source_part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut edges: Vec<_> = relationships.all().values().collect();
+    edges.sort_by(|left, right| left.id.cmp(&right.id));
+    for edge in edges {
+        if !seen.insert((source_part.to_string(), edge.id.clone())) {
+            continue;
+        }
+        let mut payload = serde_json::json!({
+            "type": edge.type_uri,
+            "target": edge.target,
+            "targetMode": edge.target_mode,
+        });
+        if !edge.target_mode.eq_ignore_ascii_case("external") {
+            let part_path = package.resolve_rel_target(source_part, &edge.target);
+            let bytes = package
+                .read_part_bytes(&part_path)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+            let content_type = package
+                .content_types()
+                .content_type_for(&part_path)
+                .map(String::as_str)
+                .unwrap_or("application/octet-stream");
+            payload["partPath"] = serde_json::Value::String(part_path.clone());
+            payload["contentType"] = serde_json::Value::String(content_type.to_string());
+            payload["data"] = serde_json::Value::String(format!(
+                "data:{};base64,{}",
+                content_type,
+                base64_encode(bytes)
+            ));
+            items.push(serde_json::json!({"command":"raw-set","part":source_part,"xpath":edge.id,"action":"embed-part","xml":payload.to_string()}));
+            emit_relationship_edges(package, &part_path, seen, items)?;
+        } else {
+            items.push(serde_json::json!({"command":"raw-set","part":source_part,"xpath":edge.id,"action":"embed-part","xml":payload.to_string()}));
+        }
+    }
+    Ok(())
 }
 
 fn docx_part_image_items(

@@ -85,7 +85,7 @@ impl WordHandler {
                 "document opened in read-only mode".to_string(),
             ));
         }
-        let xml = serialize_dom(dom);
+        let xml = mutations::ensure_document_root_namespaces(&serialize_dom(dom));
         let mut package = self.package.borrow_mut();
         package
             .write_part_xml(DOCUMENT_PART, &xml)
@@ -872,6 +872,31 @@ impl DocumentHandler for WordHandler {
                 "chartpart" | "diagram" | "smartart" | "activex" | "vmlshape" | "drawingshape"
             ) && properties.contains_key("runXml"))
         {
+            if parent.starts_with("/comments/comment[") {
+                let mut package = self.package.borrow_mut();
+                let run_xml = mutations::materialize_inlined_parts(
+                    &mut package,
+                    "word/comments.xml",
+                    properties,
+                )?;
+                return mutations::append_comment_body_inlined_run(&mut package, parent, &run_xml);
+            }
+            for (prefix, part) in [
+                ("/footnotes/", "word/footnotes.xml"),
+                ("/endnotes/", "word/endnotes.xml"),
+            ] {
+                if parent.starts_with(prefix) {
+                    let mut package = self.package.borrow_mut();
+                    let run_xml =
+                        mutations::materialize_inlined_parts(&mut package, part, properties)?;
+                    return mutations::append_footnote_endnote_inlined_run(
+                        &mut package,
+                        part,
+                        parent,
+                        &run_xml,
+                    );
+                }
+            }
             if let Some((kind, index, tail)) = header_footer_path_parts(parent) {
                 if tail.is_empty() {
                     return Err(HandlerError::InvalidPath(format!(
@@ -1159,6 +1184,298 @@ impl DocumentHandler for WordHandler {
                 "document opened in read-only mode".to_string(),
             ));
         }
+        // Cross-part move: extract the subtree, give every relationship a new
+        // id in the destination host, then insert it through the destination
+        // DOM.  Keeping the referenced package parts shared is correct: their
+        // child/grandchild relationships are owned by those parts, not by the
+        // paragraph that moved.
+        let is_logical_host = |path: &str| {
+            path.starts_with("/comments/comment[")
+                || path.starts_with("/footnotes/")
+                || path.starts_with("/endnotes/")
+        };
+        if let Some(target) = target_parent.filter(|target| is_logical_host(target)) {
+            if is_logical_host(source) {
+                let mut package = self.package.borrow_mut();
+                let (source_part, node) =
+                    mutations::take_logical_part_body_node(&mut package, source)?;
+                return mutations::append_logical_part_body_node(
+                    &mut package,
+                    target,
+                    &source_part,
+                    node,
+                    position,
+                );
+            }
+            if let Some((kind, index, tail)) = header_footer_path_parts(source) {
+                if tail.is_empty() {
+                    return Err(HandlerError::InvalidPath(
+                        "cannot move a header/footer root".to_string(),
+                    ));
+                }
+                let mut package = self.package.borrow_mut();
+                let source_part =
+                    resolve_docx_raw_part_path(&package, &format!("/{kind}[{index}]"))?;
+                let source_dom = parse_document_xml(
+                    &package
+                        .read_part_xml(&source_part)
+                        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+                )?;
+                let mut source_body = header_footer_as_body_dom(&source_dom);
+                let source_path = header_footer_body_path(&tail);
+                let node = navigate_to_element(&source_body, &source_path)?.clone();
+                remove_element(&mut source_body, &source_path)?;
+                write_header_footer_body_dom(
+                    &mut package,
+                    &source_part,
+                    &source_dom,
+                    &source_body,
+                )?;
+                return mutations::append_logical_part_body_node(
+                    &mut package,
+                    target,
+                    &source_part,
+                    node,
+                    position,
+                );
+            }
+            let mut document = self.parse_dom()?;
+            let node = navigate_to_element(&document, source)?.clone();
+            remove_element(&mut document, source)?;
+            let mut package = self.package.borrow_mut();
+            let result = mutations::append_logical_part_body_node(
+                &mut package,
+                target,
+                DOCUMENT_PART,
+                node,
+                position,
+            )?;
+            drop(package);
+            self.write_dom(&document)?;
+            return Ok(result);
+        }
+        if source.starts_with("/comments/comment[")
+            || source.starts_with("/footnotes/")
+            || source.starts_with("/endnotes/")
+        {
+            let mut package = self.package.borrow_mut();
+            let (source_part, mut node) =
+                mutations::take_logical_part_body_node(&mut package, source)?;
+            if let Some(target) = target_parent {
+                if let Some((kind, index, tail)) = header_footer_path_parts(target) {
+                    let target_part =
+                        resolve_docx_raw_part_path(&package, &format!("/{kind}[{index}]"))?;
+                    mutations::rehome_word_node_relationships(
+                        &mut package,
+                        &source_part,
+                        &target_part,
+                        &mut node,
+                    )?;
+                    let target_dom = parse_document_xml(
+                        &package
+                            .read_part_xml(&target_part)
+                            .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+                    )?;
+                    let mut target_body = header_footer_as_body_dom(&target_dom);
+                    let new_body_path = add_element(
+                        &mut target_body,
+                        &header_footer_body_path(&tail),
+                        node.element_type.to_path_name(),
+                        position,
+                        &HashMap::new(),
+                        None,
+                    )?;
+                    *navigate_to_element_mut(&mut target_body, &new_body_path)? = node;
+                    write_header_footer_body_dom(
+                        &mut package,
+                        &target_part,
+                        &target_dom,
+                        &target_body,
+                    )?;
+                    return Ok(header_footer_from_body_path(kind, index, &new_body_path));
+                }
+            }
+            mutations::rehome_word_node_relationships(
+                &mut package,
+                &source_part,
+                DOCUMENT_PART,
+                &mut node,
+            )?;
+            drop(package);
+            let mut document = self.parse_dom()?;
+            let target = target_parent.unwrap_or("/body");
+            let new_path = add_element(
+                &mut document,
+                target,
+                node.element_type.to_path_name(),
+                position,
+                &HashMap::new(),
+                None,
+            )?;
+            *navigate_to_element_mut(&mut document, &new_path)? = node;
+            self.write_dom(&document)?;
+            return Ok(new_path);
+        }
+        if let Some((kind, index, tail)) = header_footer_path_parts(source) {
+            if let Some(target) = target_parent {
+                if let Some((target_kind, target_index, target_tail)) =
+                    header_footer_path_parts(target)
+                {
+                    if !tail.is_empty() && kind == target_kind && index == target_index {
+                        let mut package = self.package.borrow_mut();
+                        let part_path =
+                            resolve_docx_raw_part_path(&package, &format!("/{kind}[{index}]"))?;
+                        let part_dom = parse_document_xml(
+                            &package
+                                .read_part_xml(&part_path)
+                                .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+                        )?;
+                        let mut edit_dom = header_footer_as_body_dom(&part_dom);
+                        let new_body_path = move_element(
+                            &mut edit_dom,
+                            &header_footer_body_path(&tail),
+                            Some(&header_footer_body_path(&target_tail)),
+                            header_footer_body_position(position),
+                        )?;
+                        write_header_footer_body_dom(
+                            &mut package,
+                            &part_path,
+                            &part_dom,
+                            &edit_dom,
+                        )?;
+                        return Ok(header_footer_from_body_path(kind, index, &new_body_path));
+                    }
+                    if !tail.is_empty() && (kind != target_kind || index != target_index) {
+                        let mut package = self.package.borrow_mut();
+                        let source_part =
+                            resolve_docx_raw_part_path(&package, &format!("/{kind}[{index}]"))?;
+                        let target_part = resolve_docx_raw_part_path(
+                            &package,
+                            &format!("/{target_kind}[{target_index}]"),
+                        )?;
+                        let source_dom = parse_document_xml(
+                            &package
+                                .read_part_xml(&source_part)
+                                .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+                        )?;
+                        let mut source_body = header_footer_as_body_dom(&source_dom);
+                        let source_path = header_footer_body_path(&tail);
+                        let mut node = navigate_to_element(&source_body, &source_path)?.clone();
+                        mutations::rehome_word_node_relationships(
+                            &mut package,
+                            &source_part,
+                            &target_part,
+                            &mut node,
+                        )?;
+                        remove_element(&mut source_body, &source_path)?;
+                        write_header_footer_body_dom(
+                            &mut package,
+                            &source_part,
+                            &source_dom,
+                            &source_body,
+                        )?;
+                        let target_dom = parse_document_xml(
+                            &package
+                                .read_part_xml(&target_part)
+                                .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+                        )?;
+                        let mut target_body = header_footer_as_body_dom(&target_dom);
+                        let target_path = header_footer_body_path(&target_tail);
+                        let new_body_path = add_element(
+                            &mut target_body,
+                            &target_path,
+                            node.element_type.to_path_name(),
+                            position,
+                            &HashMap::new(),
+                            None,
+                        )?;
+                        *navigate_to_element_mut(&mut target_body, &new_body_path)? = node;
+                        write_header_footer_body_dom(
+                            &mut package,
+                            &target_part,
+                            &target_dom,
+                            &target_body,
+                        )?;
+                        return Ok(header_footer_from_body_path(
+                            target_kind,
+                            target_index,
+                            &new_body_path,
+                        ));
+                    }
+                }
+            }
+            if !tail.is_empty()
+                && target_parent.is_none_or(|target| header_footer_path_parts(target).is_none())
+            {
+                let mut package = self.package.borrow_mut();
+                let part_path = resolve_docx_raw_part_path(&package, &format!("/{kind}[{index}]"))?;
+                let part_dom = parse_document_xml(
+                    &package
+                        .read_part_xml(&part_path)
+                        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+                )?;
+                let mut edit_dom = header_footer_as_body_dom(&part_dom);
+                let source_path = header_footer_body_path(&tail);
+                let mut node = navigate_to_element(&edit_dom, &source_path)?.clone();
+                mutations::rehome_word_node_relationships(
+                    &mut package,
+                    &part_path,
+                    DOCUMENT_PART,
+                    &mut node,
+                )?;
+                remove_element(&mut edit_dom, &source_path)?;
+                write_header_footer_body_dom(&mut package, &part_path, &part_dom, &edit_dom)?;
+                drop(package);
+                let mut document = self.parse_dom()?;
+                let target = target_parent.unwrap_or("/body");
+                let new_path = add_element(
+                    &mut document,
+                    target,
+                    node.element_type.to_path_name(),
+                    position,
+                    &HashMap::new(),
+                    None,
+                )?;
+                *navigate_to_element_mut(&mut document, &new_path)? = node;
+                self.write_dom(&document)?;
+                return Ok(new_path);
+            }
+        }
+        if let Some(target) = target_parent {
+            if let Some((kind, index, tail)) = header_footer_path_parts(target) {
+                let mut document = self.parse_dom()?;
+                let mut node = navigate_to_element(&document, source)?.clone();
+                remove_element(&mut document, source)?;
+                let mut package = self.package.borrow_mut();
+                let part_path = resolve_docx_raw_part_path(&package, &format!("/{kind}[{index}]"))?;
+                mutations::rehome_word_node_relationships(
+                    &mut package,
+                    DOCUMENT_PART,
+                    &part_path,
+                    &mut node,
+                )?;
+                let part_dom = parse_document_xml(
+                    &package
+                        .read_part_xml(&part_path)
+                        .map_err(|e| HandlerError::OperationFailed(e.to_string()))?,
+                )?;
+                let mut edit_dom = header_footer_as_body_dom(&part_dom);
+                let body_target = header_footer_body_path(&tail);
+                let new_body_path = add_element(
+                    &mut edit_dom,
+                    &body_target,
+                    node.element_type.to_path_name(),
+                    position,
+                    &HashMap::new(),
+                    None,
+                )?;
+                *navigate_to_element_mut(&mut edit_dom, &new_body_path)? = node;
+                write_header_footer_body_dom(&mut package, &part_path, &part_dom, &edit_dom)?;
+                drop(package);
+                self.write_dom(&document)?;
+                return Ok(header_footer_from_body_path(kind, index, &new_body_path));
+            }
+        }
         if let Some((kind, index, tail)) = header_footer_path_parts(source) {
             if tail.is_empty() {
                 return Err(HandlerError::InvalidPath(
@@ -1279,6 +1596,43 @@ impl DocumentHandler for WordHandler {
             ));
         }
         let mut package = self.package.borrow_mut();
+        if action.eq_ignore_ascii_case("embed-part") {
+            let payload = xml.ok_or_else(|| {
+                HandlerError::InvalidArgument(
+                    "embed-part requires a JSON payload in XML".to_string(),
+                )
+            })?;
+            let value: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
+                HandlerError::InvalidArgument(format!("invalid embed-part JSON: {error}"))
+            })?;
+            let relation_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let target = value.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let target_mode = value
+                .get("targetMode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Internal");
+            let bytes = value
+                .get("data")
+                .and_then(|v| v.as_str())
+                .map(|data| {
+                    mutations::parse_embedded_data_uri(data, "embed-part").map(|(_, bytes)| bytes)
+                })
+                .transpose()?;
+            let source_part = resolve_docx_raw_part_path(&package, part_path)?;
+            return mutations::attach_raw_relationship_part(
+                &mut package,
+                &source_part,
+                xpath.trim(),
+                mutations::RawRelationshipPart {
+                    relationship_type: relation_type,
+                    target,
+                    target_mode,
+                    part_path: value.get("partPath").and_then(|v| v.as_str()),
+                    content_type: value.get("contentType").and_then(|v| v.as_str()),
+                    bytes,
+                },
+            );
+        }
         if part_path.eq_ignore_ascii_case("/comments") && action.eq_ignore_ascii_case("replace") {
             let replacement = xml.filter(|value| !value.is_empty()).ok_or_else(|| {
                 HandlerError::InvalidArgument("/comments replace requires XML".to_string())
@@ -1356,6 +1710,36 @@ impl DocumentHandler for WordHandler {
                 xpath.trim(),
                 data_uri,
             );
+        }
+        if action.eq_ignore_ascii_case("embed-binary") {
+            let source_part = if part_path.eq_ignore_ascii_case("/comments") {
+                // The whole-part replacement normally creates this graph
+                // first.  Preparing here also makes a standalone replay
+                // deterministic.
+                mutations::prepare_comments_raw_replace(&mut package)?;
+                Some("word/comments.xml")
+            } else if part_path.eq_ignore_ascii_case("/footnotes") {
+                mutations::prepare_notes_raw_replace(&mut package, "footnotes")?;
+                Some("word/footnotes.xml")
+            } else if part_path.eq_ignore_ascii_case("/endnotes") {
+                mutations::prepare_notes_raw_replace(&mut package, "endnotes")?;
+                Some("word/endnotes.xml")
+            } else {
+                None
+            };
+            if let Some(source_part) = source_part {
+                let data_uri = xml.ok_or_else(|| {
+                    HandlerError::InvalidArgument(format!(
+                        "{part_path} embed-binary requires a data URI in XML"
+                    ))
+                })?;
+                return mutations::attach_part_image_binary(
+                    &mut package,
+                    source_part,
+                    xpath.trim(),
+                    data_uri,
+                );
+            }
         }
         if action.eq_ignore_ascii_case("embed-binary") {
             if let Some(item_relationship_id) = part_path
@@ -1752,6 +2136,22 @@ fn header_footer_as_body_dom(part_dom: &WordDom) -> WordDom {
     WordDom::new(root)
 }
 
+fn header_footer_body_position(position: InsertPosition) -> InsertPosition {
+    match position {
+        InsertPosition::AfterElement(anchor) => InsertPosition::AfterElement(
+            header_footer_path_parts(&anchor)
+                .map(|(_, _, tail)| header_footer_body_path(&tail))
+                .unwrap_or(anchor),
+        ),
+        InsertPosition::BeforeElement(anchor) => InsertPosition::BeforeElement(
+            header_footer_path_parts(&anchor)
+                .map(|(_, _, tail)| header_footer_body_path(&tail))
+                .unwrap_or(anchor),
+        ),
+        other => other,
+    }
+}
+
 fn write_header_footer_body_dom(
     package: &mut OxmlPackage,
     part_path: &str,
@@ -1763,7 +2163,7 @@ fn write_header_footer_body_dom(
         HandlerError::OperationFailed("header/footer edit body unexpectedly missing".to_string())
     })?;
     part_root.children = body.children.clone();
-    let xml = serialize_dom(&WordDom::new(part_root));
+    let xml = mutations::ensure_document_root_namespaces(&serialize_dom(&WordDom::new(part_root)));
     package
         .write_part_xml(part_path, &xml)
         .map_err(|error| HandlerError::SaveError(error.to_string()))
@@ -1826,19 +2226,82 @@ fn append_inlined_run_xml(
         ));
     }
     let parent_node = navigate_to_element_mut(dom, parent)?;
-    if parent_node.element_type != WordElementType::Paragraph {
-        return Err(HandlerError::InvalidPath(format!(
-            "inlinedparts currently requires a paragraph parent, got '{}'",
-            parent
-        )));
+    append_inlined_run_to_container(parent_node, parent, run)
+}
+
+/// C#'s carrier may target a paragraph directly, a table cell, a block SDT,
+/// or a body-like container. Keep an inserted relationship-owning run inside
+/// a paragraph in every case: this preserves Word's cell/block structure and
+/// avoids creating invalid inline children below `w:tc` / `w:sdtContent`.
+fn append_inlined_run_to_container(
+    parent_node: &mut WordNode,
+    parent_path: &str,
+    run: WordNode,
+) -> Result<String, HandlerError> {
+    match parent_node.element_type {
+        WordElementType::Paragraph => {
+            parent_node.children.push(run);
+            let run_index = parent_node
+                .children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Run)
+                .count();
+            Ok(format!("{parent_path}/r[{run_index}]"))
+        }
+        WordElementType::Body | WordElementType::TableCell | WordElementType::SdtContent => {
+            let paragraph_index = parent_node
+                .children
+                .iter()
+                .rposition(|child| child.element_type == WordElementType::Paragraph);
+            if let Some(index) = paragraph_index {
+                let paragraph_number = parent_node.children[..=index]
+                    .iter()
+                    .filter(|child| child.element_type == WordElementType::Paragraph)
+                    .count();
+                let paragraph = &mut parent_node.children[index];
+                paragraph.children.push(run);
+                let run_number = paragraph
+                    .children
+                    .iter()
+                    .filter(|child| child.element_type == WordElementType::Run)
+                    .count();
+                return Ok(format!(
+                    "{parent_path}/p[{paragraph_number}]/r[{run_number}]"
+                ));
+            }
+
+            let mut paragraph = WordNode::new(WordElementType::Paragraph);
+            paragraph.children.push(run);
+            parent_node.children.push(paragraph);
+            let paragraph_number = parent_node
+                .children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Paragraph)
+                .count();
+            Ok(format!("{parent_path}/p[{paragraph_number}]/r[1]"))
+        }
+        WordElementType::Sdt => {
+            let content_index = parent_node
+                .children
+                .iter()
+                .position(|child| child.element_type == WordElementType::SdtContent)
+                .ok_or_else(|| {
+                    HandlerError::InvalidPath(format!(
+                        "inlinedparts SDT parent '{}' has no sdtContent child",
+                        parent_path
+                    ))
+                })?;
+            append_inlined_run_to_container(
+                &mut parent_node.children[content_index],
+                &format!("{parent_path}/sdtContent[1]"),
+                run,
+            )
+        }
+        _ => Err(HandlerError::InvalidPath(format!(
+            "inlinedparts requires a paragraph, table cell, block SDT, or body parent, got '{}'",
+            parent_path
+        ))),
     }
-    parent_node.children.push(run);
-    let run_index = parent_node
-        .children
-        .iter()
-        .filter(|child| child.element_type == WordElementType::Run)
-        .count();
-    Ok(format!("{parent}/r[{run_index}]"))
 }
 
 fn navigate_header_footer_node<'a>(

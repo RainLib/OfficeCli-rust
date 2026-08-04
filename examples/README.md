@@ -12,6 +12,7 @@ examples/
 │   ├── tables.sh / tables.docx
 │   ├── textbox.sh
 │   └── numbering-showcase.sh / numbering-showcase.docx
+│   └── inlinedparts-hosts.sh / inlinedparts-hosts.json
 ├── excel/                             # 📊 Excel examples
 │   ├── charts.sh / charts.xlsx        # Master chart showcase
 │   ├── charts/                        # Per-type chart scripts
@@ -63,6 +64,7 @@ bash formulas.sh             # LaTeX math formulas
 bash tables.sh               # Styled tables
 bash textbox.sh              # Formatted text boxes
 bash numbering-showcase.sh   # List/numbering styles
+bash inlinedparts-hosts.sh   # Relationship-owning inline hosts
 ```
 
 **Excel (.xlsx):**

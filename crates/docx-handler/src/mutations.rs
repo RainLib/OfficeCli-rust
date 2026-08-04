@@ -5895,9 +5895,89 @@ pub fn add_comment_body_element(
             ))
         }
     };
+    let output = ensure_document_root_namespaces(&crate::handler::serialize_dom(&dom));
     package
-        .write_part_xml(DOCX_COMMENTS_PART, &crate::handler::serialize_dom(&dom))
+        .write_part_xml(DOCX_COMMENTS_PART, &output)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    Ok(result)
+}
+
+/// Insert a relationship-owning opaque run into a logical comment body. Unlike
+/// normal comments text edits, this preserves the run's non-WordprocessingML
+/// children (DrawingML, VML, ActiveX etc.) after `inlinedparts` materializes
+/// their relationships on `word/comments.xml`.
+pub(crate) fn append_comment_body_inlined_run(
+    package: &mut OxmlPackage,
+    parent: &str,
+    run_xml: &str,
+) -> Result<String, HandlerError> {
+    let (comment_path, relative) = split_comment_parent_path(parent)?;
+    let comment_id = get_comment(package, comment_path)?.id;
+    let xml = package
+        .read_part_xml(DOCX_COMMENTS_PART)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let comment = find_comment_node_mut(&mut dom.root, &comment_id)
+        .ok_or_else(|| HandlerError::PathNotFound(parent.to_string()))?;
+    let target = if relative.is_empty() {
+        comment
+    } else {
+        navigate_comment_body_node_mut(comment, relative, parent)?
+    };
+    let run = crate::handler::parse_document_xml(run_xml)?.root;
+    if run.element_type != WordElementType::Run {
+        return Err(HandlerError::InvalidArgument(
+            "inlinedparts runXml must have a w:r root element".to_string(),
+        ));
+    }
+
+    let result = if target.element_type == WordElementType::Paragraph {
+        target.children.push(run);
+        let run_index = target
+            .children
+            .iter()
+            .filter(|child| child.element_type == WordElementType::Run)
+            .count();
+        format!("{parent}/r[{run_index}]")
+    } else if matches!(&target.element_type, WordElementType::Unknown(name) if name == "comment") {
+        let paragraph_index = target
+            .children
+            .iter()
+            .rposition(|child| child.element_type == WordElementType::Paragraph);
+        if let Some(index) = paragraph_index {
+            let paragraph_number = target.children[..=index]
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Paragraph)
+                .count();
+            let paragraph = &mut target.children[index];
+            paragraph.children.push(run);
+            let run_number = paragraph
+                .children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Run)
+                .count();
+            format!("{parent}/p[{paragraph_number}]/r[{run_number}]")
+        } else {
+            let mut paragraph = WordNode::new(WordElementType::Paragraph);
+            paragraph.children.push(run);
+            target.children.push(paragraph);
+            let paragraph_number = target
+                .children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Paragraph)
+                .count();
+            format!("{parent}/p[{paragraph_number}]/r[1]")
+        }
+    } else {
+        return Err(HandlerError::InvalidPath(format!(
+            "inlinedparts comment parent '{}' must be a comment or paragraph",
+            parent
+        )));
+    };
+    let output = ensure_document_root_namespaces(&crate::handler::serialize_dom(&dom));
+    package
+        .write_part_xml(DOCX_COMMENTS_PART, &output)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
     Ok(result)
 }
 
@@ -5982,6 +6062,160 @@ fn remove_comment_body_node(
         return Ok(());
     }
     remove_comment_body_node(&mut parent.children[child_index], rest, full_path)
+}
+
+/// Remove and return a paragraph/run subtree from a logical comments,
+/// footnotes or endnotes path.  These parts deliberately bypass the main
+/// document DOM, but expose the same WordprocessingML child shape.
+pub(crate) fn take_logical_part_body_node(
+    package: &mut OxmlPackage,
+    path: &str,
+) -> Result<(String, WordNode), HandlerError> {
+    let (part, root_kind, root_id, relative) = if path.starts_with("/comments/comment[") {
+        let (comment_path, relative) = split_comment_parent_path(path)?;
+        (
+            DOCX_COMMENTS_PART.to_string(),
+            "comment",
+            get_comment(package, comment_path)?.id,
+            relative.trim_start_matches('/').to_string(),
+        )
+    } else if path.starts_with("/footnotes/") || path.starts_with("/endnotes/") {
+        let (part, kind, prefix) = if path.starts_with("/footnotes/") {
+            (DOCX_FOOTNOTES_PART, "footnote", "footnotes")
+        } else {
+            (DOCX_ENDNOTES_PART, "endnote", "endnotes")
+        };
+        let (id, relative) = split_note_body_parent_path(path, prefix)?;
+        (part.to_string(), kind, id, relative.to_string())
+    } else {
+        return Err(HandlerError::InvalidPath(path.to_string()));
+    };
+    if relative.is_empty() {
+        return Err(HandlerError::InvalidPath(
+            "cannot move a comment or note root".to_string(),
+        ));
+    }
+    let xml = package
+        .read_part_xml(&part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let root = if root_kind == "comment" {
+        find_comment_node_mut(&mut dom.root, &root_id)
+    } else {
+        find_note_node_mut(&mut dom.root, root_kind, &root_id)
+    }
+    .ok_or_else(|| HandlerError::PathNotFound(path.to_string()))?;
+    let segments = parse_path(&format!("/{relative}"))?;
+    let node = take_relative_word_node(root, &segments, path)?;
+    let output = ensure_document_root_namespaces(&crate::handler::serialize_dom(&dom));
+    package
+        .write_part_xml(&part, &output)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok((part, node))
+}
+
+/// Insert a moved subtree into a comment, footnote or endnote host and rehome
+/// every relationship before serializing that independent XML part.
+pub(crate) fn append_logical_part_body_node(
+    package: &mut OxmlPackage,
+    target: &str,
+    source_part: &str,
+    mut node: WordNode,
+    position: InsertPosition,
+) -> Result<String, HandlerError> {
+    let (part, root_kind, root_id, relative) = if target.starts_with("/comments/comment[") {
+        let (comment_path, relative) = split_comment_parent_path(target)?;
+        (
+            DOCX_COMMENTS_PART.to_string(),
+            "comment",
+            get_comment(package, comment_path)?.id,
+            relative.trim_start_matches('/').to_string(),
+        )
+    } else if target.starts_with("/footnotes/") || target.starts_with("/endnotes/") {
+        let (part, kind, prefix) = if target.starts_with("/footnotes/") {
+            (DOCX_FOOTNOTES_PART, "footnote", "footnotes")
+        } else {
+            (DOCX_ENDNOTES_PART, "endnote", "endnotes")
+        };
+        let (id, relative) = split_note_body_parent_path(target, prefix)?;
+        (part.to_string(), kind, id, relative.to_string())
+    } else {
+        return Err(HandlerError::InvalidPath(target.to_string()));
+    };
+    rehome_word_node_relationships(package, source_part, &part, &mut node)?;
+    let xml = package
+        .read_part_xml(&part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let root = if root_kind == "comment" {
+        find_comment_node_mut(&mut dom.root, &root_id)
+    } else {
+        find_note_node_mut(&mut dom.root, root_kind, &root_id)
+    }
+    .ok_or_else(|| HandlerError::PathNotFound(target.to_string()))?;
+    let parent = if relative.is_empty() {
+        root
+    } else {
+        navigate_relative_word_node_mut(root, &parse_path(&format!("/{relative}"))?, target)?
+    };
+    let type_name = node.element_type.to_path_name().to_string();
+    let insert_at = match position {
+        InsertPosition::AtIndex(index) if index < parent.children.len() => index,
+        _ => parent.children.len(),
+    };
+    parent.children.insert(insert_at, node);
+    let ordinal = parent.children[..=insert_at]
+        .iter()
+        .filter(|child| child.element_type.to_path_name() == type_name)
+        .count();
+    let output = ensure_document_root_namespaces(&crate::handler::serialize_dom(&dom));
+    package
+        .write_part_xml(&part, &output)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(format!("{target}/{type_name}[{ordinal}]"))
+}
+
+fn navigate_relative_word_node_mut<'a>(
+    mut node: &'a mut WordNode,
+    segments: &[handler_common::PathSegment],
+    full_path: &str,
+) -> Result<&'a mut WordNode, HandlerError> {
+    for segment in segments {
+        let index = segment.index.unwrap_or(1);
+        let child_index = node
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| child.element_type.to_path_name() == segment.name)
+            .nth(index.saturating_sub(1))
+            .map(|(index, _)| index)
+            .ok_or_else(|| HandlerError::PathNotFound(full_path.to_string()))?;
+        node = &mut node.children[child_index];
+    }
+    Ok(node)
+}
+
+fn take_relative_word_node(
+    parent: &mut WordNode,
+    segments: &[handler_common::PathSegment],
+    full_path: &str,
+) -> Result<WordNode, HandlerError> {
+    let (segment, rest) = segments
+        .split_first()
+        .ok_or_else(|| HandlerError::InvalidPath(full_path.to_string()))?;
+    let index = segment.index.unwrap_or(1);
+    let child_index = parent
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.element_type.to_path_name() == segment.name)
+        .nth(index.saturating_sub(1))
+        .map(|(index, _)| index)
+        .ok_or_else(|| HandlerError::PathNotFound(full_path.to_string()))?;
+    if rest.is_empty() {
+        return Ok(parent.children.remove(child_index));
+    }
+    take_relative_word_node(&mut parent.children[child_index], rest, full_path)
 }
 
 const COMMENT_PARAGRAPH_FORMAT_KEYS: &[&str] = &[
@@ -6232,6 +6466,144 @@ pub fn set_footnote_endnote_on_part(
     }
 
     Ok(unsupported)
+}
+
+/// Insert an opaque relationship-owning run into a footnote or endnote body.
+/// The run's relationships are materialized on the notes part by the caller;
+/// note bodies use the same paragraph/run structure as document content but
+/// are not part of the main Word DOM.
+pub(crate) fn append_footnote_endnote_inlined_run(
+    package: &mut OxmlPackage,
+    part: &str,
+    parent: &str,
+    run_xml: &str,
+) -> Result<String, HandlerError> {
+    let (kind, prefix) = if part.ends_with("footnotes.xml") {
+        ("footnote", "footnotes")
+    } else {
+        ("endnote", "endnotes")
+    };
+    let (note_id, relative) = split_note_body_parent_path(parent, prefix)?;
+    let xml = package
+        .read_part_xml(part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let mut dom = crate::handler::parse_document_xml(&xml)?;
+    let note = find_note_node_mut(&mut dom.root, kind, &note_id)
+        .ok_or_else(|| HandlerError::PathNotFound(parent.to_string()))?;
+    let target = if relative.is_empty() {
+        note
+    } else {
+        navigate_note_body_node_mut(note, relative, parent)?
+    };
+    let run = crate::handler::parse_document_xml(run_xml)?.root;
+    if run.element_type != WordElementType::Run {
+        return Err(HandlerError::InvalidArgument(
+            "inlinedparts runXml must have a w:r root element".to_string(),
+        ));
+    }
+
+    let result = if target.element_type == WordElementType::Paragraph {
+        target.children.push(run);
+        let run_index = target
+            .children
+            .iter()
+            .filter(|child| child.element_type == WordElementType::Run)
+            .count();
+        format!("{parent}/r[{run_index}]")
+    } else if matches!(&target.element_type, WordElementType::Unknown(name) if name == kind) {
+        let paragraph_index = target
+            .children
+            .iter()
+            .rposition(|child| child.element_type == WordElementType::Paragraph);
+        if let Some(index) = paragraph_index {
+            let paragraph_number = target.children[..=index]
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Paragraph)
+                .count();
+            let paragraph = &mut target.children[index];
+            paragraph.children.push(run);
+            let run_number = paragraph
+                .children
+                .iter()
+                .filter(|child| child.element_type == WordElementType::Run)
+                .count();
+            format!("{parent}/p[{paragraph_number}]/r[{run_number}]")
+        } else {
+            let mut paragraph = WordNode::new(WordElementType::Paragraph);
+            paragraph.children.push(run);
+            target.children.push(paragraph);
+            format!("{parent}/p[1]/r[1]")
+        }
+    } else {
+        return Err(HandlerError::InvalidPath(format!(
+            "inlinedparts note parent '{}' must be a note or paragraph",
+            parent
+        )));
+    };
+    let output = ensure_document_root_namespaces(&crate::handler::serialize_dom(&dom));
+    package
+        .write_part_xml(part, &output)
+        .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    Ok(result)
+}
+
+fn split_note_body_parent_path<'a>(
+    parent: &'a str,
+    prefix: &str,
+) -> Result<(String, &'a str), HandlerError> {
+    let rest = parent
+        .trim_start_matches('/')
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_prefix('/'))
+        .ok_or_else(|| HandlerError::InvalidPath(parent.to_string()))?;
+    let (note_id, relative) = rest.split_once('/').unwrap_or((rest, ""));
+    if note_id.is_empty() {
+        return Err(HandlerError::InvalidPath(parent.to_string()));
+    }
+    Ok((note_id.to_string(), relative))
+}
+
+fn find_note_node_mut<'a>(
+    node: &'a mut WordNode,
+    kind: &str,
+    id: &str,
+) -> Option<&'a mut WordNode> {
+    if matches!(&node.element_type, WordElementType::Unknown(name) if name == kind)
+        && node.attributes.get("id").map(String::as_str) == Some(id)
+    {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(found) = find_note_node_mut(child, kind, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn navigate_note_body_node_mut<'a>(
+    node: &'a mut WordNode,
+    relative: &str,
+    full_path: &str,
+) -> Result<&'a mut WordNode, HandlerError> {
+    // The note id is stripped from a path such as `/footnotes/1/p[1]`,
+    // leaving `p[1]`.  The shared path parser deliberately accepts only
+    // absolute paths, so restore the leading slash before navigating.
+    let segments = parse_path(&format!("/{relative}"))?;
+    let mut current = node;
+    for segment in segments {
+        let index = segment.index.unwrap_or(1);
+        let child_index = current
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| child.element_type.to_path_name() == segment.name)
+            .nth(index.saturating_sub(1))
+            .map(|(index, _)| index)
+            .ok_or_else(|| HandlerError::PathNotFound(full_path.to_string()))?;
+        current = &mut current.children[child_index];
+    }
+    Ok(current)
 }
 
 // ─── XML helper utilities ─────────────────────────────────────────────
@@ -7485,7 +7857,7 @@ fn validate_embedded_relationship_id(
     Ok(())
 }
 
-fn parse_embedded_data_uri<'a>(
+pub(crate) fn parse_embedded_data_uri<'a>(
     data_uri: &'a str,
     resource_name: &str,
 ) -> Result<(&'a str, Vec<u8>), HandlerError> {
@@ -10234,6 +10606,145 @@ fn upsert_docx_relationship(
     }
 }
 
+/// Restore one edge of an arbitrary Word OOXML relationship graph.  Unlike
+/// `embed-binary`, this is deliberately content-type agnostic: dump replay
+/// needs to retain chart sidecars, SmartArt, ActiveX and OLE parts that have
+/// no L2-specific constructor.  The caller supplies the source package's
+/// physical target path and original relationship id, so XML copied earlier
+/// continues to resolve without a lossy rId remap.
+pub(crate) struct RawRelationshipPart<'a> {
+    pub relationship_type: &'a str,
+    pub target: &'a str,
+    pub target_mode: &'a str,
+    pub part_path: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+    pub bytes: Option<Vec<u8>>,
+}
+
+pub(crate) fn attach_raw_relationship_part(
+    package: &mut OxmlPackage,
+    source_part: &str,
+    relationship_id: &str,
+    resource: RawRelationshipPart<'_>,
+) -> Result<(), HandlerError> {
+    validate_embedded_relationship_id(relationship_id, "raw relationship graph")?;
+    if resource.relationship_type.is_empty() || resource.target.is_empty() {
+        return Err(HandlerError::InvalidArgument(
+            "embed-part requires relationship type and target".to_string(),
+        ));
+    }
+    if !resource.target_mode.eq_ignore_ascii_case("external") {
+        let path = resource.part_path.ok_or_else(|| {
+            HandlerError::InvalidArgument("internal embed-part requires partPath".to_string())
+        })?;
+        let content_type = resource.content_type.ok_or_else(|| {
+            HandlerError::InvalidArgument("internal embed-part requires contentType".to_string())
+        })?;
+        let bytes = resource.bytes.ok_or_else(|| {
+            HandlerError::InvalidArgument("internal embed-part requires bytes".to_string())
+        })?;
+        package
+            .write_part(path, bytes)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+        ensure_content_type_override(package, &format!("/{path}"), content_type)?;
+    }
+    let rels_path = docx_relationships_path(source_part);
+    let mode = if resource.target_mode.eq_ignore_ascii_case("external") {
+        " TargetMode=\"External\""
+    } else {
+        ""
+    };
+    upsert_docx_relationship(
+        package,
+        &rels_path,
+        relationship_id,
+        &format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"{}/>",
+            escape_attr(relationship_id),
+            escape_attr(resource.relationship_type),
+            escape_attr(resource.target),
+            mode
+        ),
+    )
+}
+
+/// Move relationship references carried by a DOM subtree from one Word part to
+/// another.  The target part receives fresh local rIds (even when the source
+/// id is available) so an existing target relationship can never be silently
+/// overwritten.  Internal targets stay shared in the package; their recursive
+/// child graph remains valid because it is owned by the referenced part.
+pub(crate) fn rehome_word_node_relationships(
+    package: &mut OxmlPackage,
+    source_part: &str,
+    target_part: &str,
+    node: &mut WordNode,
+) -> Result<(), HandlerError> {
+    if source_part == target_part {
+        return Ok(());
+    }
+    let mut referenced = Vec::new();
+    collect_word_node_relationship_ids(node, &mut referenced);
+    referenced.sort();
+    referenced.dedup();
+    let source_rels = package
+        .part_rels(source_part)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let target_rels_path = docx_relationships_path(target_part);
+    let mut replacements = HashMap::new();
+    for source_id in referenced {
+        let relationship = source_rels.get(&source_id).ok_or_else(|| {
+            HandlerError::OperationFailed(format!(
+                "relationship '{}' referenced by moved content is missing from {}",
+                source_id, source_part
+            ))
+        })?;
+        let new_id = next_docx_rel_id(package, &target_rels_path);
+        let mode = if relationship.target_mode.eq_ignore_ascii_case("external") {
+            " TargetMode=\"External\""
+        } else {
+            ""
+        };
+        inject_docx_relationship(
+            package,
+            &target_rels_path,
+            &format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"{}/>",
+                new_id,
+                escape_attr(&relationship.type_uri),
+                escape_attr(&relationship.target),
+                mode
+            ),
+        )?;
+        replacements.insert(source_id, new_id);
+    }
+    rewrite_word_node_relationship_ids(node, &replacements);
+    Ok(())
+}
+
+fn collect_word_node_relationship_ids(node: &WordNode, output: &mut Vec<String>) {
+    for (name, value) in &node.attributes {
+        if node.attribute_namespaces.get(name).map(String::as_str) == Some(R_NS) {
+            output.push(value.clone());
+        }
+    }
+    for child in &node.children {
+        collect_word_node_relationship_ids(child, output);
+    }
+}
+
+fn rewrite_word_node_relationship_ids(node: &mut WordNode, replacements: &HashMap<String, String>) {
+    for (name, value) in &mut node.attributes {
+        if node.attribute_namespaces.get(name).map(String::as_str) == Some(R_NS) {
+            if let Some(replacement) = replacements.get(value) {
+                *value = replacement.clone();
+            }
+        }
+    }
+    for child in &mut node.children {
+        rewrite_word_node_relationship_ids(child, replacements);
+    }
+}
+
 /// Add Default extension entry to [Content_Types].xml if the extension isn't registered.
 fn update_docx_content_types_for_image(
     package: &mut OxmlPackage,
@@ -10323,11 +10834,18 @@ fn insert_drawing_in_paragraph(
 /// introduce DrawingML prefixes before the part is next passed through the DOM
 /// serializer, so their declarations must be available on document/header/
 /// footer roots alike.
-fn ensure_document_root_namespaces(xml: &str) -> String {
-    let root_start = ["<w:document", "<w:hdr", "<w:ftr"]
-        .into_iter()
-        .filter_map(|marker| xml.find(marker))
-        .min();
+pub(crate) fn ensure_document_root_namespaces(xml: &str) -> String {
+    let root_start = [
+        "<w:document",
+        "<w:hdr",
+        "<w:ftr",
+        "<w:comments",
+        "<w:footnotes",
+        "<w:endnotes",
+    ]
+    .into_iter()
+    .filter_map(|marker| xml.find(marker))
+    .min();
     let Some(root_start) = root_start else {
         return xml.to_string();
     };
@@ -10362,6 +10880,8 @@ fn ensure_document_root_namespaces(xml: &str) -> String {
             "wpg",
             "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
         ),
+        ("v", "urn:schemas-microsoft-com:vml"),
+        ("o", "urn:schemas-microsoft-com:office:office"),
     ];
 
     let mut missing = String::new();
