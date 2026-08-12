@@ -865,7 +865,7 @@ fn lint_dump_items(manifest: &PluginManifest, items: &[super::batch::BatchOp]) -
             }
             continue;
         };
-        let known = serde_json::from_str::<serde_json::Value>(&contents)
+        let known = serde_json::from_str::<serde_json::Value>(contents)
             .ok()
             .and_then(|value| {
                 value
