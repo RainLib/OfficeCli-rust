@@ -138,8 +138,8 @@ mod tests {
     #[test]
     fn reports_missing_internal_relationship_target() {
         let mut parts = HashMap::new();
-        parts.insert("[Content_Types].xml".to_string(), br#"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/></Types>"#.to_vec());
-        parts.insert("_rels/.rels".to_string(), br#"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"x\" Target=\"word/document.xml\"/></Relationships>"#.to_vec());
+        parts.insert("[Content_Types].xml".to_string(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/></Types>"#.to_vec());
+        parts.insert("_rels/.rels".to_string(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="x" Target="word/document.xml"/></Relationships>"#.to_vec());
         let errors = validate_package(&parts);
         assert!(errors
             .iter()
