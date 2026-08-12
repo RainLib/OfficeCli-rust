@@ -382,6 +382,97 @@ fn remove_cell(
     Ok(())
 }
 
+/// Remove one Excel cell and shift later cells in its row (`left`) or column
+/// (`up`) into the gap. This intentionally changes only cell references in
+/// that single row/column; full-row and full-column removal remain responsible
+/// for workbook-wide formula and metadata rewrites.
+pub fn remove_cell_with_shift(
+    package: &mut OxmlPackage,
+    path: &str,
+    shift: &str,
+) -> Result<Option<String>, HandlerError> {
+    let direction = shift.to_ascii_lowercase();
+    if !matches!(direction.as_str(), "left" | "up") {
+        return Err(HandlerError::InvalidArgument(format!(
+            "--shift={} not valid for remove. Use 'left' or 'up'.",
+            shift
+        )));
+    }
+
+    let parsed = navigation::parse_path(path)?;
+    let (sheet_name, target) = match (parsed.sheet_name, parsed.cell_ref, parsed.property) {
+        (Some(sheet_name), Some(cell_ref), None) => (sheet_name, cell_ref),
+        _ => {
+            return Err(HandlerError::InvalidArgument(
+                "--shift requires a cell path like /Sheet1/B5".to_string(),
+            ))
+        }
+    };
+    let model = helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
+    let sheet = model
+        .sheets
+        .iter()
+        .find(|sheet| sheet.name == sheet_name)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("sheet '{}'", sheet_name)))?;
+    let xml = package
+        .read_part_xml(&sheet.part_path)
+        .map_err(|error| HandlerError::OperationFailed(error.to_string()))?;
+    let prefix = detect_namespace_prefix(&xml);
+    let cell_start_pattern = format!("<{}c r=\"", prefix);
+    let mut cursor = 0;
+    let mut changes: Vec<(Range<usize>, String)> = Vec::new();
+
+    while let Some(offset) = xml[cursor..].find(&cell_start_pattern) {
+        let cell_start = cursor + offset;
+        let ref_start = cell_start + cell_start_pattern.len();
+        let ref_end = xml[ref_start..]
+            .find('"')
+            .map(|offset| ref_start + offset)
+            .ok_or_else(|| HandlerError::OperationFailed("malformed cell reference".to_string()))?;
+        let cell_end = find_cell_element_end(&xml, cell_start, &prefix)?;
+        let cell_ref = CellRef::parse(&xml[ref_start..ref_end]);
+        if let Some(cell_ref) = cell_ref {
+            let should_remove = cell_ref == target;
+            let shifted_ref = match direction.as_str() {
+                "left" if cell_ref.row == target.row && cell_ref.col > target.col => {
+                    Some(CellRef {
+                        col: cell_ref.col - 1,
+                        row: cell_ref.row,
+                    })
+                }
+                "up" if cell_ref.col == target.col && cell_ref.row > target.row => Some(CellRef {
+                    col: cell_ref.col,
+                    row: cell_ref.row - 1,
+                }),
+                _ => None,
+            };
+            if should_remove {
+                changes.push((cell_start..cell_end, String::new()));
+            } else if let Some(shifted_ref) = shifted_ref {
+                changes.push((ref_start..ref_end, shifted_ref.to_string_ref()));
+            }
+        }
+        cursor = cell_end;
+    }
+
+    if !changes.is_empty() {
+        let mut updated = xml;
+        for (range, replacement) in changes.into_iter().rev() {
+            updated.replace_range(range, &replacement);
+        }
+        package
+            .write_part_xml(&sheet.part_path, &updated)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    }
+
+    Ok(Some(format!(
+        "removed cell {}{} and shifted cells {}",
+        sheet_name,
+        target.to_string_ref(),
+        direction
+    )))
+}
+
 /// Remove a sheet from the workbook.
 fn remove_sheet(package: &mut OxmlPackage, sheet_name: &str) -> Result<(), HandlerError> {
     let model = helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
@@ -3799,5 +3890,22 @@ mod sheet_order_tests {
             .read_part_xml("[Content_Types].xml")
             .unwrap()
             .contains("/xl/worksheets/sheet2.xml"));
+    }
+
+    #[test]
+    fn remove_cell_with_shift_moves_only_the_affected_row_or_column() {
+        let mut package = package_fixture();
+        package.write_part_xml(
+            "xl/worksheets/sheet1.xml",
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"/><c r="B1"/><c r="C1"/></row><row r="2"><c r="C2"/></row></sheetData></worksheet>"#,
+        ).unwrap();
+
+        remove_cell_with_shift(&mut package, "/A/B1", "left").unwrap();
+
+        let xml = package.read_part_xml("xl/worksheets/sheet1.xml").unwrap();
+        assert!(xml.contains(r#"r="A1""#));
+        assert!(xml.contains(r#"r="B1""#));
+        assert!(xml.contains(r#"r="C2""#));
+        assert!(!xml.contains(r#"r="C1""#));
     }
 }

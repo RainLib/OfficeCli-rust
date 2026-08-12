@@ -10,6 +10,12 @@ pub struct RefreshCommand {
 }
 
 pub fn handle_refresh(cmd: RefreshCommand, _format: OutputFormat) -> Result<String, HandlerError> {
+    if crate::resident_available(&cmd.file) {
+        return Err(HandlerError::OperationFailed(
+            "refresh cannot modify a document while it is open in resident mode; run `officecli save` and `officecli close` first"
+                .to_string(),
+        ));
+    }
     let ext = std::path::Path::new(&cmd.file)
         .extension()
         .and_then(|e| e.to_str())

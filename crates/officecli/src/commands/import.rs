@@ -39,6 +39,12 @@ pub fn handle_import(
     cmd: ImportCommand,
     _format: handler_common::OutputFormat,
 ) -> Result<String, HandlerError> {
+    if crate::resident_available(&cmd.file) {
+        return Err(HandlerError::OperationFailed(
+            "import cannot modify a document while it is open in resident mode; run `officecli save` and `officecli close` first"
+                .to_string(),
+        ));
+    }
     // Only xlsx supported
     if !cmd.file.to_lowercase().ends_with(".xlsx") {
         return Err(HandlerError::InvalidArgument(

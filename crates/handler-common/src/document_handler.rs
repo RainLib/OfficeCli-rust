@@ -119,6 +119,7 @@ pub trait DocumentHandler: Send {
 }
 
 /// Result of a template merge operation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MergeResult {
     pub replaced_count: usize,
     pub unresolved_count: usize,

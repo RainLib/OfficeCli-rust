@@ -6,24 +6,40 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-/// Execute multiple commands from inline JSON, a file, or stdin
+/// Execute multiple commands from inline JSON, a file, or stdin.
+///
+/// `--input` and `--commands` mirror the C# CLI.  The older positional JSON,
+/// `--commands-file`, and `--stdin` forms remain supported for existing Rust
+/// callers.
 #[derive(Args)]
 pub struct BatchCommand {
     pub file: String,
     /// JSON string containing an array of operations.
     #[arg(
         value_name = "BATCH_JSON",
-        required_unless_present_any = ["commands_file", "stdin"],
-        conflicts_with_all = ["commands_file", "stdin"]
+        conflicts_with_all = ["commands_file", "commands", "stdin"]
     )]
     pub batch_json: Option<String>,
 
-    /// Read the JSON array of operations from a file.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["batch_json", "stdin"])]
+    /// Read the JSON array of operations from a file. Use `-` for stdin.
+    #[arg(
+        long = "input",
+        visible_alias = "commands-file",
+        value_name = "PATH",
+        conflicts_with_all = ["batch_json", "commands", "stdin"]
+    )]
     pub commands_file: Option<String>,
 
+    /// JSON array of operations supplied inline.
+    #[arg(
+        long,
+        value_name = "JSON",
+        conflicts_with_all = ["batch_json", "commands_file", "stdin"]
+    )]
+    pub commands: Option<String>,
+
     /// Read the JSON array of operations from stdin.
-    #[arg(long, conflicts_with_all = ["batch_json", "commands_file"])]
+    #[arg(long, conflicts_with_all = ["batch_json", "commands_file", "commands"])]
     pub stdin: bool,
 
     /// Emit the refreshed text+offset map after the batch (and per op) in JSON output.
@@ -34,6 +50,17 @@ pub struct BatchCommand {
     /// Without this flag a batch is atomic: failed batches are not saved.
     #[arg(long)]
     pub best_effort: bool,
+
+    /// Stop after the first failed operation. By default, all operations run
+    /// so callers receive every error; atomic batches still roll back on any
+    /// failure unless `--best-effort` is supplied.
+    #[arg(long)]
+    pub stop_on_error: bool,
+
+    /// Compatibility flag for C# callers. Protection bypass is a no-op until
+    /// document protection checks are implemented by the Rust handlers.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Per-paragraph (or per-element) ledger of applied text-length edits.
@@ -54,9 +81,9 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
 
     let batch = parse_batch_ops(&batch_json)?;
     let ops = batch.ops;
-    let stop_on_error = batch.stop_on_error.unwrap_or(!cmd.best_effort);
+    let stop_on_error = cmd.stop_on_error || batch.stop_on_error.unwrap_or(false);
 
-    if !cmd.emit_map {
+    if !cmd.emit_map && !crate::resident_available(&cmd.file) {
         if let Some(output) =
             try_handle_docx_range_set_batch(&cmd.file, &ops, format, cmd.best_effort)?
         {
@@ -200,7 +227,13 @@ fn read_batch_json(cmd: &BatchCommand) -> Result<String, HandlerError> {
     if let Some(batch_json) = &cmd.batch_json {
         return Ok(batch_json.clone());
     }
+    if let Some(commands) = &cmd.commands {
+        return Ok(commands.clone());
+    }
     if let Some(path) = &cmd.commands_file {
+        if path == "-" {
+            return read_batch_stdin();
+        }
         return std::fs::read_to_string(path).map_err(|e| {
             HandlerError::OperationFailed(format!(
                 "failed to read batch commands file '{}': {}",
@@ -208,16 +241,17 @@ fn read_batch_json(cmd: &BatchCommand) -> Result<String, HandlerError> {
             ))
         });
     }
-    if cmd.stdin {
-        let mut input = String::new();
-        std::io::stdin()
-            .read_to_string(&mut input)
-            .map_err(|e| HandlerError::OperationFailed(format!("failed to read stdin: {}", e)))?;
-        return Ok(input);
-    }
-    Err(HandlerError::InvalidArgument(
-        "batch JSON must be provided inline, by --commands-file, or by --stdin".to_string(),
-    ))
+    // C# batch reads stdin when no explicit source is supplied. `--stdin`
+    // remains an accepted explicit spelling for the established Rust surface.
+    read_batch_stdin()
+}
+
+fn read_batch_stdin() -> Result<String, HandlerError> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| HandlerError::OperationFailed(format!("failed to read stdin: {}", e)))?;
+    Ok(input.trim_start_matches('\u{feff}').to_string())
 }
 
 fn try_handle_docx_bookmark_add_batch(
@@ -760,7 +794,10 @@ pub(crate) fn execute_batch_op(
         }
         "remove" => {
             let path = op.params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            match handler.remove(path) {
+            let properties = string_map(&op.params, "properties")
+                .or_else(|| string_map(&op.params, "props"))
+                .unwrap_or_default();
+            match handler.remove_with_properties(path, &properties) {
                 Ok(_) => Ok("removed".to_string()),
                 Err(e) => Err(e.to_string()),
             }

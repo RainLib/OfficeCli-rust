@@ -247,6 +247,95 @@ fn test_mcp_registration_lifecycle() {
         .stderr(predicate::str::contains("Supported: lms"));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_resident_forwards_normal_commands_and_closes_cleanly() {
+    let tmp = temp_dir();
+    let data_home = tmp.path().join("resident-data");
+    std::fs::create_dir_all(&data_home).unwrap();
+    let path = tmp.path().join("resident_lifecycle.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli()
+        .args(["create", &p])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success();
+    officecli()
+        .args(["open", &p])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success();
+
+    let socket_output = officecli()
+        .args(["socket-path", &p])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let socket_path = std::path::PathBuf::from(String::from_utf8(socket_output).unwrap().trim());
+    assert!(socket_path.exists(), "open must create a resident socket");
+
+    officecli()
+        .args(["set", &p, "/body/p[1]", "text=resident value"])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=added in resident",
+        ])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success();
+    officecli()
+        .args(["remove", &p, "/body/p[2]"])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/body/p[1]"])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("resident value"));
+    officecli()
+        .args(["save", &p])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success();
+    officecli()
+        .args(["close", &p])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success();
+    for _ in 0..20 {
+        if !socket_path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        !socket_path.exists(),
+        "close must stop the resident process and remove its socket"
+    );
+    officecli()
+        .args(["view", &p])
+        .env("XDG_DATA_HOME", &data_home)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("resident value"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Create — all three formats
 // ═══════════════════════════════════════════════════════════════════════
@@ -458,6 +547,38 @@ fn test_view_docx_outline() {
         .args(["view", &p, "-m", "outline"])
         .assert()
         .success();
+}
+
+#[test]
+fn test_view_accepts_csharp_positional_mode_and_line_range_aliases() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("view_positional_mode.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "add",
+            &p,
+            "--parent",
+            "/body",
+            "--type-name",
+            "paragraph",
+            "--properties",
+            "text=second",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &p, "outline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(no headings found)"));
+    officecli()
+        .args(["view", &p, "text", "--start", "2", "--end", "2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("second"));
 }
 
 #[test]
@@ -1893,6 +2014,57 @@ fn test_docx_set_existing_paragraph_format_revision_restores_prior_properties() 
         .success()
         .stdout(predicate::str::contains("\"matches\": 0"));
     officecli().args(["validate", &p]).assert().success();
+}
+
+#[test]
+fn test_docx_paragraph_format_revision_snapshot_omits_mark_run_properties() {
+    let tmp = temp_dir();
+    let path = tmp
+        .path()
+        .join("test_paragraph_format_revision_snapshot.docx");
+    let p = path.to_string_lossy().to_string();
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args([
+            "raw-set",
+            &p,
+            "/document",
+            "--xpath",
+            "/w:document/w:body/w:p[1]",
+            "--action",
+            "replace",
+            "--xml",
+            "<w:p><w:pPr><w:pStyle w:val=\"Normal\"/><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t>sample</w:t></w:r></w:p>",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "set",
+            &p,
+            "/body/p[1]",
+            "alignment=center",
+            "revision.type=format",
+            "revision.id=9",
+            "revision.author=Ada",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args(["raw", &p, "/document"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "<w:pPrChange w:author=\"Ada\" w:id=\"9\"><w:pPr><w:pStyle w:val=\"Normal\" /></w:pPr></w:pPrChange>",
+        ))
+        .stdout(
+            predicate::str::contains(
+                "<w:pPrChange w:author=\"Ada\" w:id=\"9\"><w:pPr><w:pStyle w:val=\"Normal\" /><w:rPr>",
+            )
+            .not(),
+        );
 }
 
 #[test]
@@ -7095,6 +7267,102 @@ fn test_xlsx_view_outline() {
 }
 
 #[test]
+fn test_xlsx_remove_cell_shift_left_and_up() {
+    let tmp = temp_dir();
+    let left_path = tmp.path().join("remove_shift_left.xlsx");
+    let left = left_path.to_string_lossy().to_string();
+    officecli().args(["create", &left]).assert().success();
+    for (cell, text) in [("A1", "first"), ("B1", "second"), ("C1", "third")] {
+        officecli()
+            .args([
+                "set",
+                &left,
+                &format!("/Sheet1/{cell}"),
+                &format!("value={text}"),
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args(["remove", &left, "/Sheet1/B1", "--shift", "left"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &left, "/Sheet1/B1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("third"));
+    officecli()
+        .args(["--json", "get", &left, "/Sheet1/C1"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("not_found"));
+
+    let up_path = tmp.path().join("remove_shift_up.xlsx");
+    let up = up_path.to_string_lossy().to_string();
+    officecli().args(["create", &up]).assert().success();
+    for (cell, text) in [("A1", "first"), ("A2", "second"), ("A3", "third")] {
+        officecli()
+            .args([
+                "set",
+                &up,
+                &format!("/Sheet1/{cell}"),
+                &format!("value={text}"),
+            ])
+            .assert()
+            .success();
+    }
+    officecli()
+        .args(["remove", &up, "/Sheet1/A2", "--shift", "up"])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &up, "/Sheet1/A2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("third"));
+    officecli()
+        .args(["remove", &up, "/Sheet1/A1", "--shift", "diagonal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Use 'left' or 'up'"));
+}
+
+#[test]
+fn test_batch_remove_passes_excel_shift_property() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("batch_remove_shift.xlsx");
+    let p = path.to_string_lossy().to_string();
+    officecli().args(["create", &p]).assert().success();
+    for (cell, value) in [("A1", "one"), ("B1", "two"), ("C1", "three")] {
+        officecli()
+            .args([
+                "set",
+                &p,
+                &format!("/Sheet1/{cell}"),
+                &format!("value={value}"),
+            ])
+            .assert()
+            .success();
+    }
+
+    officecli()
+        .args([
+            "batch",
+            &p,
+            "--commands",
+            r#"[{"command":"remove","path":"/Sheet1/B1","props":{"shift":"left"}}]"#,
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["--json", "get", &p, "/Sheet1/B1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("three"));
+}
+
+#[test]
 fn test_xlsx_modern_formula_ooxml_round_trip() {
     let tmp = temp_dir();
     let path = tmp.path().join("modern_formula.xlsx");
@@ -8840,6 +9108,92 @@ fn test_batch_docx_from_stdin() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Batch stdin test"));
+}
+
+#[test]
+fn test_batch_accepts_csharp_input_commands_and_implicit_stdin() {
+    let tmp = temp_dir();
+    let commands_path = tmp.path().join("commands.json");
+    let commands_file = commands_path.to_string_lossy().to_string();
+    std::fs::write(
+        &commands_path,
+        r#"[{"command":"set","path":"/body/p[1]","props":{"text":"from input"}}]"#,
+    )
+    .unwrap();
+
+    let input_path = tmp.path().join("batch_input.docx");
+    let input_doc = input_path.to_string_lossy().to_string();
+    officecli().args(["create", &input_doc]).assert().success();
+    officecli()
+        .args(["batch", &input_doc, "--input", &commands_file])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &input_doc])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from input"));
+
+    let commands_path = tmp.path().join("batch_commands.docx");
+    let commands_doc = commands_path.to_string_lossy().to_string();
+    officecli()
+        .args(["create", &commands_doc])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "batch",
+            &commands_doc,
+            "--commands",
+            r#"[{"command":"set","path":"/body/p[1]","props":{"text":"from commands"}}]"#,
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &commands_doc])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from commands"));
+
+    let stdin_path = tmp.path().join("batch_implicit_stdin.docx");
+    let stdin_doc = stdin_path.to_string_lossy().to_string();
+    officecli().args(["create", &stdin_doc]).assert().success();
+    officecli()
+        .args(["batch", &stdin_doc])
+        .write_stdin(r#"[{"command":"set","path":"/body/p[1]","props":{"text":"implicit stdin"}}]"#)
+        .assert()
+        .success();
+    officecli()
+        .args(["view", &stdin_doc])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("implicit stdin"));
+}
+
+#[test]
+fn test_batch_default_continues_but_retains_atomic_rollback() {
+    let tmp = temp_dir();
+    let path = tmp.path().join("batch_default_continue.docx");
+    let p = path.to_string_lossy().to_string();
+    let commands = r#"[
+      {"command":"set","path":"/missing","props":{"text":"ignored"}},
+      {"command":"set","path":"/body/p[1]","props":{"text":"must roll back"}}
+    ]"#;
+
+    officecli().args(["create", &p]).assert().success();
+    officecli()
+        .args(["batch", &p, "--commands", commands])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("set: ERROR"))
+        .stdout(predicate::str::contains(
+            "rolled back because another batch operation failed",
+        ));
+    officecli()
+        .args(["view", &p])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("must roll back").not());
 }
 
 #[test]

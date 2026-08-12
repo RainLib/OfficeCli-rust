@@ -224,6 +224,26 @@ impl DocumentHandler for ExcelHandler {
         mutations::remove_element(&mut pkg, path)
     }
 
+    fn remove_with_properties(
+        &self,
+        path: &str,
+        properties: &HashMap<String, String>,
+    ) -> Result<Option<String>, HandlerError> {
+        if !self.editable {
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
+        }
+        handler_common::ensure_scoped(path, "remove")?;
+        let mut pkg = self.package.borrow_mut();
+        match properties.get("shift") {
+            Some(shift) if !shift.is_empty() => {
+                mutations::remove_cell_with_shift(&mut pkg, path, shift)
+            }
+            _ => mutations::remove_element(&mut pkg, path),
+        }
+    }
+
     fn move_element(
         &self,
         source: &str,

@@ -478,6 +478,32 @@ pub(crate) fn open_handler(
     file: &str,
     editable: bool,
 ) -> Result<Box<dyn DocumentHandler>, HandlerError> {
+    if resident_available(file) {
+        #[cfg(unix)]
+        return Ok(Box::new(resident::ResidentHandler::new(file)?));
+    }
+    open_handler_direct(file, editable)
+}
+
+pub(crate) fn resident_available(file: &str) -> bool {
+    #[cfg(unix)]
+    {
+        resident::is_available(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        false
+    }
+}
+
+/// Open a document directly from disk, bypassing resident IPC. The resident
+/// server uses this while it owns the in-memory session; every CLI command
+/// should go through [`open_handler`] so an active session is reused.
+pub(crate) fn open_handler_direct(
+    file: &str,
+    editable: bool,
+) -> Result<Box<dyn DocumentHandler>, HandlerError> {
     let path = PathBuf::from(file);
     let ext = path
         .extension()

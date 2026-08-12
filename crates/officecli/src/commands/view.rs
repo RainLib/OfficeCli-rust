@@ -7,16 +7,20 @@ pub struct ViewCommand {
     /// Document file path
     pub file: String,
 
+    /// C#-compatible positional view mode. Takes precedence over `--mode`.
+    #[arg(value_name = "MODE")]
+    pub positional_mode: Option<String>,
+
     /// View mode: text, annotated, outline, stats, issues, html, svg, screenshot, pdf, forms
     #[arg(short, long, default_value = "text")]
     pub mode: String,
 
     /// Start line number
-    #[arg(long)]
+    #[arg(long = "start", visible_alias = "start-line")]
     pub start_line: Option<usize>,
 
     /// End line number
-    #[arg(long)]
+    #[arg(long = "end", visible_alias = "end-line")]
     pub end_line: Option<usize>,
 
     /// Max lines to display
@@ -70,9 +74,10 @@ pub struct ViewCommand {
 
 pub fn handle_view(cmd: ViewCommand, format: OutputFormat) -> Result<String, HandlerError> {
     let handler = crate::open_handler(&cmd.file, false)?;
+    let mode = cmd.positional_mode.as_deref().unwrap_or(&cmd.mode);
 
     // pdf mode: export to PDF via exporter plugin
-    if cmd.mode.eq_ignore_ascii_case("pdf") {
+    if mode.eq_ignore_ascii_case("pdf") {
         return handle_view_pdf(&cmd, format);
     }
 
@@ -89,7 +94,6 @@ pub fn handle_view(cmd: ViewCommand, format: OutputFormat) -> Result<String, Han
     };
 
     let browser = cmd.browser;
-    let mode = cmd.mode.as_str();
     let issue_type = cmd.r#type.as_deref();
     let issue_limit = cmd.limit;
 

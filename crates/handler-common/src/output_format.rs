@@ -33,7 +33,7 @@ pub struct RawOptions {
 }
 
 /// Binary extraction result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinaryInfo {
     pub content_type: String,
     pub byte_count: usize,

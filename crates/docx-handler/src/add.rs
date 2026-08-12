@@ -2608,12 +2608,29 @@ pub(crate) fn format_revision_snapshot(
                 .to_string(),
         )
     })?;
-    Ok(host
+    let mut snapshot = host
         .children
         .iter()
         .find(|child| child.element_type == property_type)
         .cloned()
-        .unwrap_or_else(|| WordNode::new(property_type)))
+        .unwrap_or_else(|| WordNode::new(property_type.clone()));
+
+    // `w:pPrChange` contains `CT_PPrBase`, not a complete `w:pPr`.
+    // Paragraph-mark run properties and section properties belong only to the
+    // live paragraph properties and make the revision snapshot invalid OOXML.
+    // Do not carry an existing change marker into a fresh snapshot either.
+    if property_type == WordElementType::ParagraphProperties {
+        snapshot.children.retain(|child| {
+            child.element_type != WordElementType::RunProperties
+                && child.element_type != WordElementType::SectionProperties
+                && !matches!(
+                    &child.element_type,
+                    WordElementType::Unknown(name) if name == "pPrChange"
+                )
+        });
+    }
+
+    Ok(snapshot)
 }
 
 /// Add the correct OOXML `*PrChange` marker after a regular property mutation.
