@@ -10,12 +10,6 @@ pub struct RefreshCommand {
 }
 
 pub fn handle_refresh(cmd: RefreshCommand, _format: OutputFormat) -> Result<String, HandlerError> {
-    if crate::resident_available(&cmd.file) {
-        return Err(HandlerError::OperationFailed(
-            "refresh cannot modify a document while it is open in resident mode; run `officecli save` and `officecli close` first"
-                .to_string(),
-        ));
-    }
     let ext = std::path::Path::new(&cmd.file)
         .extension()
         .and_then(|e| e.to_str())
@@ -38,11 +32,13 @@ pub fn handle_refresh(cmd: RefreshCommand, _format: OutputFormat) -> Result<Stri
     let html = handler.view_as_html(handler_common::ViewOptions::default())?;
     let page_map = compute_page_map_from_html(&html);
 
-    // Walk the docx package directly and rewrite every PAGEREF field's
-    // cached page number with the new estimate. The handler's set/add
-    // operations are too coarse for this — we need byte-level surgery on
-    // <w:instrText>PAGEREF _Toc... \h</w:instrText> + adjacent <w:t>NN</w:t>.
-    let (updated, total) = update_pagerefs(&cmd.file, &page_map)?;
+    // Use raw handler operations so the resident handler updates its in-memory
+    // package instead of silently reopening a stale file from disk.
+    let document = handler.raw("/document", handler_common::RawOptions::default())?;
+    let (document, updated, total) = update_pagerefs_xml(&document, &page_map);
+    if updated > 0 {
+        handler.raw_set("/document", "/w:document", "replace", Some(&document))?;
+    }
 
     handler.save()?;
     eprintln!(
@@ -116,17 +112,10 @@ fn extract_heading_text(html_line: &str) -> String {
 /// robust without a full XML parser, we treat the TOC region as
 /// `PAGEREF ... </w:t>`-bounded runs and update the digit immediately
 /// preceding the field-close.
-fn update_pagerefs(
-    file_path: &str,
+fn update_pagerefs_xml(
+    document: &str,
     page_map: &HashMap<String, usize>,
-) -> Result<(usize, usize), HandlerError> {
-    use oxml::OxmlPackage;
-    let mut pkg = OxmlPackage::open(file_path, true)
-        .map_err(|e| HandlerError::OperationFailed(format!("open docx: {}", e)))?;
-    let document = pkg
-        .read_part_xml("word/document.xml")
-        .map_err(|e| HandlerError::OperationFailed(format!("read document.xml: {}", e)))?;
-
+) -> (String, usize, usize) {
     let mut updated = 0usize;
     let mut total = 0usize;
     let mut out = String::with_capacity(document.len());
@@ -185,14 +174,7 @@ fn update_pagerefs(
     }
     out.push_str(&document[cursor..]);
 
-    if updated > 0 {
-        pkg.write_part_xml("word/document.xml", &out)
-            .map_err(|e| HandlerError::OperationFailed(format!("write document.xml: {}", e)))?;
-        pkg.save_as(file_path)
-            .map_err(|e| HandlerError::SaveError(e.to_string()))?;
-    }
-
-    Ok((updated, total))
+    (out, updated, total)
 }
 
 /// Bookmark names in PAGEREF are typically `_Toc12345` style identifiers

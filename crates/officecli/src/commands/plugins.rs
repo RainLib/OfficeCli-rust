@@ -34,6 +34,10 @@ pub enum PluginsAction {
     Lint {
         /// Path to plugin directory, plugin.json, or executable
         path: String,
+        /// Source file used to exercise a dump-reader. Falls back to
+        /// OFFICECLI_LINT_FIXTURE.
+        #[arg(long)]
+        fixture: Option<String>,
     },
 }
 
@@ -41,7 +45,7 @@ pub fn handle_plugins(cmd: PluginsCommand, format: OutputFormat) -> Result<Strin
     match cmd.action {
         PluginsAction::List => list_plugins(format),
         PluginsAction::Info { name } => info_plugin(&name, format),
-        PluginsAction::Lint { path } => lint_target(&path, format),
+        PluginsAction::Lint { path, fixture } => lint_target(&path, fixture.as_deref(), format),
     }
 }
 
@@ -595,7 +599,11 @@ fn info_plugin(name: &str, format: OutputFormat) -> Result<String, HandlerError>
     }
 }
 
-fn lint_target(path: &str, format: OutputFormat) -> Result<String, HandlerError> {
+fn lint_target(
+    path: &str,
+    fixture: Option<&str>,
+    format: OutputFormat,
+) -> Result<String, HandlerError> {
     let p = PathBuf::from(path);
     let resolved: Option<ResolvedPlugin> = if p.is_file() {
         // Could be plugin.json or an executable.
@@ -625,6 +633,72 @@ fn lint_target(path: &str, format: OutputFormat) -> Result<String, HandlerError>
         HandlerError::OperationFailed(format!("could not resolve a plugin at '{}'", path))
     })?;
     let warnings = validate_manifest(&resolved.manifest);
+    if !resolved
+        .manifest
+        .kinds
+        .iter()
+        .any(|kind| kind == "dump-reader")
+    {
+        return Err(HandlerError::UnsupportedMode(format!(
+            "Plugin '{}' is not a dump-reader; lint only applies to dump-reader plugins",
+            resolved.manifest.name
+        )));
+    }
+    let (fixture, findings, batch_items) = {
+        let fixture = fixture.map(str::to_string).or_else(|| std::env::var("OFFICECLI_LINT_FIXTURE").ok())
+            .ok_or_else(|| HandlerError::InvalidArgument(format!(
+                "No lint fixture available for plugin '{}'. Pass --fixture <path>, or set OFFICECLI_LINT_FIXTURE.",
+                resolved.manifest.name
+            )))?;
+        if !Path::new(&fixture).is_file() {
+            return Err(HandlerError::InvalidArgument(format!(
+                "lint fixture '{}' does not exist",
+                fixture
+            )));
+        }
+        let executable = if resolved.executable_path.is_empty() {
+            return Err(HandlerError::InvalidArgument(
+                "dump-reader lint requires a plugin executable, not only plugin.json".to_string(),
+            ));
+        } else {
+            &resolved.executable_path
+        };
+        let output = Command::new(executable)
+            .arg("dump")
+            .arg(&fixture)
+            .output()
+            .map_err(|error| {
+                HandlerError::OperationFailed(format!(
+                    "failed to run dump-reader '{}': {}",
+                    resolved.manifest.name, error
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(HandlerError::OperationFailed(format!(
+                "dump-reader '{}' failed (exit {}): {}",
+                resolved.manifest.name,
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "signal".to_string(), |code| code.to_string()),
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            )));
+        }
+        let items = parse_lint_jsonl(&resolved.manifest.name, &output.stdout)?;
+        let findings = lint_dump_items(&resolved.manifest, &items);
+        let batch_items = items.len();
+        (Some(fixture), findings, Some(batch_items))
+    };
+    if !findings.is_empty() {
+        return Err(HandlerError::OperationFailed(format!(
+            "dump-reader '{}' emitted {} unknown property/properties; run with --json after correcting its schema vocabulary",
+            resolved.manifest.name,
+            findings.len()
+        )));
+    }
 
     match format {
         OutputFormat::Json => {
@@ -633,6 +707,17 @@ fn lint_target(path: &str, format: OutputFormat) -> Result<String, HandlerError>
                 "name".into(),
                 serde_json::Value::String(resolved.manifest.name.clone()),
             );
+            if let Some(fixture) = &fixture {
+                obj.insert("fixture".into(), serde_json::json!(fixture));
+            }
+            if let Some(count) = batch_items {
+                obj.insert("batch_items".into(), serde_json::json!(count));
+            }
+            obj.insert(
+                "unknown_prop_count".into(),
+                serde_json::json!(findings.len()),
+            );
+            obj.insert("unknown_props".into(), serde_json::json!(findings));
             obj.insert(
                 "version".into(),
                 serde_json::Value::String(resolved.manifest.version.clone()),
@@ -676,9 +761,144 @@ fn lint_target(path: &str, format: OutputFormat) -> Result<String, HandlerError>
                     lines.push(format!("  - {}", w));
                 }
             }
+            if let Some(fixture) = fixture {
+                lines.push(format!("Fixture: {}", fixture));
+                lines.push(format!("Batch items: {}", batch_items.unwrap_or(0)));
+                if findings.is_empty() {
+                    lines.push(format!(
+                        "Result: OK — every emitted prop is declared in the {} schema.",
+                        resolved.manifest.target.as_deref().unwrap_or("docx")
+                    ));
+                } else {
+                    lines.push(format!("Result: {} unknown prop(s):", findings.len()));
+                    for finding in &findings {
+                        lines.push(format!(
+                            "  [#{}] type={} prop=\"{}\"",
+                            finding.index, finding.element, finding.prop
+                        ));
+                    }
+                }
+            }
             Ok(lines.join("\n"))
         }
     }
+}
+
+#[derive(Serialize)]
+struct LintFinding {
+    index: usize,
+    element: String,
+    prop: String,
+}
+
+fn parse_lint_jsonl(name: &str, stdout: &[u8]) -> Result<Vec<super::batch::BatchOp>, HandlerError> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut items = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            return Err(HandlerError::OperationFailed(format!(
+                "dump-reader plugin '{}' emitted a JSON array; protocol v1 requires JSONL",
+                name
+            )));
+        }
+        let item = serde_json::from_str(line).map_err(|error| {
+            HandlerError::OperationFailed(format!(
+                "dump-reader plugin '{}' emitted invalid JSON at line #{}: {}",
+                name,
+                index + 1,
+                error
+            ))
+        })?;
+        items.push(item);
+    }
+    Ok(items)
+}
+
+fn lint_dump_items(manifest: &PluginManifest, items: &[super::batch::BatchOp]) -> Vec<LintFinding> {
+    let target = manifest.target.as_deref().unwrap_or("docx");
+    let mut findings = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let verb = item.command.to_ascii_lowercase();
+        if verb != "add" && verb != "set" {
+            continue;
+        }
+        let Some(props) = item
+            .params
+            .get("props")
+            .or_else(|| item.params.get("properties"))
+            .and_then(|value| value.as_object())
+        else {
+            continue;
+        };
+        let element = if verb == "add" {
+            item.params
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            item.params
+                .get("path")
+                .and_then(|value| value.as_str())
+                .and_then(infer_element_from_path)
+                .unwrap_or("")
+                .to_string()
+        };
+        if element.is_empty() {
+            continue;
+        }
+        let schema = Path::new("source/OfficeCLI/schemas/help")
+            .join(target)
+            .join(format!("{}.json", element));
+        let Ok(contents) = std::fs::read_to_string(&schema) else {
+            if verb == "add" {
+                findings.push(LintFinding {
+                    index,
+                    element,
+                    prop: "<unknown_type>".to_string(),
+                });
+            }
+            continue;
+        };
+        let known = serde_json::from_str::<serde_json::Value>(&contents)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("properties")
+                    .and_then(|value| value.as_object())
+                    .cloned()
+            })
+            .unwrap_or_default();
+        for key in props.keys() {
+            if !known.contains_key(key)
+                && !known.values().any(|property| {
+                    property
+                        .get("aliases")
+                        .and_then(|value| value.as_array())
+                        .is_some_and(|aliases| {
+                            aliases.iter().any(|alias| alias.as_str() == Some(key))
+                        })
+                })
+            {
+                findings.push(LintFinding {
+                    index,
+                    element: element.clone(),
+                    prop: key.clone(),
+                });
+            }
+        }
+    }
+    findings
+}
+
+fn infer_element_from_path(path: &str) -> Option<&str> {
+    let segment = path.rsplit('/').next()?;
+    let element = segment.split('[').next().unwrap_or(segment);
+    (!element.is_empty()).then_some(element)
 }
 
 /// Read a `plugin.json` file and parse it. Does not consult the runtime
@@ -947,5 +1167,24 @@ mod tests {
         std::fs::create_dir_all(&tmpdir).unwrap();
         assert!(resolve_plugin_dir(&tmpdir).is_none());
         std::fs::remove_dir_all(&tmpdir).ok();
+    }
+
+    #[test]
+    fn dump_lint_reports_unknown_property() {
+        let manifest = PluginManifest {
+            target: Some("xlsx".into()),
+            ..Default::default()
+        };
+        let items = vec![super::super::batch::BatchOp {
+            command: "add".into(),
+            params: serde_json::from_value(serde_json::json!({
+                "type": "cell",
+                "props": { "definitely-not-a-cell-property": "x" }
+            }))
+            .unwrap(),
+        }];
+        let findings = lint_dump_items(&manifest, &items);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].prop, "definitely-not-a-cell-property");
     }
 }

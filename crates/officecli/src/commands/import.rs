@@ -1,7 +1,6 @@
 /// `import` command — import CSV/TSV data into an Excel sheet.
 use clap::Args;
 use handler_common::HandlerError;
-use oxml::OxmlPackage;
 
 #[derive(Args)]
 pub struct ImportCommand {
@@ -39,12 +38,6 @@ pub fn handle_import(
     cmd: ImportCommand,
     _format: handler_common::OutputFormat,
 ) -> Result<String, HandlerError> {
-    if crate::resident_available(&cmd.file) {
-        return Err(HandlerError::OperationFailed(
-            "import cannot modify a document while it is open in resident mode; run `officecli save` and `officecli close` first"
-                .to_string(),
-        ));
-    }
     // Only xlsx supported
     if !cmd.file.to_lowercase().ends_with(".xlsx") {
         return Err(HandlerError::InvalidArgument(
@@ -105,25 +98,15 @@ pub fn handle_import(
         ','
     };
 
-    // Open the xlsx file for editing
-    let mut package =
-        OxmlPackage::open(&cmd.file, true).map_err(|e| HandlerError::OpenError(e.to_string()))?;
-
-    // Perform the import
-    let result = xlsx_handler::import::import_csv(
-        &mut package,
+    let handler = crate::open_handler(&cmd.file, true)?;
+    let result = handler.import_csv(
         &cmd.parent_path,
         &csv_content,
         delimiter,
         cmd.header,
         &cmd.start_cell,
-    )
-    .map_err(|e| HandlerError::OperationFailed(e))?;
-
-    // Save the changes
-    package
-        .save()
-        .map_err(|e| HandlerError::SaveError(e.to_string()))?;
+    )?;
+    handler.save()?;
 
     Ok(result)
 }

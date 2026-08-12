@@ -25,6 +25,12 @@ pub fn handle_dump(
     cmd: DumpCommand,
     _format: handler_common::OutputFormat,
 ) -> Result<String, HandlerError> {
+    // A few rich dump emitters inspect package parts directly. Flush the
+    // resident snapshot first so these reads cannot observe an older disk
+    // version than the raw handler calls in the same dump.
+    if crate::resident_available(&cmd.file) {
+        crate::open_handler(&cmd.file, true)?.save()?;
+    }
     let path = match (cmd.path, cmd.path_flag) {
         (Some(_), Some(_)) => {
             return Err(HandlerError::InvalidArgument(

@@ -1868,7 +1868,7 @@ impl DocumentHandler for WordHandler {
 
     fn validate(&self) -> Result<Vec<ValidationError>, HandlerError> {
         let pkg = self.package.borrow();
-        let mut errors = Vec::new();
+        let mut errors = pkg.validate();
 
         // Required part: word/document.xml
         if !pkg.has_part(DOCUMENT_PART) {

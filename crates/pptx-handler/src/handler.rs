@@ -347,7 +347,10 @@ impl DocumentHandler for PptxHandler {
     }
 
     fn validate(&self) -> Result<Vec<ValidationError>, HandlerError> {
-        crate::view::validate(&self.package.borrow())
+        let package = self.package.borrow();
+        let mut errors = package.validate();
+        errors.extend(crate::view::validate(&package)?);
+        Ok(errors)
     }
 
     fn try_extract_binary(

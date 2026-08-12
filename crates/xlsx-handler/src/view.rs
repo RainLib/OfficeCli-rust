@@ -11,8 +11,23 @@ pub fn view_as_text(package: &OxmlPackage, opts: &ViewOptions) -> Result<String,
 
     let mut output = String::new();
 
+    let requested_range = opts.range.as_deref().map(parse_range).transpose()?;
+    if let Some((Some(sheet), _, _, _, _)) = &requested_range {
+        if !model
+            .sheets
+            .iter()
+            .any(|worksheet| &worksheet.name == sheet)
+        {
+            return Err(HandlerError::PathNotFound(format!("worksheet '{}'", sheet)));
+        }
+    }
     for ws in &model.sheets {
-        let sheet_lines = format_sheet_as_grid(ws, opts);
+        if let Some((sheet, _, _, _, _)) = &requested_range {
+            if sheet.as_deref().is_some_and(|sheet| sheet != ws.name) {
+                continue;
+            }
+        }
+        let sheet_lines = format_sheet_as_grid(ws, opts)?;
         output.push_str(&format!("=== {} ===\n", ws.name));
         output.push_str(&sheet_lines);
         output.push('\n');
@@ -22,13 +37,22 @@ pub fn view_as_text(package: &OxmlPackage, opts: &ViewOptions) -> Result<String,
 }
 
 /// Format a single sheet as a text grid.
-fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> String {
+fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> Result<String, HandlerError> {
     if ws.cells.is_empty() {
-        return "(empty sheet)\n".to_string();
+        return Ok("(empty sheet)\n".to_string());
     }
 
-    let start_row = opts.start_line.unwrap_or(1);
-    let end_row = opts.end_line.unwrap_or(ws.max_row);
+    let (_, range_start_row, range_start_col, range_end_row, range_end_col) = opts
+        .range
+        .as_deref()
+        .map(parse_range)
+        .transpose()?
+        .unwrap_or((None, 1, 1, ws.max_row, ws.max_col));
+    let start_row = opts
+        .start_line
+        .unwrap_or(range_start_row)
+        .max(range_start_row);
+    let end_row = opts.end_line.unwrap_or(range_end_row).min(range_end_row);
     let max_lines = opts.max_lines.unwrap_or(100);
     let effective_end_row = end_row.min(start_row + max_lines - 1).min(ws.max_row);
 
@@ -39,22 +63,23 @@ fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> String {
             cols.first()
                 .and_then(|c| CellRef::parse(c).map(|cr| cr.col))
         })
-        .unwrap_or(1);
+        .unwrap_or(range_start_col);
     let max_col: usize = col_filter
         .and_then(|cols| cols.last().and_then(|c| CellRef::parse(c).map(|cr| cr.col)))
-        .unwrap_or(ws.max_col);
+        .unwrap_or(range_end_col);
 
     // Build column headers
     let col_range: Vec<usize> = if let Some(cols) = col_filter {
         cols.iter()
             .filter_map(|c| CellRef::parse(c).map(|cr| cr.col))
+            .filter(|col| *col >= range_start_col && *col <= range_end_col)
             .collect()
     } else {
-        (min_col..=max_col).collect()
+        (min_col.max(range_start_col)..=max_col.min(range_end_col)).collect()
     };
 
     if col_range.is_empty() {
-        return "(no columns)\n".to_string();
+        return Ok("(no columns)\n".to_string());
     }
 
     // Calculate column widths
@@ -101,7 +126,30 @@ fn format_sheet_as_grid(ws: &Worksheet, opts: &ViewOptions) -> String {
         grid.push('\n');
     }
 
-    grid
+    Ok(grid)
+}
+
+/// Parse `Sheet1!A1:C10`, `/Sheet1/A1:C10`, or `A1:C10`.
+fn parse_range(range: &str) -> Result<(Option<String>, usize, usize, usize, usize), HandlerError> {
+    let (sheet, cells) = if let Some((sheet, cells)) = range.split_once('!') {
+        (Some(sheet.trim_matches('/').to_string()), cells)
+    } else if let Some((sheet, cells)) = range.trim_start_matches('/').split_once('/') {
+        (Some(sheet.to_string()), cells)
+    } else {
+        (None, range)
+    };
+    let (start, end) = cells.split_once(':').unwrap_or((cells, cells));
+    let start = CellRef::parse(start)
+        .ok_or_else(|| HandlerError::InvalidArgument(format!("invalid range: {}", range)))?;
+    let end = CellRef::parse(end)
+        .ok_or_else(|| HandlerError::InvalidArgument(format!("invalid range: {}", range)))?;
+    if start.row > end.row || start.col > end.col {
+        return Err(HandlerError::InvalidArgument(format!(
+            "range start must precede end: {}",
+            range
+        )));
+    }
+    Ok((sheet, start.row, start.col, end.row, end.col))
 }
 
 fn truncate_cell_value(value: &str, max_chars: usize) -> String {

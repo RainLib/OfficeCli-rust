@@ -1,4 +1,4 @@
-use handler_common::HandlerError;
+use handler_common::{HandlerError, ViewOptions};
 use oxml::OxmlPackage;
 use std::collections::HashMap;
 
@@ -114,7 +114,7 @@ fn resolve_xml_color(
 }
 
 /// Render the Excel workbook as HTML for browser preview.
-pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
+pub fn view_as_html(package: &OxmlPackage, opts: &ViewOptions) -> Result<String, HandlerError> {
     let model =
         crate::helpers::build_workbook_model(package).map_err(HandlerError::OperationFailed)?;
 
@@ -307,7 +307,25 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 
     let mut sheets_html = String::new();
 
-    for (ws_idx, ws) in model.sheets.iter().enumerate() {
+    let requested_range = opts.range.as_deref().map(parse_view_range).transpose()?;
+    if let Some((Some(sheet), _, _, _, _)) = &requested_range {
+        if !model
+            .sheets
+            .iter()
+            .any(|worksheet| &worksheet.name == sheet)
+        {
+            return Err(HandlerError::PathNotFound(format!("worksheet '{}'", sheet)));
+        }
+    }
+    let mut displayed_sheets = 0usize;
+    for ws in &model.sheets {
+        if let Some((sheet, _, _, _, _)) = &requested_range {
+            if sheet.as_deref().is_some_and(|sheet| sheet != ws.name) {
+                continue;
+            }
+        }
+        let ws_idx = displayed_sheets;
+        displayed_sheets += 1;
         let mut merge_map: HashMap<(usize, usize), MergeInfo> = HashMap::new();
         let mut frozen_rows = 0;
         let mut frozen_cols = 0;
@@ -455,8 +473,14 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
             current_top += h;
         }
 
-        let max_row = ws.max_row.min(200);
-        let max_col = ws.max_col.min(30);
+        let (_, requested_start_row, requested_start_col, requested_end_row, requested_end_col) =
+            requested_range
+                .clone()
+                .unwrap_or((None, 1, 1, ws.max_row, ws.max_col));
+        let min_row = requested_start_row;
+        let max_row = ws.max_row.min(200).min(requested_end_row);
+        let min_col = requested_start_col;
+        let max_col = ws.max_col.min(30).min(requested_end_col);
 
         let active_class = if ws_idx == 0 { " active" } else { "" };
         sheets_html.push_str(&format!(
@@ -466,7 +490,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
 
         // Generate Colgroup
         sheets_html.push_str("<colgroup><col style=\"width:40px\"></colgroup>");
-        for col in 1..=max_col {
+        for col in min_col..=max_col {
             if hidden_cols.contains(&col) {
                 continue;
             }
@@ -481,7 +505,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         }
         sheets_html.push_str("></th>");
 
-        for col in 1..=max_col {
+        for col in min_col..=max_col {
             if hidden_cols.contains(&col) {
                 continue;
             }
@@ -507,7 +531,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
         sheets_html.push_str("</tr></thead>\n<tbody>\n");
 
         // Generate Grid Rows
-        for row in 1..=max_row {
+        for row in min_row..=max_row {
             if hidden_rows.contains(&row) {
                 sheets_html.push_str(&format!(
                     "<tr style=\"display:none\">\n<th class=\"row-header\">{}</th>\n</tr>\n",
@@ -545,7 +569,7 @@ pub fn view_as_html(package: &OxmlPackage) -> Result<String, HandlerError> {
                 ws.name, row, th_style_attr, row
             ));
 
-            for col in 1..=max_col {
+            for col in min_col..=max_col {
                 if hidden_cols.contains(&col) {
                     continue;
                 }
@@ -962,6 +986,27 @@ fn parse_range(range_ref: &str) -> Option<(crate::dom_types::CellRef, crate::dom
     let start = crate::dom_types::CellRef::parse(parts[0])?;
     let end = crate::dom_types::CellRef::parse(parts[1])?;
     Some((start, end))
+}
+
+fn parse_view_range(
+    range: &str,
+) -> Result<(Option<String>, usize, usize, usize, usize), HandlerError> {
+    let (sheet, cells) = if let Some((sheet, cells)) = range.split_once('!') {
+        (Some(sheet.trim_matches('/').to_string()), cells)
+    } else if let Some((sheet, cells)) = range.trim_start_matches('/').split_once('/') {
+        (Some(sheet.to_string()), cells)
+    } else {
+        (None, range)
+    };
+    let (start, end) = parse_range(cells)
+        .ok_or_else(|| HandlerError::InvalidArgument(format!("invalid range: {}", range)))?;
+    if start.row > end.row || start.col > end.col {
+        return Err(HandlerError::InvalidArgument(format!(
+            "range start must precede end: {}",
+            range
+        )));
+    }
+    Ok((sheet, start.row, start.col, end.row, end.col))
 }
 
 fn html_escape(s: &str) -> String {

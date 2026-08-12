@@ -395,6 +395,25 @@ impl DocumentHandler for ResidentHandler {
             ]),
         )
     }
+    fn import_csv(
+        &self,
+        parent: &str,
+        content: &str,
+        delimiter: char,
+        has_header: bool,
+        start_cell: &str,
+    ) -> Result<String, HandlerError> {
+        self.value(
+            "import_csv",
+            params([
+                ("parent", serde_json::json!(parent)),
+                ("content", serde_json::json!(content)),
+                ("delimiter", serde_json::json!(delimiter.to_string())),
+                ("header", serde_json::json!(has_header)),
+                ("start_cell", serde_json::json!(start_cell)),
+            ]),
+        )
+    }
     fn validate(&self) -> Result<Vec<ValidationError>, HandlerError> {
         self.value("validate", HashMap::new())
     }
@@ -644,6 +663,38 @@ fn execute_request(handler: &dyn DocumentHandler, req: &IpcRequest) -> IpcRespon
                 (!properties.is_empty()).then_some(&properties),
             ) {
                 Ok(value) => IpcResponse::ok(serde_json::to_value(value).unwrap_or_default()),
+                Err(e) => IpcResponse::err(e.to_string()),
+            }
+        }
+        "import_csv" => {
+            let parent = req
+                .params
+                .get("parent")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let content = req
+                .params
+                .get("content")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let delimiter = req
+                .params
+                .get("delimiter")
+                .and_then(|value| value.as_str())
+                .and_then(|value| value.chars().next())
+                .unwrap_or(',');
+            let header = req
+                .params
+                .get("header")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let start_cell = req
+                .params
+                .get("start_cell")
+                .and_then(|value| value.as_str())
+                .unwrap_or("A1");
+            match handler.import_csv(parent, content, delimiter, header, start_cell) {
+                Ok(value) => IpcResponse::ok(serde_json::Value::String(value)),
                 Err(e) => IpcResponse::err(e.to_string()),
             }
         }
@@ -916,6 +967,10 @@ pub async fn close_server(file_path: &str) -> Result<IpcResponse, anyhow::Error>
 
 fn view_opts_from_params(params: &HashMap<String, serde_json::Value>) -> ViewOptions {
     ViewOptions {
+        range: params
+            .get("range")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         start_line: params
             .get("start_line")
             .and_then(|v| v.as_u64())
@@ -942,6 +997,11 @@ fn view_opts_from_params(params: &HashMap<String, serde_json::Value>) -> ViewOpt
 
 fn view_params(opts: ViewOptions) -> HashMap<String, serde_json::Value> {
     params([
+        (
+            "range",
+            opts.range
+                .map_or(serde_json::Value::Null, serde_json::Value::String),
+        ),
         (
             "start_line",
             opts.start_line

@@ -139,7 +139,7 @@ pub fn import_csv(
         return Err("Could not find </sheetData> in worksheet XML".to_string());
     }
 
-    // If --header, add AutoFilter
+    // If --header, add AutoFilter and freeze the imported header row.
     if has_header && !rows.is_empty() {
         let end_col = crate::dom_types::col_num_to_letters(start_col_idx + max_cols - 1);
         let end_row = start_row + rows.len() - 1;
@@ -151,10 +151,49 @@ pub fn import_csv(
             end_row
         );
 
-        // Add autoFilter element before </worksheet> or after sheetData
         let auto_filter_xml = format!("<autoFilter ref=\"{}\"/>", filter_range);
-        if let Some(pos) = ws_xml.rfind("</worksheet>") {
+        if let Some(start) = ws_xml.find("<autoFilter") {
+            if let Some(end_rel) = ws_xml[start..].find('>') {
+                ws_xml.replace_range(start..=start + end_rel, &auto_filter_xml);
+            }
+        } else if let Some(pos) = ws_xml.rfind("</worksheet>") {
             ws_xml.insert_str(pos, &auto_filter_xml);
+        }
+
+        let pane_xml = format!(
+            "<pane ySplit=\"{}\" topLeftCell=\"{}{}\" activePane=\"bottomLeft\" state=\"frozen\"/>",
+            start_row,
+            crate::dom_types::col_num_to_letters(start_col_idx),
+            start_row + 1
+        );
+        let sheet_view_start = ws_xml
+            .find("<sheetView ")
+            .or_else(|| ws_xml.find("<sheetView>"));
+        if let Some(sheet_view_start) = sheet_view_start {
+            if let Some(open_end_rel) = ws_xml[sheet_view_start..].find('>') {
+                let content_start = sheet_view_start + open_end_rel + 1;
+                if let Some(close_rel) = ws_xml[content_start..].find("</sheetView>") {
+                    let content_end = content_start + close_rel;
+                    if let Some(pane_start_rel) = ws_xml[content_start..content_end].find("<pane") {
+                        let pane_start = content_start + pane_start_rel;
+                        if let Some(pane_end_rel) = ws_xml[pane_start..content_end].find('>') {
+                            ws_xml.replace_range(pane_start..=pane_start + pane_end_rel, &pane_xml);
+                        }
+                    } else {
+                        ws_xml.insert_str(content_start, &pane_xml);
+                    }
+                }
+            }
+        } else if let Some(worksheet_start) = ws_xml.find("<worksheet") {
+            if let Some(open_end_rel) = ws_xml[worksheet_start..].find('>') {
+                ws_xml.insert_str(
+                    worksheet_start + open_end_rel + 1,
+                    &format!(
+                        "<sheetViews><sheetView workbookViewId=\"0\">{}</sheetView></sheetViews>",
+                        pane_xml
+                    ),
+                );
+            }
         }
     }
 

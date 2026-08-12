@@ -15,6 +15,10 @@ pub struct ViewCommand {
     #[arg(short, long, default_value = "text")]
     pub mode: String,
 
+    /// Excel cell range to display (for example `Sheet1!A1:C10`)
+    #[arg(long)]
+    pub range: Option<String>,
+
     /// Start line number
     #[arg(long = "start", visible_alias = "start-line")]
     pub start_line: Option<usize>,
@@ -82,6 +86,7 @@ pub fn handle_view(cmd: ViewCommand, format: OutputFormat) -> Result<String, Han
     }
 
     let opts = ViewOptions {
+        range: cmd.range.clone(),
         start_line: cmd.start_line,
         end_line: cmd.end_line,
         max_lines: cmd.max_lines,
@@ -221,6 +226,7 @@ fn handle_screenshot(
     cmd: &ViewCommand,
 ) -> Result<String, HandlerError> {
     let opts = ViewOptions {
+        range: cmd.range.clone(),
         start_line: cmd.start_line,
         end_line: cmd.end_line,
         max_lines: cmd.max_lines,

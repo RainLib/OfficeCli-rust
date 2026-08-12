@@ -106,6 +106,19 @@ pub trait DocumentHandler: Send {
         part_type: &str,
         properties: Option<&HashMap<String, String>>,
     ) -> Result<(String, String), HandlerError>;
+    /// Import delimited text into a worksheet.  Keeping this on the handler
+    /// interface lets the command use the resident document rather than
+    /// reopening the package from disk.
+    fn import_csv(
+        &self,
+        _parent: &str,
+        _content: &str,
+        _delimiter: char,
+        _has_header: bool,
+        _start_cell: &str,
+    ) -> Result<String, HandlerError> {
+        Err(HandlerError::UnsupportedMode("import".to_string()))
+    }
     fn validate(&self) -> Result<Vec<ValidationError>, HandlerError>;
     fn try_extract_binary(
         &self,

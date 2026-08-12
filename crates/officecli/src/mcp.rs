@@ -343,6 +343,10 @@ fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, St
                 .and_then(|v| v.as_str())
                 .unwrap_or("text");
             let opts = ViewOptions {
+                range: params
+                    .get("range")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 start_line: params
                     .get("start_line")
                     .and_then(|v| v.as_u64())

@@ -11,6 +11,8 @@ pub enum OutputFormat {
 /// Options for view commands (line range, column filter).
 #[derive(Debug, Clone, Default)]
 pub struct ViewOptions {
+    /// Excel cell range (`Sheet1!A1:C10` or `A1:C10`) to crop before rendering.
+    pub range: Option<String>,
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
     pub max_lines: Option<usize>,

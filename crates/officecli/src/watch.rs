@@ -1069,6 +1069,7 @@ async fn handle_view(
         .cloned()
         .unwrap_or_else(|| "text".to_string());
     let opts = ViewOptions {
+        range: params.get("range").cloned(),
         start_line: params
             .get("start_line")
             .and_then(|v| v.parse::<usize>().ok()),

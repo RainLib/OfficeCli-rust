@@ -111,9 +111,9 @@ impl DocumentHandler for ExcelHandler {
         crate::view::view_as_issues(&pkg, issue_type, limit)
     }
 
-    fn view_as_html(&self, _opts: ViewOptions) -> Result<String, HandlerError> {
+    fn view_as_html(&self, opts: ViewOptions) -> Result<String, HandlerError> {
         let pkg = self.package.borrow();
-        crate::html_preview::view_as_html(&pkg)
+        crate::html_preview::view_as_html(&pkg, &opts)
     }
 
     fn view_as_text_json(&self, opts: ViewOptions) -> Result<serde_json::Value, HandlerError> {
@@ -380,9 +380,29 @@ impl DocumentHandler for ExcelHandler {
         crate::raw::add_part(&mut pkg, parent, part_type, properties)
     }
 
+    fn import_csv(
+        &self,
+        parent: &str,
+        content: &str,
+        delimiter: char,
+        has_header: bool,
+        start_cell: &str,
+    ) -> Result<String, HandlerError> {
+        if !self.editable {
+            return Err(HandlerError::OperationFailed(
+                "package opened in read-only mode".to_string(),
+            ));
+        }
+        let mut pkg = self.package.borrow_mut();
+        crate::import::import_csv(&mut pkg, parent, content, delimiter, has_header, start_cell)
+            .map_err(HandlerError::OperationFailed)
+    }
+
     fn validate(&self) -> Result<Vec<ValidationError>, HandlerError> {
         let pkg = self.package.borrow();
-        crate::view::validate(&pkg)
+        let mut errors = pkg.validate();
+        errors.extend(crate::view::validate(&pkg)?);
+        Ok(errors)
     }
 
     fn try_extract_binary(

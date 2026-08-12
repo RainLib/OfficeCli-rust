@@ -145,6 +145,11 @@ impl OxmlPackage {
         self.parts.keys().collect()
     }
 
+    /// Validate package-level invariants shared by all OOXML formats.
+    pub fn validate(&self) -> Vec<handler_common::ValidationError> {
+        crate::validate::validate_package(&self.parts)
+    }
+
     /// Check if a part exists.
     pub fn has_part(&self, part_path: &str) -> bool {
         self.parts.contains_key(part_path)

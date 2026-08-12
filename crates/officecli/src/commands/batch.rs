@@ -133,7 +133,7 @@ pub fn handle_batch(cmd: BatchCommand, format: OutputFormat) -> Result<String, H
     let has_mutations = results.iter().any(|r| {
         matches!(
             r.op.as_str(),
-            "set" | "add" | "remove" | "move" | "copy" | "raw-set"
+            "set" | "add" | "remove" | "move" | "copy" | "swap" | "raw-set" | "add-part" | "import"
         ) && r.result.is_ok()
     });
     if has_mutations && (cmd.best_effort || !has_error) {
@@ -692,6 +692,7 @@ mod path_migration_tests {
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct BatchOp {
+    #[serde(alias = "op")]
     pub command: String,
     #[serde(default, flatten)]
     pub params: HashMap<String, serde_json::Value>,
@@ -768,6 +769,7 @@ pub(crate) fn execute_batch_op(
             let parent = op
                 .params
                 .get("parent")
+                .or_else(|| op.params.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let element_type = op
@@ -787,6 +789,20 @@ pub(crate) fn execute_batch_op(
                 properties.insert("range_paths".to_string(), remapped);
             }
             let wrap = op.params.get("wrap").and_then(|v| v.as_str());
+            if let Some(source) = op.params.get("from").and_then(|v| v.as_str()) {
+                if parent.is_empty() {
+                    return Err("'add' command with 'from' requires 'parent' or 'path'".to_string());
+                }
+                return handler
+                    .copy_from(source, parent, position)
+                    .map(|path| format!("copied to: {}", path))
+                    .map_err(|e| e.to_string());
+            }
+            if parent.is_empty() || element_type.is_empty() {
+                return Err(
+                    "'add' command requires 'parent' (or 'path') and 'type' fields".to_string(),
+                );
+            }
             match handler.add(parent, element_type, position, &properties, wrap) {
                 Ok(path) => Ok(format!("created: {}", path)),
                 Err(e) => Err(e.to_string()),
@@ -806,9 +822,17 @@ pub(crate) fn execute_batch_op(
             let source = op
                 .params
                 .get("source")
+                .or_else(|| op.params.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let target = op.params.get("target").and_then(|v| v.as_str());
+            let target = op
+                .params
+                .get("target")
+                .or_else(|| op.params.get("to"))
+                .and_then(|v| v.as_str());
+            if source.is_empty() {
+                return Err("'move' command requires 'source' or 'path' field".to_string());
+            }
             let position = parse_position(&op.params);
             match handler.move_element(source, target, position) {
                 Ok(path) => Ok(format!("moved to: {}", path)),
@@ -844,25 +868,86 @@ pub(crate) fn execute_batch_op(
                 Err(e) => Err(e.to_string()),
             }
         }
+        "query" => {
+            let selector = op
+                .params
+                .get("selector")
+                .or_else(|| op.params.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if selector.is_empty() {
+                return Err("'query' command requires 'selector' field".to_string());
+            }
+            let mut nodes = handler.query(selector).map_err(|e| e.to_string())?;
+            if let Some(find) = op
+                .params
+                .get("find")
+                .or_else(|| op.params.get("text"))
+                .and_then(|value| value.as_str())
+            {
+                nodes.retain(|node| match node.text.as_deref() {
+                    Some(text) => handler_common::matches_text_filter(text, find).unwrap_or(false),
+                    None => false,
+                });
+                if let Err(error) = handler_common::matches_text_filter("", find) {
+                    return Err(format!("invalid regex pattern in '{}': {}", find, error));
+                }
+            }
+            serde_json::to_string(&nodes)
+                .map_err(HandlerError::JsonError)
+                .map_err(|e| e.to_string())
+        }
+        "swap" => {
+            let path1 = op
+                .params
+                .get("path")
+                .or_else(|| op.params.get("path1"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path2 = op
+                .params
+                .get("path2")
+                .or_else(|| op.params.get("to"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if path1.is_empty() || path2.is_empty() {
+                return Err(
+                    "'swap' command requires 'path' and 'path2' (or 'to') fields".to_string(),
+                );
+            }
+            handler
+                .swap(path1, path2)
+                .map(|(left, right)| format!("Swapped {} <-> {}", left, right))
+                .map_err(|e| e.to_string())
+        }
         "view" => {
             let mode = op
                 .params
                 .get("mode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("text");
-            match mode {
-                "text" => match handler
-                    .view_as_text(handler_common::output_format::ViewOptions::default())
-                {
-                    Ok(t) => Ok(t),
-                    Err(e) => Err(e.to_string()),
-                },
-                "outline" => match handler.view_as_outline() {
-                    Ok(t) => Ok(t),
-                    Err(e) => Err(e.to_string()),
-                },
-                other => Err(format!("unknown view mode: {}", other)),
+            match mode.to_ascii_lowercase().as_str() {
+                "text" | "t" => handler.view_as_text(batch_view_options(&op.params)),
+                "annotated" | "a" => handler.view_as_annotated(batch_view_options(&op.params)),
+                "outline" | "o" => handler.view_as_outline(),
+                "stats" | "s" => handler.view_as_stats(),
+                "html" | "h" => handler.view_as_html(batch_view_options(&op.params)),
+                "svg" | "g" => handler.view_as_svg(),
+                "forms" | "f" => handler.view_as_forms(),
+                "issues" | "i" => handler
+                    .view_as_issues(
+                        op.params.get("type").and_then(|value| value.as_str()),
+                        op.params
+                            .get("limit")
+                            .and_then(|value| value.as_u64())
+                            .map(|value| value as usize),
+                    )
+                    .and_then(|issues| {
+                        serde_json::to_string(&issues).map_err(HandlerError::JsonError)
+                    }),
+                other => return Err(format!("unknown view mode: {}", other)),
             }
+            .map_err(|e| e.to_string())
         }
         "raw-set" => {
             let part = op.params.get("part").and_then(|v| v.as_str()).unwrap_or("");
@@ -883,11 +968,122 @@ pub(crate) fn execute_batch_op(
                 .map(|_| "OK".to_string())
                 .map_err(|e| e.to_string())
         }
+        "raw" => {
+            let part = op.params.get("part").and_then(|v| v.as_str()).unwrap_or("");
+            if part.is_empty() {
+                return Err("'raw' command requires 'part' field".to_string());
+            }
+            let part = super::raw::normalize_logical_part_path(file, part);
+            let opts = handler_common::RawOptions {
+                start_row: op
+                    .params
+                    .get("start_row")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                end_row: op
+                    .params
+                    .get("end_row")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                cols: op
+                    .params
+                    .get("cols")
+                    .and_then(|v| v.as_str())
+                    .map(|value| value.split(',').map(str::to_string).collect()),
+            };
+            handler.raw(&part, opts).map_err(|e| e.to_string())
+        }
+        "add-part" => {
+            let parent = op
+                .params
+                .get("parent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let part_type = op
+                .params
+                .get("type")
+                .or_else(|| op.params.get("part_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if parent.is_empty() || part_type.is_empty() {
+                return Err("'add-part' command requires 'parent' and 'type' fields".to_string());
+            }
+            let properties =
+                string_map(&op.params, "properties").or_else(|| string_map(&op.params, "props"));
+            handler
+                .add_part(parent, part_type, properties.as_ref())
+                .map(|(rel_id, path)| {
+                    format!("Created {} part: relId={} path={}", part_type, rel_id, path)
+                })
+                .map_err(|e| e.to_string())
+        }
+        "validate" => {
+            let errors = handler.validate().map_err(|e| e.to_string())?;
+            if errors.is_empty() {
+                Ok("Validation passed: no errors found.".to_string())
+            } else {
+                let mut lines = vec![format!("Found {} validation error(s):", errors.len())];
+                for error in errors {
+                    lines.push(format!("  [{}] {}", error.error_type, error.description));
+                    if let Some(path) = error.path {
+                        lines.push(format!("    Path: {}", path));
+                    }
+                    if let Some(part) = error.part {
+                        lines.push(format!("    Part: {}", part));
+                    }
+                }
+                Ok(lines.join("\n"))
+            }
+        }
+        "import" => {
+            let parent = op
+                .params
+                .get("parent")
+                .or_else(|| op.params.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let content = op.params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if parent.is_empty() || !op.params.contains_key("text") {
+                return Err("'import' command requires 'parent' and 'text' fields".to_string());
+            }
+            let properties = string_map(&op.params, "properties")
+                .or_else(|| string_map(&op.params, "props"))
+                .unwrap_or_default();
+            let delimiter = match properties
+                .get("format")
+                .map(String::as_str)
+                .unwrap_or("csv")
+            {
+                "csv" => ',',
+                "tsv" => '\t',
+                other => return Err(format!("Unknown format: {}. Use 'csv' or 'tsv'", other)),
+            };
+            let header = properties
+                .get("header")
+                .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes"));
+            let start_cell = properties
+                .get("start-cell")
+                .or_else(|| properties.get("startcell"))
+                .map(String::as_str)
+                .unwrap_or("A1");
+            handler
+                .import_csv(parent, content, delimiter, header, start_cell)
+                .map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown command: {}", other)),
     }
 }
 
 fn parse_position(params: &HashMap<String, serde_json::Value>) -> InsertPosition {
+    if let Some(index) = params.get("index").and_then(|value| value.as_u64()) {
+        return InsertPosition::AtIndex(index as usize);
+    }
+    if let Some(after) = params.get("after").and_then(|value| value.as_str()) {
+        return InsertPosition::AfterElement(after.to_string());
+    }
+    if let Some(before) = params.get("before").and_then(|value| value.as_str()) {
+        return InsertPosition::BeforeElement(before.to_string());
+    }
     match params.get("position").and_then(|v| v.as_str()) {
         None => InsertPosition::Append,
         Some(s) => {
@@ -901,6 +1097,38 @@ fn parse_position(params: &HashMap<String, serde_json::Value>) -> InsertPosition
                 InsertPosition::Append
             }
         }
+    }
+}
+
+fn batch_view_options(params: &HashMap<String, serde_json::Value>) -> handler_common::ViewOptions {
+    handler_common::ViewOptions {
+        range: params
+            .get("range")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        start_line: params
+            .get("start")
+            .or_else(|| params.get("start_line"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize),
+        end_line: params
+            .get("end")
+            .or_else(|| params.get("end_line"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize),
+        max_lines: params
+            .get("max_lines")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize),
+        cols: params
+            .get("cols")
+            .and_then(|value| value.as_str())
+            .map(|value| value.split(',').map(str::to_string).collect()),
+        page: params
+            .get("page")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        lazy_load: false,
     }
 }
 
