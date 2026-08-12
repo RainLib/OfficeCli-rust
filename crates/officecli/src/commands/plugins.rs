@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod plugin_lint_schemas {
+    include!(concat!(env!("OUT_DIR"), "/plugin_lint_schemas.rs"));
+}
+
 /// Manage and inspect installed plugins.
 ///
 /// Implements the discovery + manifest portions of the OfficeCli Plugin
@@ -851,10 +855,7 @@ fn lint_dump_items(manifest: &PluginManifest, items: &[super::batch::BatchOp]) -
         if element.is_empty() {
             continue;
         }
-        let schema = Path::new("source/OfficeCLI/schemas/help")
-            .join(target)
-            .join(format!("{}.json", element));
-        let Ok(contents) = std::fs::read_to_string(&schema) else {
+        let Some(contents) = plugin_lint_schemas::schema_json(target, &element) else {
             if verb == "add" {
                 findings.push(LintFinding {
                     index,
