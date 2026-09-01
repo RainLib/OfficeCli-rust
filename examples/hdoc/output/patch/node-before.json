@@ -1,0 +1,19 @@
+{
+  "data": {
+    "chunkId": "c_c526a4136771c19d39c595b072d6d152",
+    "documentId": "doc-1d648051f63488279b928e02ba17e456",
+    "nodeHash": "41427fc525be646b8c2ebf5d9b500291fe6a90e6cb4c5002e43c9034e15eb691",
+    "nodeId": "n_6c85776df820438bb2333f995e85d55c",
+    "revision": 0,
+    "source": {
+      "editable": true,
+      "nodeKind": "paragraph",
+      "paragraphId": "html-block-3",
+      "part": "html/document",
+      "textId": "bytes:454:507",
+      "textOrdinal": 3
+    },
+    "text": "客户账号：Secret 123，中文内容（Unicode）"
+  },
+  "success": true
+}

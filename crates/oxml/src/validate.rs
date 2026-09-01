@@ -58,7 +58,7 @@ pub fn validate_package(
         if let Ok(types) = crate::content_types::ContentTypes::parse(content_types) {
             for path in parts
                 .keys()
-                .filter(|path| path.as_str() != "[Content_Types].xml")
+                .filter(|path| path.as_str() != "[Content_Types].xml" && !path.ends_with('/'))
             {
                 if types.content_type_for(path).is_none() {
                     errors.push(ValidationError {
@@ -117,7 +117,13 @@ fn relationship_base(rels_path: &str) -> String {
 }
 
 fn normalize_target(base: &str, target: &str) -> String {
-    let mut segments: Vec<&str> = base.split('/').filter(|part| !part.is_empty()).collect();
+    // A leading slash is an OPC pack URI rooted at the package rather than a
+    // path relative to the relationship owner.
+    let mut segments: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base.split('/').filter(|part| !part.is_empty()).collect()
+    };
     for segment in target.split('/') {
         match segment {
             "" | "." => {}
@@ -144,5 +150,40 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.error_type == "broken-relationship"));
+    }
+
+    #[test]
+    fn accepts_package_rooted_relationship_targets() {
+        let mut parts = HashMap::new();
+        parts.insert("[Content_Types].xml".to_string(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#.to_vec());
+        parts.insert("_rels/.rels".to_string(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="x" Target="word/document.xml"/></Relationships>"#.to_vec());
+        parts.insert("word/document.xml".to_string(), b"<document/>".to_vec());
+        parts.insert("word/_rels/document.xml.rels".to_string(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="x" Target="/word/settings.xml"/></Relationships>"#.to_vec());
+        parts.insert("word/settings.xml".to_string(), b"<settings/>".to_vec());
+
+        let errors = validate_package(&parts);
+        assert!(
+            !errors
+                .iter()
+                .any(|error| error.error_type == "broken-relationship"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_zip_directory_entries_when_checking_content_types() {
+        let mut parts = HashMap::new();
+        parts.insert("[Content_Types].xml".to_string(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/></Types>"#.to_vec());
+        parts.insert("_rels/.rels".to_string(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#.to_vec());
+        parts.insert("xl/".to_string(), Vec::new());
+        parts.insert("xl/worksheets/".to_string(), Vec::new());
+
+        let errors = validate_package(&parts);
+        assert!(
+            !errors
+                .iter()
+                .any(|error| error.error_type == "missing-content-type"),
+            "{errors:?}"
+        );
     }
 }

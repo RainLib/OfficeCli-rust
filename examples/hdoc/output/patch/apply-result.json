@@ -1,0 +1,22 @@
+{
+  "data": {
+    "annotationRootHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "baseRevision": 0,
+    "dirtyChunkIds": [
+      "c_c526a4136771c19d39c595b072d6d152"
+    ],
+    "dirtyNodeIds": [
+      "n_6c85776df820438bb2333f995e85d55c"
+    ],
+    "dirtySourceParts": [
+      "html/document"
+    ],
+    "documentId": "doc-1d648051f63488279b928e02ba17e456",
+    "idempotentReplay": false,
+    "patchId": "hdoc-example-mask-1",
+    "revision": 1,
+    "rootHash": "d6a1ccb5a5374e8466075d17d595c41c2437c0d5d29666ed36b6d9f2ef724b61",
+    "warnings": []
+  },
+  "success": true
+}

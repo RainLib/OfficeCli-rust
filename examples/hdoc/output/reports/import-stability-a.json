@@ -1,0 +1,57 @@
+{
+  "data": {
+    "annotationRootHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "capabilities": {
+      "annotations": true,
+      "exactPagination": false,
+      "structurePatch": false,
+      "stylePatch": false,
+      "textPatch": true
+    },
+    "chunkCount": 1,
+    "documentId": "doc-1d648051f63488279b928e02ba17e456",
+    "fidelity": {
+      "dropped": [
+        "active and non-rendered element content from editable HCD chunks"
+      ],
+      "flattened": [
+        "source CSS, arbitrary attributes and unsupported or nested markup are reduced to a canonical safe structure"
+      ],
+      "level": "SEMANTIC",
+      "preserved": [
+        "UTF-8 visible text in source order with stable source byte ranges",
+        "safe heading, paragraph, list and table semantics with bounded table fragments",
+        "the immutable HTML source as the source-backed export boundary"
+      ],
+      "schemaVersion": "hcd/1",
+      "warnings": [
+        {
+          "code": "HTML_ACTIVE_CONTENT_EXCLUDED",
+          "message": "script, style, iframe, object, embed, template and noscript content is excluded from editable HCD chunks; the immutable source remains authoritative",
+          "sourcePart": "html/document"
+        }
+      ]
+    },
+    "indexPageCount": 1,
+    "indexPrefix": "indexes/rev-00000000000000000000",
+    "profile": "semantic-flow",
+    "revision": 0,
+    "rootHash": "43cb6894ee02f4a994877b6e43a5c574b64f7517e5ad17fb9f67b1c335e64dc5",
+    "schemaVersion": "hcd/1",
+    "source": {
+      "format": "html",
+      "sha256": "1d648051f63488279b928e02ba17e45622dbdb86151fd038c2fe7af5262362c7",
+      "sizeBytes": 1277
+    },
+    "state": "COMPLETE",
+    "stylesHref": "styles.css",
+    "warnings": [
+      {
+        "code": "HTML_ACTIVE_CONTENT_EXCLUDED",
+        "message": "script, style, iframe, object, embed, template and noscript content is excluded from editable HCD chunks; the immutable source remains authoritative",
+        "sourcePart": "html/document"
+      }
+    ]
+  },
+  "success": true
+}

@@ -1,4 +1,4 @@
-.PHONY: build release dev check test clippy fmt fmt-fix lint clean run install install-local install-check dist download smoke help
+.PHONY: build release dev check test clippy fmt fmt-fix lint clean run install install-local install-check dist download smoke hcd-stress help
 
 .DEFAULT_GOAL := help
 
@@ -97,6 +97,10 @@ smoke: build    ## Quick smoke test of release binary
 	$(RELEASE) view /tmp/smoke_test.docx --mode stats && \
 	rm -f /tmp/smoke_test.docx
 	@echo "Smoke test passed."
+
+hcd-stress:     ## Import, patch, and export a ~2 GiB DOCX; enforce 512 MiB peak RSS
+	@chmod +x scripts/hcd-stress.sh
+	@./scripts/hcd-stress.sh
 
 # ── Clean ──────────────────────────────────────────────────────────────
 clean:          ## Remove build artifacts

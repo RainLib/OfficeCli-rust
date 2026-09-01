@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod content_types;
 pub mod namespace;
 pub mod package;
@@ -6,4 +7,5 @@ pub mod rels;
 pub mod validate;
 pub mod xml_util;
 
-pub use package::OxmlPackage;
+pub use archive::{ArchiveEntry, StreamingOxmlArchive, StreamingOxmlRewriter};
+pub use package::{OxmlPackage, PackageError};

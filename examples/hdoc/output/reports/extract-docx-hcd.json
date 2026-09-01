@@ -1,0 +1,230 @@
+{
+  "data": {
+    "documentId": "hdoc-example-docx",
+    "entries": [
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "de33a057f1b00eaf114dcc498e897f94e2b15ee0e57ff1f6768cf555f230064c",
+        "nodeId": "n_604a8e5af5770e0e05f556a1e6ef4634",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "a3582513",
+          "part": "word/document.xml",
+          "textOrdinal": 1
+        },
+        "text": "智能脱敏服务转换验收"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "41427fc525be646b8c2ebf5d9b500291fe6a90e6cb4c5002e43c9034e15eb691",
+        "nodeId": "n_3b989408a0e46c7dec06724c8d796697",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "7cd0542a",
+          "part": "word/document.xml",
+          "textOrdinal": 2
+        },
+        "text": "客户账号：Secret 123，中文内容（Unicode）"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "a689a299926d2d1ee38823d18c9c0a1e0a529c66372fb5c3623e556308412c41",
+        "nodeId": "n_75e9c472300590fc6fa890f6e280cc1c",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "15dc4c27",
+          "part": "word/document.xml",
+          "textOrdinal": 3
+        },
+        "text": "联系电话：13800138000；邮箱：alice@example.com"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "03491418d039b1c16419e4d103d82e0ae54472e773cef7b63afe5b3c102480ca",
+        "nodeId": "n_4bf6294aec919689479b465af096ce39",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "a9d83fbb",
+          "part": "word/document.xml",
+          "textOrdinal": 4
+        },
+        "text": "功能清单"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "7963c58e2e2c0f8dc7f7d66db5a7ad2b164ea64631880a4900d7ef813c34142c",
+        "nodeId": "n_87701e78b48d1a636c1cfb563ccacc8c",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "32aaae1d",
+          "part": "word/document.xml",
+          "textOrdinal": 5
+        },
+        "text": "1. 文档转换为安全 canonical HTML"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "efd1663d0ab066c8f3ad5323fc04bc18635dbebd19616fa51e4431ecf8ded35c",
+        "nodeId": "n_8dc94882342f635600945c3fc2389af2",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "403dc64b",
+          "part": "word/document.xml",
+          "textOrdinal": 6
+        },
+        "text": "2. 通过稳定 nodeId 提交脱敏 patch"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "fbda4a568ad67b5d2108be9f34db88b8a83b1c8e4fd8ca60890eaf54d8537777",
+        "nodeId": "n_00337721056bd77c37c6d47deb4b940b",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "8b05e863",
+          "part": "word/document.xml",
+          "textOrdinal": 7
+        },
+        "text": "3. 从 HCD revision 导出 DOCX、XLSX、PPTX 和 PDF"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "a165abcb3cbe240bbd3b329b3f1012b55abb53116dc428a601e0874ea07d4c26",
+        "nodeId": "n_5451a131daa3df503cd571c143b26377",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "a2fc768b",
+          "part": "word/document.xml",
+          "textOrdinal": 8
+        },
+        "text": "账户明细"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "50b5b1d2abefbca67243017fe7ccbc794bdc226218465c24e3d7a1793fb76965",
+        "nodeId": "n_5ba55034cc616aa1f33a9a04f3931aaa",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "a311e770",
+          "part": "word/document.xml",
+          "textOrdinal": 9
+        },
+        "text": "姓名"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "311bb313fdeca6aa2ce7d9415821a0b0247e064340241f68bac3ca5b19ae6d76",
+        "nodeId": "n_78a0eadb8cdf7d1ca43e59fe58681ce0",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "9ea83064",
+          "part": "word/document.xml",
+          "textOrdinal": 10
+        },
+        "text": "账号"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "6320b4a8722a851fb99566e4eac1cfd4b93bc684b3a33d9f5cae37a116b8c734",
+        "nodeId": "n_aa32746a5d05b3b29eb7ebccf74fd2d0",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "114dc088",
+          "part": "word/document.xml",
+          "textOrdinal": 11
+        },
+        "text": "状态"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "1d841bc0ee98309cb7916670b7f0fdef5f4c35150711a41405ef3633b56322cf",
+        "nodeId": "n_bcbd3a737949b743d5a531fd87d231ac",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "a42bef05",
+          "part": "word/document.xml",
+          "textOrdinal": 12
+        },
+        "text": "张三"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "1ffd3d595cc3dc955a422446815b3da52eacc847d1abc1646839d2f525485948",
+        "nodeId": "n_a194e0fa2dd56877ee798727003a5035",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "97ba58dc",
+          "part": "word/document.xml",
+          "textOrdinal": 13
+        },
+        "text": "6222020012345678"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "296de0e31f8c22d9343c1f07f7fcd2e88a425d769cb0c88d8b24cc865f2c0685",
+        "nodeId": "n_18c19c6b1f5f752a20e060535c8ab06f",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "6905af3a",
+          "part": "word/document.xml",
+          "textOrdinal": 14
+        },
+        "text": "正常"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "808b4f6221599eee052ba9c7a1a1c6374b96bb1a5f172f305dcd19bc8b7bc9a8",
+        "nodeId": "n_f1bea9d966b5b3bc7fc5964f95303d62",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "bb5ef18a",
+          "part": "word/document.xml",
+          "textOrdinal": 15
+        },
+        "text": "李四"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "40e548bccd58ea1a2b0815492ee8888b21bed44defb059ccd8a47bfe3ef61eb0",
+        "nodeId": "n_83d7121f56b7f966859e7900afb9d03e",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "5dd4a290",
+          "part": "word/document.xml",
+          "textOrdinal": 16
+        },
+        "text": "Secret 456"
+      },
+      {
+        "chunkId": "c_20c450b424c39cd671b4831a0fe9426a",
+        "nodeHash": "999a459c3f3f2d1694440efc4afb9c9342069e0e4ee375b7dea943a28931283a",
+        "nodeId": "n_ba4c4ffab5e3dd331f56df626069b015",
+        "source": {
+          "editable": true,
+          "nodeKind": "text",
+          "paragraphId": "ecdea903",
+          "part": "word/document.xml",
+          "textOrdinal": 17
+        },
+        "text": "待处理"
+      }
+    ],
+    "revision": 0
+  },
+  "success": true
+}

@@ -1,0 +1,9 @@
+{
+  "nodeIdStableAfterPatch": true,
+  "nodeHashChanged": true,
+  "revisionAdvanced": true,
+  "nodeId": "n_6c85776df820438bb2333f995e85d55c",
+  "beforeNodeHash": "41427fc525be646b8c2ebf5d9b500291fe6a90e6cb4c5002e43c9034e15eb691",
+  "afterNodeHash": "e92087435fcf43a6c4bfae02e59cf28dfa044df9521a97d35fc550ec2a8760ae",
+  "afterText": "客户账号：Secret ***，中文内容（Unicode）"
+}

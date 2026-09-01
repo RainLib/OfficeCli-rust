@@ -55,6 +55,7 @@ EXAMPLES:
   officecli create demo.docx                  Create a blank Word document
   officecli convert old.doc                   Convert legacy .doc to .docx
   officecli convert old.xls -o new.xlsx       Convert with explicit output path
+  officecli convert page.html -o report.docx  Convert semantic HTML to a new document
   officecli view demo.docx                    View document as plain text
   officecli view demo.docx -m outline         View outline with metadata
   officecli view demo.pdf -m annotated        View PDF with bbox coordinates
@@ -169,6 +170,12 @@ fn main() {
         commands::Command::Merge(cmd) => commands::handle_merge(cmd, format),
         commands::Command::Help(cmd) => commands::handle_help(cmd, cli.json),
         commands::Command::Import(cmd) => commands::handle_import(cmd, format),
+        commands::Command::Hdoc(cmd) => {
+            commands::handle_hdoc(cmd, format).map(|(output, succeeded)| {
+                validate_succeeded = succeeded;
+                output
+            })
+        }
         commands::Command::Plugins(cmd) => commands::handle_plugins(cmd, format),
         commands::Command::Install(cmd) => commands::handle_install(cmd, format),
         commands::Command::LoadSkill(cmd) => commands::handle_load_skill(cmd),

@@ -1,0 +1,19 @@
+{
+  "data": {
+    "block_count": 11,
+    "embedded_image_count": 0,
+    "engine": "rust-html-semantic",
+    "fidelity": "semantic",
+    "from_format": "html",
+    "image_count": 0,
+    "input": "examples/hdoc/source.html",
+    "output": "examples/hdoc/output/direct/from-html.pptx",
+    "to_format": "pptx",
+    "warnings": [
+      "CSS layout is not reproduced; output uses semantic document defaults",
+      "ignored unsafe or non-semantic <script> content",
+      "ignored unsafe or non-semantic <style> content"
+    ]
+  },
+  "success": true
+}

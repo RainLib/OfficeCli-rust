@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "hcd/1",
+  "level": "HIGH",
+  "preserved": [
+    "all immutable source bytes outside explicitly edited text ranges",
+    "source markup, CSS, attributes and inactive/active opaque content"
+  ],
+  "flattened": [
+    "edited HTML text ranges are serialized with safe entity escaping"
+  ],
+  "dropped": [],
+  "warnings": [
+    {
+      "code": "HTML_SOURCE_ACTIVE_CONTENT_PRESERVED",
+      "message": "source-backed HTML export preserves original markup, CSS and active content outside edited text ranges; treat the exported file as untrusted HTML",
+      "sourcePart": "html/document"
+    }
+  ]
+}

@@ -23,3 +23,6 @@ dist/
 source/
 examples/pdf/
 
+# Generated HCD validation artifacts (real source documents stay local)
+examples/hdoc/real-documents/output*/
+**/.hcd-write-lock

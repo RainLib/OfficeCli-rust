@@ -31,10 +31,11 @@ pub fn parse_engine(s: &str) -> Result<ConvertEngine, String> {
     s.parse()
 }
 
-/// Convert a legacy Office document or PDF to modern Office format
+/// Convert legacy Office, PDF, or semantic HTML to a supported document format
 #[derive(Args)]
 #[command(after_help = "\
 SUPPORTED CONVERSIONS:
+  .html -> .docx/.xlsx/.pptx/.pdf   Semantic conversion (pure Rust)
   .doc  -> .docx   Word legacy binary to modern OOXML
   .xls  -> .xlsx   Excel legacy binary to modern OOXML
   .ppt  -> .pptx   PowerPoint legacy binary to modern OOXML
@@ -72,12 +73,16 @@ EXAMPLES:
   officecli convert input.pdf -o output.docx      Convert PDF to Word
   officecli convert input.pdf --engine pdf-text   Fast PDF text-layer conversion
   officecli convert input.pdf --engine pdf2docx   Convert PDF via Python pdf2docx
+  officecli convert input.html -o output.docx     Semantic HTML to Word
+  officecli convert input.html -o output.xlsx     Tables/content to worksheet cells
+  officecli convert input.html -o output.pptx     Sections/headings to slides
+  officecli convert input.html -o output.pdf      Semantic paginated PDF
   officecli convert old.doc --engine oxide        Convert via oxide (no LibreOffice needed)")]
 pub struct ConvertCommand {
-    /// Input file path (.doc, .xls, .ppt, .docx, .xlsx, .pptx, .pdf)
+    /// Input file path (.html, .doc, .xls, .ppt, .docx, .xlsx, .pptx, .pdf)
     pub file: String,
 
-    /// Output file path (defaults to input path with updated extension)
+    /// Output file path (required for HTML; otherwise defaults to the native family extension)
     #[arg(short, long)]
     pub output: Option<String>,
 
@@ -85,7 +90,7 @@ pub struct ConvertCommand {
     #[arg(long)]
     pub force: bool,
 
-    /// Conversion engine: libreoffice (default), oxide, pdf-text, or pdf2docx
+    /// Conversion engine for non-HTML input; HTML always uses the in-process Rust converter
     #[arg(long, default_value = "libreoffice")]
     pub engine: ConvertEngine,
 }
@@ -100,6 +105,10 @@ pub fn handle_convert(
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
+
+    if matches!(input_ext.as_str(), "html" | "htm") {
+        return handle_html_convert(&cmd, format, &input_path, &input_ext);
+    }
 
     // Determine target extension based on input family
     let target_ext = match input_ext.as_str() {
@@ -313,6 +322,64 @@ pub fn handle_convert(
     }
 }
 
+fn handle_html_convert(
+    cmd: &ConvertCommand,
+    format: handler_common::OutputFormat,
+    input_path: &std::path::Path,
+    input_ext: &str,
+) -> Result<String, HandlerError> {
+    if !input_path.exists() {
+        return Err(HandlerError::OpenError(format!(
+            "input file '{}' not found",
+            cmd.file
+        )));
+    }
+    let output_path = cmd.output.as_ref().map(PathBuf::from).ok_or_else(|| {
+        HandlerError::InvalidArgument(
+            "HTML conversion requires --output with .docx, .xlsx, .pptx, or .pdf extension"
+                .to_string(),
+        )
+    })?;
+    let output_ext = output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    validate_conversion(input_ext, &output_ext, cmd.engine)?;
+    if output_path.exists() && !cmd.force {
+        return Err(HandlerError::OperationFailed(format!(
+            "output file '{}' already exists; use --force to overwrite",
+            output_path.display()
+        )));
+    }
+    let summary = super::html_convert::convert_html(input_path, &output_path, &output_ext)?;
+    match format {
+        handler_common::OutputFormat::Text => Ok(format!(
+            "Converted '{}' -> '{}' [rust-html-semantic, fidelity={}, blocks={}, images={}/{}, warnings={}]",
+            cmd.file,
+            output_path.display(),
+            summary.fidelity,
+            summary.block_count,
+            summary.embedded_image_count,
+            summary.image_count,
+            summary.warnings.len()
+        )),
+        handler_common::OutputFormat::Json => Ok(serde_json::json!({
+            "input": cmd.file,
+            "output": output_path.to_string_lossy(),
+            "from_format": input_ext,
+            "to_format": output_ext,
+            "engine": "rust-html-semantic",
+            "fidelity": summary.fidelity,
+            "block_count": summary.block_count,
+            "image_count": summary.image_count,
+            "embedded_image_count": summary.embedded_image_count,
+            "warnings": summary.warnings,
+        })
+        .to_string()),
+    }
+}
+
 /// Convert PDF to DOCX.
 ///
 /// A direct `writer_pdf_import --convert-to docx` places every line of text in
@@ -334,13 +401,13 @@ fn convert_pdf_to_docx(
     // Preferred path: PDF -> .doc (MS Word 97) -> .docx, which Word renders
     // correctly. Only accept it when the result actually carries text.
     if convert_pdf_to_docx_via_doc(input_file, output_path).is_ok()
-        && docx_has_extractable_text(output_path)
+        && pdf_text_is_preserved(input_file, output_path)
     {
         return Ok("libreoffice-doc-bridge");
     }
 
     match convert_via_libreoffice(input_file, output_path, target_ext) {
-        Ok(()) if docx_has_extractable_text(output_path) => Ok("libreoffice"),
+        Ok(()) if pdf_text_is_preserved(input_file, output_path) => Ok("libreoffice"),
         Ok(()) => {
             convert_pdf_text_to_docx(input_file, output_path)?;
             Ok("pdf-text-fallback")
@@ -491,14 +558,31 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
     p
 }
 
-fn docx_has_extractable_text(path: &std::path::Path) -> bool {
-    let Some(path_str) = path.to_str() else {
+fn pdf_text_is_preserved(input_file: &str, output_path: &std::path::Path) -> bool {
+    let Some(output_path) = output_path.to_str() else {
         return false;
     };
-    docx_handler::WordHandler::open(path_str, false)
-        .and_then(|handler| handler.view_as_text(handler_common::ViewOptions::default()))
-        .map(|text| !text.trim().is_empty())
-        .unwrap_or(false)
+    let Ok(handler) = docx_handler::WordHandler::open(output_path, false) else {
+        return false;
+    };
+    let Ok(docx_text) = handler.view_as_text(handler_common::ViewOptions::default()) else {
+        return false;
+    };
+    if docx_text.trim().is_empty() {
+        return false;
+    }
+
+    let Ok(reader) = pdf_handler::reader::PdfReader::open(input_file) else {
+        return true;
+    };
+    let expected: Vec<String> = extract_pdf_docx_paragraphs(&reader)
+        .into_iter()
+        .filter_map(|paragraph| match paragraph {
+            DocxParagraph::Text(text) if !text.trim().is_empty() => Some(text),
+            _ => None,
+        })
+        .collect();
+    expected.is_empty() || expected.iter().all(|text| docx_text.contains(text))
 }
 
 #[derive(Debug)]
@@ -1072,6 +1156,15 @@ fn validate_conversion(
     output_ext: &str,
     engine: ConvertEngine,
 ) -> Result<(), HandlerError> {
+    if matches!(input_ext, "html" | "htm") {
+        return if matches!(output_ext, "docx" | "xlsx" | "pptx" | "pdf") {
+            Ok(())
+        } else {
+            Err(HandlerError::UnsupportedMode(format!(
+                "HTML can convert to .docx, .xlsx, .pptx, or .pdf, not .{output_ext}"
+            )))
+        };
+    }
     // Cross-family: PDF -> DOCX (PDF-specific engines only)
     // Foreign target extensions are valid if a plugin exporter exists.
     // Skip the family-rule check below — those only cover native→native.
@@ -1187,6 +1280,14 @@ mod tests {
     #[test]
     fn test_valid_pdf_to_docx_with_pdf2docx_engine() {
         assert!(validate_conversion("pdf", "docx", ConvertEngine::Pdf2Docx).is_ok());
+    }
+
+    #[test]
+    fn test_valid_html_targets() {
+        for target in ["docx", "xlsx", "pptx", "pdf"] {
+            assert!(validate_conversion("html", target, ConvertEngine::LibreOffice).is_ok());
+        }
+        assert!(validate_conversion("html", "txt", ConvertEngine::LibreOffice).is_err());
     }
 
     #[test]

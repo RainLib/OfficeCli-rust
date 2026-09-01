@@ -8,7 +8,9 @@ mod dump;
 mod extract_text;
 mod format_handler_session;
 mod get;
+mod hdoc;
 mod help;
+mod html_convert;
 mod import;
 mod info;
 mod install;
@@ -165,6 +167,7 @@ pub use create::CreateCommand;
 pub use dump::DumpCommand;
 pub use extract_text::ExtractTextCommand;
 pub use get::GetCommand;
+pub use hdoc::{handle_hdoc, HdocCommand};
 pub use help::HelpCommand;
 pub use import::ImportCommand;
 pub use info::InfoCommand;
@@ -370,6 +373,8 @@ pub enum Command {
     Help(HelpCommand),
     /// Import CSV/TSV data into an Excel sheet
     Import(ImportCommand),
+    /// Convert DOCX to and from the chunked HTML Canonical Document format
+    Hdoc(HdocCommand),
     /// Manage and inspect installed plugins
     Plugins(PluginsCommand),
     /// Install officecli binary, skills, and MCP configuration

@@ -1,0 +1,152 @@
+{
+  "data": {
+    "documentId": "hdoc-example-pdf",
+    "entries": [
+      {
+        "chunkId": "c_7e1c1184a3c9cbe21099b3b6d3172b04",
+        "nodeHash": "de33a057f1b00eaf114dcc498e897f94e2b15ee0e57ff1f6768cf555f230064c",
+        "nodeId": "n_8ae450cd58901dfb87318ae114404853",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[1]/text[1]",
+          "part": "pdf/pages/1",
+          "textOrdinal": 1
+        },
+        "text": "智能脱敏服务转换验收"
+      },
+      {
+        "chunkId": "c_7e1c1184a3c9cbe21099b3b6d3172b04",
+        "nodeHash": "41427fc525be646b8c2ebf5d9b500291fe6a90e6cb4c5002e43c9034e15eb691",
+        "nodeId": "n_8a2edbde2fa74a19347ec7353806eb13",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[1]/text[2]",
+          "part": "pdf/pages/1",
+          "textOrdinal": 2
+        },
+        "text": "客户账号：Secret 123，中文内容（Unicode）"
+      },
+      {
+        "chunkId": "c_7e1c1184a3c9cbe21099b3b6d3172b04",
+        "nodeHash": "a689a299926d2d1ee38823d18c9c0a1e0a529c66372fb5c3623e556308412c41",
+        "nodeId": "n_9b9fac4754794dc826e3d0e2598c844f",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[1]/text[3]",
+          "part": "pdf/pages/1",
+          "textOrdinal": 3
+        },
+        "text": "联系电话：13800138000；邮箱：alice@example.com"
+      },
+      {
+        "chunkId": "c_19791ab1bdc44d81fc284553d160e4cd",
+        "nodeHash": "03491418d039b1c16419e4d103d82e0ae54472e773cef7b63afe5b3c102480ca",
+        "nodeId": "n_ed39264e23fe0986912727ec7409166b",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[2]/text[1]",
+          "part": "pdf/pages/2",
+          "textOrdinal": 1
+        },
+        "text": "功能清单"
+      },
+      {
+        "chunkId": "c_19791ab1bdc44d81fc284553d160e4cd",
+        "nodeHash": "7963c58e2e2c0f8dc7f7d66db5a7ad2b164ea64631880a4900d7ef813c34142c",
+        "nodeId": "n_5306de517053f30eb51f003a266a3217",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[2]/text[2]",
+          "part": "pdf/pages/2",
+          "textOrdinal": 2
+        },
+        "text": "1. 文档转换为安全 canonical HTML"
+      },
+      {
+        "chunkId": "c_19791ab1bdc44d81fc284553d160e4cd",
+        "nodeHash": "efd1663d0ab066c8f3ad5323fc04bc18635dbebd19616fa51e4431ecf8ded35c",
+        "nodeId": "n_fde558e23780cad131cec2eb919b6756",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[2]/text[3]",
+          "part": "pdf/pages/2",
+          "textOrdinal": 3
+        },
+        "text": "2. 通过稳定 nodeId 提交脱敏 patch"
+      },
+      {
+        "chunkId": "c_19791ab1bdc44d81fc284553d160e4cd",
+        "nodeHash": "fbda4a568ad67b5d2108be9f34db88b8a83b1c8e4fd8ca60890eaf54d8537777",
+        "nodeId": "n_f16182cdcff2890afcf03c60a8631661",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[2]/text[4]",
+          "part": "pdf/pages/2",
+          "textOrdinal": 4
+        },
+        "text": "3. 从 HCD revision 导出 DOCX、XLSX、PPTX 和 PDF"
+      },
+      {
+        "chunkId": "c_0a42773ac5712ddf1efda4b8df0a279d",
+        "nodeHash": "a165abcb3cbe240bbd3b329b3f1012b55abb53116dc428a601e0874ea07d4c26",
+        "nodeId": "n_f67125799410f762ae9575195a2afe99",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[3]/text[1]",
+          "part": "pdf/pages/3",
+          "textOrdinal": 1
+        },
+        "text": "账户明细"
+      },
+      {
+        "chunkId": "c_0a42773ac5712ddf1efda4b8df0a279d",
+        "nodeHash": "987ba6548746d8815ef9724eda34cd866d94e6e9fdede3f85e04bde23fc2f234",
+        "nodeId": "n_55be7bfdb2986823f7aaeb4e57ff29ba",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[3]/text[2]",
+          "part": "pdf/pages/3",
+          "textOrdinal": 2
+        },
+        "text": "姓名 | 账号 | 状态"
+      },
+      {
+        "chunkId": "c_0a42773ac5712ddf1efda4b8df0a279d",
+        "nodeHash": "ffe3254e7c2626b5ccf2be75c359a17899179343847e46c441542ad2c10c25b3",
+        "nodeId": "n_49818a47f7b0be9950a7c5a2a2321520",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[3]/text[3]",
+          "part": "pdf/pages/3",
+          "textOrdinal": 3
+        },
+        "text": "张三 | 6222020012345678 | 正常"
+      },
+      {
+        "chunkId": "c_0a42773ac5712ddf1efda4b8df0a279d",
+        "nodeHash": "4767d599e157625a2390229c250b09f69ccfc4bdafbe396f88160f10df969eac",
+        "nodeId": "n_36e6a5c5bba7c3968cf9f242cea38cda",
+        "source": {
+          "editable": true,
+          "nodeKind": "pdf-text",
+          "paragraphId": "/page[3]/text[4]",
+          "part": "pdf/pages/3",
+          "textOrdinal": 4
+        },
+        "text": "李四 | Secret 456 | 待处理"
+      }
+    ],
+    "revision": 0
+  },
+  "success": true
+}

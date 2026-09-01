@@ -1,9 +1,24 @@
 use crate::content_stream::{
-    parse_page_content_stream, pick_fonts_for_text, FontSegment, PdfColor,
+    encode_pdf_text_with_font, parse_page_content_stream, pick_fonts_for_text, FontSegment,
+    PdfColor,
 };
 use handler_common::HandlerError;
+use lopdf::dictionary;
 use lopdf::Document as LopdfDocument;
 use lopdf::ObjectId;
+use std::io::{Cursor, Read};
+
+const MAX_PDF_IMAGE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PDF_IMAGE_DECODED_BYTES: usize = 128 * 1024 * 1024;
+const MAX_PDF_IMAGE_PIXELS: usize = 40_000_000;
+
+#[derive(Debug, Clone)]
+pub struct ReadyTextBlock {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+}
 
 /// Build the replacement token sequence for the Tj line based on font segments.
 /// If a single segment with the original font, just returns `[encoded_operand, "Tj"]`.
@@ -344,6 +359,23 @@ fn write_content_to_page(
     page_id: ObjectId,
     content: &[u8],
 ) -> Result<(), HandlerError> {
+    write_content_to_page_with_compression(doc, page_id, content, true)
+}
+
+fn write_content_to_page_uncompressed(
+    doc: &mut LopdfDocument,
+    page_id: ObjectId,
+    content: &[u8],
+) -> Result<(), HandlerError> {
+    write_content_to_page_with_compression(doc, page_id, content, false)
+}
+
+fn write_content_to_page_with_compression(
+    doc: &mut LopdfDocument,
+    page_id: ObjectId,
+    content: &[u8],
+    compress: bool,
+) -> Result<(), HandlerError> {
     let content_ids = doc.get_page_contents(page_id);
     if content_ids.is_empty() {
         return Err(HandlerError::OperationFailed(
@@ -361,9 +393,11 @@ fn write_content_to_page(
         // on the next load because lopdf tries to deflate raw data.
         stream.dict.remove(b"Filter");
         stream.content = content.to_vec();
-        // Re-compress with FlateDecode so the saved PDF stays compact
-        // and the /Filter + /Length are consistent.
-        let _ = stream.compress();
+        if compress {
+            // Re-compress ordinary mutations. Bulk semantic appends stay
+            // uncompressed to avoid deflating the growing page for every line.
+            let _ = stream.compress();
+        }
         // lopdf's compress() may leave a stale /Length when content shrank,
         // which corrupts subsequent loads (the parser reads past the real
         // end of the stream). Always rewrite Length to match actual bytes.
@@ -877,6 +911,82 @@ pub fn add_text_block(
     font_name: Option<&str>,
     size: f32,
 ) -> Result<(), HandlerError> {
+    let block = ReadyTextBlock {
+        text: text.to_string(),
+        x,
+        y,
+        size,
+    };
+    add_text_block_internal(doc, page_num, &block, font_name, false)
+}
+
+/// Add text using a font resource that the caller has already registered and
+/// verified for the complete character set. This avoids reparsing a growing
+/// page content stream merely to rediscover font coverage for every line.
+pub fn add_text_block_with_ready_font(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    text: &str,
+    x: f32,
+    y: f32,
+    font_name: &str,
+    size: f32,
+) -> Result<(), HandlerError> {
+    let block = ReadyTextBlock {
+        text: text.to_string(),
+        x,
+        y,
+        size,
+    };
+    add_text_block_internal(doc, page_num, &block, Some(font_name), true)
+}
+
+/// Append a bounded group of positioned text blocks and rewrite the page
+/// content stream once. The font must already be registered on the page.
+pub fn add_text_blocks_with_ready_font(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    blocks: &[ReadyTextBlock],
+    font_name: &str,
+) -> Result<(), HandlerError> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+    let pages = doc.get_pages();
+    let page_id = *pages
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|error| HandlerError::OperationFailed(format!("page content read: {error}")))?;
+    let mut new_content = Vec::with_capacity(
+        content.len()
+            + blocks
+                .iter()
+                .map(|block| block.text.len().saturating_add(96))
+                .sum::<usize>(),
+    );
+    new_content.extend_from_slice(&content);
+    for block in blocks {
+        let encoded = encode_pdf_text_with_font(doc, page_id, Some(font_name), &block.text)?;
+        new_content.extend_from_slice(
+            format!(
+                "\nBT\n/{font_name} {} Tf\n{:.2} {:.2} Td\n{encoded} Tj\nET\n",
+                block.size, block.x, block.y
+            )
+            .as_bytes(),
+        );
+    }
+    write_content_to_page(doc, page_id, &new_content)
+}
+
+fn add_text_block_internal(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    block: &ReadyTextBlock,
+    font_name: Option<&str>,
+    font_ready: bool,
+) -> Result<(), HandlerError> {
     let pages = doc.get_pages();
     let page_id = pages
         .get(&(page_num as u32))
@@ -893,23 +1003,492 @@ pub fn add_text_block(
         .or_else(|| first_page_font_name(doc, *page_id))
         .unwrap_or_else(|| "F1".to_string());
 
-    // Build the new BT/ET block. We escape literal-string special chars here so
-    // consumers can use parentheses and backslashes safely.
-    let escaped = escape_pdf_literal(text);
-    let block = format!(
-        "\nBT\n/{font} {size} Tf\n{x:.2} {y:.2} Td\n({escaped}) Tj\nET\n",
+    let text_tokens = if font_ready {
+        format!(
+            "{} Tj",
+            encode_pdf_text_with_font(doc, *page_id, Some(&font), &block.text)?
+        )
+    } else {
+        let mut missing = Vec::new();
+        let segments = pick_fonts_for_text(doc, *page_id, Some(&font), &block.text, &mut missing)?;
+        if !missing.is_empty() {
+            return Err(HandlerError::OperationFailed(format!(
+                "characters not encodable in any page font: {}",
+                missing.iter().collect::<String>()
+            )));
+        }
+        build_segment_tokens(&segments, Some(&font), block.size).join(" ")
+    };
+    let content_block = format!(
+        "\nBT\n/{font} {size} Tf\n{x:.2} {y:.2} Td\n{text_tokens}\nET\n",
         font = font,
-        size = size,
-        x = x,
-        y = y,
-        escaped = escaped
+        size = block.size,
+        x = block.x,
+        y = block.y,
+        text_tokens = text_tokens,
     );
 
-    let mut new_content = String::with_capacity(content_str.len() + block.len());
+    let mut new_content = String::with_capacity(content_str.len() + content_block.len());
     new_content.push_str(&content_str);
-    new_content.push_str(&block);
+    new_content.push_str(&content_block);
 
-    write_content_to_page(doc, *page_id, new_content.as_bytes())?;
+    if font_ready {
+        write_content_to_page_uncompressed(doc, *page_id, new_content.as_bytes())?;
+    } else {
+        write_content_to_page(doc, *page_id, new_content.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Add a trusted local JPEG or 8-bit non-interlaced PNG as a PDF image XObject.
+/// The caller controls placement in PDF points; source and decoded sizes are bounded.
+pub fn add_image_block(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    source: &std::path::Path,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Result<(), HandlerError> {
+    if ![x, y, width, height].iter().all(|value| value.is_finite()) || width <= 0.0 || height <= 0.0
+    {
+        return Err(HandlerError::InvalidArgument(
+            "PDF image position and size must be finite with positive width/height".to_string(),
+        ));
+    }
+    let metadata = std::fs::metadata(source).map_err(HandlerError::IoError)?;
+    if metadata.len() > MAX_PDF_IMAGE_SOURCE_BYTES {
+        return Err(HandlerError::InvalidArgument(format!(
+            "PDF image source is {} bytes; maximum is {MAX_PDF_IMAGE_SOURCE_BYTES}",
+            metadata.len()
+        )));
+    }
+    let bytes = std::fs::read(source).map_err(HandlerError::IoError)?;
+    let image = if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        pdf_jpeg_image(bytes)?
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        pdf_png_image(&bytes)?
+    } else {
+        return Err(HandlerError::UnsupportedMode(
+            "PDF semantic image embedding supports JPEG and 8-bit non-interlaced PNG".to_string(),
+        ));
+    };
+
+    let pages = doc.get_pages();
+    let page_id = *pages
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+    let image_id = doc.add_object(lopdf::Object::Stream(image.stream));
+    let resource_name = format!("HcdIm{}", image_id.0);
+    register_page_xobject(doc, page_id, &resource_name, image_id)?;
+
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|error| HandlerError::OperationFailed(format!("page content read: {error}")))?;
+    let mut new_content = Vec::with_capacity(content.len() + 128);
+    new_content.extend_from_slice(&content);
+    new_content.extend_from_slice(
+        format!("\nq\n{width:.2} 0 0 {height:.2} {x:.2} {y:.2} cm\n/{resource_name} Do\nQ\n")
+            .as_bytes(),
+    );
+    write_content_to_page(doc, page_id, &new_content)?;
+    Ok(())
+}
+
+struct PdfImageData {
+    stream: lopdf::Stream,
+}
+
+fn pdf_jpeg_image(bytes: Vec<u8>) -> Result<PdfImageData, HandlerError> {
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(&bytes));
+    decoder
+        .read_info()
+        .map_err(|error| HandlerError::InvalidArgument(format!("invalid JPEG image: {error}")))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| HandlerError::InvalidArgument("JPEG image has no header".to_string()))?;
+    let pixels = usize::from(info.width)
+        .checked_mul(usize::from(info.height))
+        .ok_or_else(|| HandlerError::InvalidArgument("JPEG dimensions overflow".to_string()))?;
+    if pixels == 0 || pixels > MAX_PDF_IMAGE_PIXELS {
+        return Err(HandlerError::InvalidArgument(format!(
+            "JPEG image has {pixels} pixels; maximum is {MAX_PDF_IMAGE_PIXELS}"
+        )));
+    }
+    let color_space = match info.pixel_format {
+        jpeg_decoder::PixelFormat::L8 => "DeviceGray",
+        jpeg_decoder::PixelFormat::RGB24 => "DeviceRGB",
+        jpeg_decoder::PixelFormat::CMYK32 => "DeviceCMYK",
+        other => {
+            return Err(HandlerError::UnsupportedMode(format!(
+                "unsupported JPEG pixel format {other:?}"
+            )))
+        }
+    };
+    let dictionary = lopdf::dictionary! {
+        "Type" => lopdf::Object::Name(b"XObject".to_vec()),
+        "Subtype" => lopdf::Object::Name(b"Image".to_vec()),
+        "Width" => lopdf::Object::Integer(i64::from(info.width)),
+        "Height" => lopdf::Object::Integer(i64::from(info.height)),
+        "ColorSpace" => lopdf::Object::Name(color_space.as_bytes().to_vec()),
+        "BitsPerComponent" => lopdf::Object::Integer(8),
+        "Filter" => lopdf::Object::Name(b"DCTDecode".to_vec()),
+    };
+    Ok(PdfImageData {
+        stream: lopdf::Stream::new(dictionary, bytes),
+    })
+}
+
+fn pdf_png_image(bytes: &[u8]) -> Result<PdfImageData, HandlerError> {
+    let (width, height, rgb) = decode_png_rgb(bytes)?;
+    let dictionary = lopdf::dictionary! {
+        "Type" => lopdf::Object::Name(b"XObject".to_vec()),
+        "Subtype" => lopdf::Object::Name(b"Image".to_vec()),
+        "Width" => lopdf::Object::Integer(i64::from(width)),
+        "Height" => lopdf::Object::Integer(i64::from(height)),
+        "ColorSpace" => lopdf::Object::Name(b"DeviceRGB".to_vec()),
+        "BitsPerComponent" => lopdf::Object::Integer(8),
+    };
+    let mut stream = lopdf::Stream::new(dictionary, rgb);
+    stream.compress().map_err(|error| {
+        HandlerError::OperationFailed(format!("PNG PDF stream compression failed: {error}"))
+    })?;
+    Ok(PdfImageData { stream })
+}
+
+fn decode_png_rgb(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), HandlerError> {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(HandlerError::InvalidArgument(
+            "invalid PNG signature".to_string(),
+        ));
+    }
+    let mut cursor = 8usize;
+    let mut width = None;
+    let mut height = None;
+    let mut bit_depth = 0u8;
+    let mut color_type = 0u8;
+    let mut interlace = 0u8;
+    let mut palette = Vec::new();
+    let mut transparency = Vec::new();
+    let mut compressed = Vec::new();
+    let mut chunks = 0usize;
+    while cursor < bytes.len() {
+        chunks += 1;
+        if chunks > 100_000 || cursor.saturating_add(12) > bytes.len() {
+            return Err(HandlerError::InvalidArgument(
+                "PNG chunk structure exceeds limits".to_string(),
+            ));
+        }
+        let length = u32::from_be_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+        let chunk_end = cursor
+            .checked_add(12)
+            .and_then(|value| value.checked_add(length))
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| HandlerError::InvalidArgument("truncated PNG chunk".to_string()))?;
+        let kind = &bytes[cursor + 4..cursor + 8];
+        let data = &bytes[cursor + 8..cursor + 8 + length];
+        match kind {
+            b"IHDR" if length == 13 && width.is_none() => {
+                width = Some(u32::from_be_bytes(data[0..4].try_into().unwrap()));
+                height = Some(u32::from_be_bytes(data[4..8].try_into().unwrap()));
+                bit_depth = data[8];
+                color_type = data[9];
+                if data[10] != 0 || data[11] != 0 {
+                    return Err(HandlerError::UnsupportedMode(
+                        "unsupported PNG compression or filter method".to_string(),
+                    ));
+                }
+                interlace = data[12];
+            }
+            b"PLTE" => palette.extend_from_slice(data),
+            b"tRNS" => transparency.extend_from_slice(data),
+            b"IDAT" => {
+                if compressed.len().saturating_add(data.len()) > MAX_PDF_IMAGE_SOURCE_BYTES as usize
+                {
+                    return Err(HandlerError::InvalidArgument(
+                        "PNG IDAT data exceeds the source limit".to_string(),
+                    ));
+                }
+                compressed.extend_from_slice(data);
+            }
+            b"IEND" => break,
+            _ => {}
+        }
+        cursor = chunk_end;
+    }
+    let width =
+        width.ok_or_else(|| HandlerError::InvalidArgument("PNG has no IHDR".to_string()))?;
+    let height =
+        height.ok_or_else(|| HandlerError::InvalidArgument("PNG has no IHDR".to_string()))?;
+    if bit_depth != 8 || interlace != 0 {
+        return Err(HandlerError::UnsupportedMode(
+            "PDF semantic image embedding supports only 8-bit non-interlaced PNG".to_string(),
+        ));
+    }
+    let channels = match color_type {
+        0 | 3 => 1usize,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => {
+            return Err(HandlerError::UnsupportedMode(format!(
+                "unsupported PNG color type {color_type}"
+            )))
+        }
+    };
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| HandlerError::InvalidArgument("PNG dimensions overflow".to_string()))?;
+    if pixels == 0 || pixels > MAX_PDF_IMAGE_PIXELS {
+        return Err(HandlerError::InvalidArgument(format!(
+            "PNG image has {pixels} pixels; maximum is {MAX_PDF_IMAGE_PIXELS}"
+        )));
+    }
+    let row_bytes = (width as usize)
+        .checked_mul(channels)
+        .ok_or_else(|| HandlerError::InvalidArgument("PNG row size overflow".to_string()))?;
+    let expected = row_bytes
+        .checked_add(1)
+        .and_then(|row| row.checked_mul(height as usize))
+        .ok_or_else(|| HandlerError::InvalidArgument("PNG decoded size overflow".to_string()))?;
+    if expected > MAX_PDF_IMAGE_DECODED_BYTES {
+        return Err(HandlerError::InvalidArgument(format!(
+            "PNG decoded data is {expected} bytes; maximum is {MAX_PDF_IMAGE_DECODED_BYTES}"
+        )));
+    }
+    let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
+    let mut filtered = Vec::with_capacity(expected);
+    decoder
+        .by_ref()
+        .take(expected as u64 + 1)
+        .read_to_end(&mut filtered)
+        .map_err(|error| HandlerError::InvalidArgument(format!("invalid PNG IDAT: {error}")))?;
+    if filtered.len() != expected {
+        return Err(HandlerError::InvalidArgument(format!(
+            "PNG decoded data has {} bytes; expected {expected}",
+            filtered.len()
+        )));
+    }
+    let mut scanlines = vec![0u8; row_bytes * height as usize];
+    for row in 0..height as usize {
+        let source_start = row * (row_bytes + 1);
+        let filter = filtered[source_start];
+        let source_row = &filtered[source_start + 1..source_start + 1 + row_bytes];
+        let target_start = row * row_bytes;
+        let (before, remaining) = scanlines.split_at_mut(target_start);
+        let target_row = &mut remaining[..row_bytes];
+        let previous = if row == 0 {
+            None
+        } else {
+            Some(&before[before.len() - row_bytes..])
+        };
+        unfilter_png_row(filter, source_row, target_row, previous, channels)?;
+    }
+
+    if color_type == 3 && (palette.is_empty() || palette.len() % 3 != 0 || palette.len() > 768) {
+        return Err(HandlerError::InvalidArgument(
+            "indexed PNG has an invalid palette".to_string(),
+        ));
+    }
+    let rgb_capacity = pixels
+        .checked_mul(3)
+        .ok_or_else(|| HandlerError::InvalidArgument("PNG RGB size overflow".to_string()))?;
+    let mut rgb = Vec::with_capacity(rgb_capacity);
+    for pixel in scanlines.chunks_exact(channels) {
+        match color_type {
+            0 => rgb.extend_from_slice(&[pixel[0], pixel[0], pixel[0]]),
+            2 => rgb.extend_from_slice(pixel),
+            3 => {
+                let index = pixel[0] as usize;
+                let start = index.checked_mul(3).ok_or_else(|| {
+                    HandlerError::InvalidArgument("PNG palette index overflow".to_string())
+                })?;
+                let color = palette.get(start..start + 3).ok_or_else(|| {
+                    HandlerError::InvalidArgument("PNG palette index is out of range".to_string())
+                })?;
+                let alpha = transparency.get(index).copied().unwrap_or(255);
+                composite_rgb(&mut rgb, color[0], color[1], color[2], alpha);
+            }
+            4 => composite_rgb(&mut rgb, pixel[0], pixel[0], pixel[0], pixel[1]),
+            6 => composite_rgb(&mut rgb, pixel[0], pixel[1], pixel[2], pixel[3]),
+            _ => unreachable!(),
+        }
+    }
+    Ok((width, height, rgb))
+}
+
+fn unfilter_png_row(
+    filter: u8,
+    source: &[u8],
+    target: &mut [u8],
+    previous: Option<&[u8]>,
+    bytes_per_pixel: usize,
+) -> Result<(), HandlerError> {
+    for index in 0..source.len() {
+        let left = index
+            .checked_sub(bytes_per_pixel)
+            .map_or(0, |position| target[position]);
+        let up = previous.map_or(0, |row| row[index]);
+        let upper_left = previous.and_then(|row| {
+            index
+                .checked_sub(bytes_per_pixel)
+                .map(|position| row[position])
+        });
+        let predictor = match filter {
+            0 => 0,
+            1 => left,
+            2 => up,
+            3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+            4 => paeth_predictor(left, up, upper_left.unwrap_or(0)),
+            _ => {
+                return Err(HandlerError::InvalidArgument(format!(
+                    "unsupported PNG row filter {filter}"
+                )))
+            }
+        };
+        target[index] = source[index].wrapping_add(predictor);
+    }
+    Ok(())
+}
+
+fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {
+    let left = i32::from(left);
+    let up = i32::from(up);
+    let upper_left = i32::from(upper_left);
+    let estimate = left + up - upper_left;
+    let left_distance = (estimate - left).abs();
+    let up_distance = (estimate - up).abs();
+    let upper_left_distance = (estimate - upper_left).abs();
+    if left_distance <= up_distance && left_distance <= upper_left_distance {
+        left as u8
+    } else if up_distance <= upper_left_distance {
+        up as u8
+    } else {
+        upper_left as u8
+    }
+}
+
+fn composite_rgb(output: &mut Vec<u8>, red: u8, green: u8, blue: u8, alpha: u8) {
+    let composite = |component: u8| {
+        ((u16::from(component) * u16::from(alpha) + 255 * (255 - u16::from(alpha)) + 127) / 255)
+            as u8
+    };
+    output.extend_from_slice(&[composite(red), composite(green), composite(blue)]);
+}
+
+fn register_page_xobject(
+    doc: &mut LopdfDocument,
+    page_id: ObjectId,
+    name: &str,
+    image_id: ObjectId,
+) -> Result<(), HandlerError> {
+    let resources = doc
+        .get_object(page_id)
+        .and_then(lopdf::Object::as_dict)
+        .ok()
+        .and_then(|page| page.get(b"Resources").ok())
+        .cloned();
+    match resources {
+        Some(lopdf::Object::Reference(resources_id)) => {
+            register_xobject_in_resource_object(doc, resources_id, name, image_id)
+        }
+        Some(lopdf::Object::Dictionary(_)) | None => {
+            let xobject_reference = doc
+                .get_object(page_id)
+                .and_then(lopdf::Object::as_dict)
+                .ok()
+                .and_then(|page| page.get(b"Resources").ok())
+                .and_then(|resources| resources.as_dict().ok())
+                .and_then(|resources| resources.get(b"XObject").ok())
+                .and_then(|xobjects| xobjects.as_reference().ok());
+            if let Some(xobjects_id) = xobject_reference {
+                return insert_xobject_reference(doc, xobjects_id, name, image_id);
+            }
+            let page = doc
+                .get_object_mut(page_id)
+                .and_then(lopdf::Object::as_dict_mut)
+                .map_err(|error| {
+                    HandlerError::OperationFailed(format!("PDF page dictionary: {error}"))
+                })?;
+            if page.get(b"Resources").is_err() {
+                page.set(
+                    "Resources",
+                    lopdf::Object::Dictionary(lopdf::Dictionary::new()),
+                );
+            }
+            let resources = page
+                .get_mut(b"Resources")
+                .and_then(lopdf::Object::as_dict_mut)
+                .map_err(|error| {
+                    HandlerError::OperationFailed(format!("PDF page resources: {error}"))
+                })?;
+            insert_xobject_in_dictionary(resources, name, image_id)
+        }
+        Some(_) => Err(HandlerError::OperationFailed(
+            "PDF page Resources is neither a dictionary nor reference".to_string(),
+        )),
+    }
+}
+
+fn register_xobject_in_resource_object(
+    doc: &mut LopdfDocument,
+    resources_id: ObjectId,
+    name: &str,
+    image_id: ObjectId,
+) -> Result<(), HandlerError> {
+    let xobject_reference = doc
+        .get_object(resources_id)
+        .and_then(lopdf::Object::as_dict)
+        .ok()
+        .and_then(|resources| resources.get(b"XObject").ok())
+        .and_then(|xobjects| xobjects.as_reference().ok());
+    if let Some(xobjects_id) = xobject_reference {
+        return insert_xobject_reference(doc, xobjects_id, name, image_id);
+    }
+    let resources = doc
+        .get_object_mut(resources_id)
+        .and_then(lopdf::Object::as_dict_mut)
+        .map_err(|error| {
+            HandlerError::OperationFailed(format!("PDF resource dictionary: {error}"))
+        })?;
+    insert_xobject_in_dictionary(resources, name, image_id)
+}
+
+fn insert_xobject_reference(
+    doc: &mut LopdfDocument,
+    xobjects_id: ObjectId,
+    name: &str,
+    image_id: ObjectId,
+) -> Result<(), HandlerError> {
+    let xobjects = doc
+        .get_object_mut(xobjects_id)
+        .and_then(lopdf::Object::as_dict_mut)
+        .map_err(|error| {
+            HandlerError::OperationFailed(format!("PDF XObject dictionary: {error}"))
+        })?;
+    xobjects.set(name.as_bytes(), lopdf::Object::Reference(image_id));
+    Ok(())
+}
+
+fn insert_xobject_in_dictionary(
+    resources: &mut lopdf::Dictionary,
+    name: &str,
+    image_id: ObjectId,
+) -> Result<(), HandlerError> {
+    if resources.get(b"XObject").is_err() {
+        resources.set(
+            "XObject",
+            lopdf::Object::Dictionary(lopdf::Dictionary::new()),
+        );
+    }
+    let xobjects = resources
+        .get_mut(b"XObject")
+        .and_then(lopdf::Object::as_dict_mut)
+        .map_err(|error| {
+            HandlerError::OperationFailed(format!("PDF XObject resources: {error}"))
+        })?;
+    xobjects.set(name.as_bytes(), lopdf::Object::Reference(image_id));
     Ok(())
 }
 
@@ -1088,21 +1667,6 @@ fn first_page_font_name(doc: &LopdfDocument, page_id: ObjectId) -> Option<String
         .keys()
         .next()
         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-}
-
-/// Escape a literal PDF string body — only the three chars that terminate
-/// or escape inside `(...)` operands: ( ) and \.
-fn escape_pdf_literal(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 4);
-    for c in text.chars() {
-        match c {
-            '(' => out.push_str("\\("),
-            ')' => out.push_str("\\)"),
-            '\\' => out.push_str("\\\\"),
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// Parse a text block path like /page[N]/text[M] into (page_num, text_index).
@@ -1504,4 +2068,42 @@ pub fn apply_range_highlights(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    // Standards-compliant 1x1 8-bit grayscale+alpha PNG. Keeping the fixture
+    // inline makes the decoder test independent of image tooling or network
+    // access.
+    const ONE_PIXEL_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5,
+        0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64,
+        0xf8, 0x0f, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn png_decoder_produces_bounded_rgb() {
+        let (width, height, rgb) = decode_png_rgb(ONE_PIXEL_PNG).unwrap();
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(rgb.len(), 3);
+    }
+
+    #[test]
+    fn png_decoder_rejects_truncated_chunks() {
+        let error = decode_png_rgb(&ONE_PIXEL_PNG[..32]).unwrap_err();
+        assert!(error.to_string().contains("truncated PNG chunk"));
+    }
+
+    #[test]
+    fn png_decoder_rejects_pixel_bombs_before_inflate() {
+        let mut png = ONE_PIXEL_PNG.to_vec();
+        png[16..20].copy_from_slice(&10_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&10_000u32.to_be_bytes());
+        let error = decode_png_rgb(&png).unwrap_err();
+        assert!(error.to_string().contains("pixels; maximum"));
+    }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "hcd-docx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hcd-core = { path = "../hcd-core" }
+oxml = { path = "../oxml" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+quick-xml = { workspace = true }
+sha2 = { workspace = true }
+zip = { workspace = true }
+tempfile = { workspace = true }

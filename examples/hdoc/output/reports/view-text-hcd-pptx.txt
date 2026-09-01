@@ -1,0 +1,5 @@
+--- Slide 1 ---
+  OfficeCLI HCD 文本输入示例
+客户账号：Secret 789
+联系电话：13800138000
+该文件用于验证 TXT → HCD → DOCX/XLSX/PPTX/PDF 的纯 Rust 语义链路。

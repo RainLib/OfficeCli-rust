@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd:1",
+  "title": "HTML Canonical Document manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "documentId", "profile", "revision", "source",
+    "rootHash", "annotationRootHash", "indexPrefix", "indexPageCount",
+    "chunkCount", "stylesHref", "capabilities", "state"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "hcd/1" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "profile": { "enum": ["semantic-flow", "grid", "slide-canvas", "fixed-layout"] },
+    "revision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "source": { "$ref": "#/$defs/source" },
+    "rootHash": { "$ref": "#/$defs/sha256" },
+    "annotationRootHash": { "$ref": "#/$defs/sha256" },
+    "annotationHref": { "type": "string", "pattern": "^annotations/sha256/[0-9a-f]{64}\\.json$" },
+    "indexPrefix": { "type": "string", "pattern": "^indexes/rev-[0-9]{20}$" },
+    "indexPageCount": { "type": "integer", "minimum": 0 },
+    "chunkCount": { "type": "integer", "minimum": 0 },
+    "stylesHref": { "const": "styles.css" },
+    "capabilities": { "$ref": "#/$defs/capabilities" },
+    "fidelity": { "$ref": "#/$defs/fidelityReport" },
+    "state": { "const": "COMPLETE" },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fidelityWarning" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "sha256", "sizeBytes"],
+      "properties": {
+        "format": { "enum": ["docx", "xlsx", "pptx", "pdf", "html", "txt"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 268435456 }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "textPatch", "annotations", "structurePatch", "stylePatch", "exactPagination"
+      ],
+      "properties": {
+        "textPatch": { "const": true },
+        "annotations": { "const": true },
+        "structurePatch": { "const": false },
+        "stylePatch": { "const": false },
+        "exactPagination": { "const": false }
+      }
+    },
+    "chunkDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence", "chunkId", "region", "htmlHref", "htmlHash", "mapHref",
+        "mapHash", "byteLength", "blockCount", "nodeCount", "textChars",
+        "nodeBloom", "continuation"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "chunkId": { "type": "string", "pattern": "^c_[0-9a-f]{32}$" },
+        "region": {
+          "enum": ["body", "header", "footer", "footnote", "endnote", "comment", "sheet", "slide", "note", "page"]
+        },
+        "htmlHref": { "type": "string", "pattern": "^chunks/sha256/[0-9a-f]{64}\\.html$" },
+        "htmlHash": { "$ref": "#/$defs/sha256" },
+        "mapHref": { "type": "string", "pattern": "^maps/sha256/[0-9a-f]{64}\\.json$" },
+        "mapHash": { "$ref": "#/$defs/sha256" },
+        "byteLength": { "type": "integer", "minimum": 0, "maximum": 2097152 },
+        "blockCount": { "type": "integer", "minimum": 1 },
+        "nodeCount": { "type": "integer", "minimum": 0 },
+        "textChars": { "type": "integer", "minimum": 0 },
+        "nodeBloom": { "$ref": "#/$defs/sha256" },
+        "firstNodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
+        "lastNodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
+        "continuation": { "type": "boolean" }
+      }
+    },
+    "sourceAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["part", "textOrdinal", "nodeKind", "editable"],
+      "properties": {
+        "part": { "type": "string", "pattern": "^(word|xl|ppt|pdf|html|text)/" },
+        "textOrdinal": { "type": "integer", "minimum": 1 },
+        "paragraphId": { "type": "string", "maxLength": 256 },
+        "textId": { "type": "string", "maxLength": 256 },
+        "nodeKind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "editable": { "type": "boolean" }
+      }
+    },
+    "nodeMapEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId", "nodeHash", "source"],
+      "properties": {
+        "nodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
+        "nodeHash": { "$ref": "#/$defs/sha256" },
+        "source": { "$ref": "#/$defs/sourceAnchor" }
+      }
+    },
+    "fidelityWarning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "nodeId": { "type": "string" },
+        "sourcePart": { "type": "string" }
+      }
+    },
+    "fidelityReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "level", "preserved", "flattened", "dropped", "warnings"],
+      "properties": {
+        "schemaVersion": { "const": "hcd/1" },
+        "level": { "enum": ["EXACT", "HIGH", "SEMANTIC", "VISUAL", "DEGRADED"] },
+        "preserved": { "type": "array", "items": { "type": "string" } },
+        "flattened": { "type": "array", "items": { "type": "string" } },
+        "dropped": { "type": "array", "items": { "type": "string" } },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/fidelityWarning" } }
+      }
+    }
+  }
+}

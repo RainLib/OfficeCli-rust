@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Excel Preview</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #f0f0f0;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+.file-title {
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    background: #217346;
+    color: #fff;
+}
+.sheet-tabs {
+    display: flex;
+    background: #e0e0e0;
+    border-top: 1px solid #ccc;
+    overflow-x: auto;
+    padding: 0 8px;
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+}
+.sheet-tab {
+    --tab-color: #e8e8e8;
+    padding: 8px 16px;
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid #bbb;
+    border-top: none;
+    background: var(--tab-color);
+    color: #fff;
+    margin-bottom: 0;
+    border-radius: 0 0 3px 3px;
+    white-space: nowrap;
+    user-select: none;
+    position: relative;
+    transition: background 0.15s, color 0.15s;
+}
+.sheet-tab[style*="--tab-color:#e8e8e8"], .sheet-tab:not([style*="--tab-color"]) {
+    color: #333;
+}
+.sheet-tab:hover { opacity: 0.85; }
+.sheet-tab.active {
+    background: linear-gradient(to bottom, #fff 60%, color-mix(in srgb, var(--tab-color) 30%, #fff)) !important;
+    color: #333 !important;
+    border-color: #aaa;
+    border-bottom: 3px solid var(--tab-color);
+    font-weight: 600;
+}
+.sheet-slider { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+.sheet-content { background: #fff; display: none; flex: 1; min-height: 0; }
+.sheet-content.active { display: flex; flex-direction: column; }
+.table-wrapper {
+    flex: 1;
+    overflow: auto;
+    min-height: 0;
+    background: #fff;
+}
+table {
+    border-collapse: collapse;
+    font-size: 11px;
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    table-layout: fixed;
+}
+.row-header-col { width: 30pt; }
+th {
+    background: #f8f8f8;
+    border: 1px solid #e0e0e0;
+    font-weight: normal;
+    color: #666;
+    font-size: 10px;
+    text-align: center;
+    padding: 2px 4px;
+}
+.corner-cell { background: #f0f0f0; z-index: 4; }
+.col-header {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #f8f8f8;
+    min-width: 50px;
+    cursor: s-resize;
+}
+.row-header {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #f8f8f8;
+    min-width: 40px;
+    cursor: e-resize;
+    border-right: none;
+}
+td {
+    box-shadow: inset -1px -1px 0 #e0e0e0;
+    padding: 2px 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+    max-width: 500px;
+    word-break: break-all;
+}
+tbody tr:first-child td { box-shadow: inset -1px -1px 0 #e0e0e0, inset 0 1px 0 #e0e0e0; }
+tr td:first-of-type { box-shadow: inset -1px -1px 0 #e0e0e0, inset 1px 0 0 #e0e0e0; }
+tbody tr:first-child td:first-of-type { box-shadow: inset -1px -1px 0 #e0e0e0, inset 1px 1px 0 #e0e0e0; }
+.empty-sheet {
+    padding: 40px;
+    text-align: center;
+    color: #999;
+    font-size: 14px;
+}
+.chart-container {
+    margin: 16px auto;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.chart-container svg { display: block; }
+.truncation-warning {
+    padding: 8px 16px;
+    background: #FFF3CD;
+    color: #856404;
+    border: 1px solid #FFEEBA;
+    font-size: 12px;
+    text-align: center;
+    margin: 4px 0;
+}
+.sr-only { position:absolute; clip:rect(0 0 0 0); width:1px; height:1px; overflow:hidden; }
+@media print {
+    .file-title, .sheet-tabs { display: none !important; }
+    .table-wrapper { max-height: none !important; overflow: visible !important; flex: none !important; }
+    body { background: #fff !important; min-height: auto !important; }
+    .sheet-content { display: block !important; flex: none !important; }
+    td { max-width: none !important; white-space: normal !important; overflow: visible !important; }
+}
+</style>
+</head>
+<body>
+<div class="file-title">Workbook Preview</div>
+<div class="sheet-slider">
+<div class="sheet-content active" data-sheet="0">
+<div class="table-wrapper">
+<table>
+<colgroup><col style="width:40px"></colgroup><col style="width:64.0px"><col style="width:64.0px"><col style="width:64.0px"><thead><tr><th class="corner-cell"></th><th class="col-header" data-path="/Sheet1/col[A]" >A</th><th class="col-header" data-path="/Sheet1/col[B]" >B</th><th class="col-header" data-path="/Sheet1/col[C]" >C</th></tr></thead>
+<tbody>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[1]" >1</th>
+<td data-path="/Sheet1/A1">智能脱敏服务转换验收</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[2]" >2</th>
+<td data-path="/Sheet1/A2">客户账号：Secret 123，中文内容（Unicode）</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[3]" >3</th>
+<td data-path="/Sheet1/A3">联系电话：13800138000；邮箱：alice@example.com</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[4]" >4</th>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[5]" >5</th>
+<td data-path="/Sheet1/A5">功能清单</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[6]" >6</th>
+<td data-path="/Sheet1/A6">1. 文档转换为安全 canonical HTML</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[7]" >7</th>
+<td data-path="/Sheet1/A7">2. 通过稳定 nodeId 提交脱敏 patch</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[8]" >8</th>
+<td data-path="/Sheet1/A8">3. 从 HCD revision 导出 DOCX、XLSX、PPTX 和 PDF</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[9]" >9</th>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[10]" >10</th>
+<td data-path="/Sheet1/A10">账户明细</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[11]" >11</th>
+<td data-path="/Sheet1/A11">姓名</td>
+<td data-path="/Sheet1/B11">账号</td>
+<td data-path="/Sheet1/C11">状态</td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[12]" >12</th>
+<td data-path="/Sheet1/A12">张三</td>
+<td data-path="/Sheet1/B12">6222020012345678</td>
+<td data-path="/Sheet1/C12">正常</td>
+</tr>
+<tr>
+<th class="row-header" data-path="/Sheet1/row[13]" >13</th>
+<td data-path="/Sheet1/A13">李四</td>
+<td data-path="/Sheet1/B13">Secret 456</td>
+<td data-path="/Sheet1/C13">待处理</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+<div class="sheet-tabs" role="tablist">
+  <div class="sheet-tab active" data-sheet="0" role="tab" tabindex="0" onclick="switchSheet(0)" onkeydown="if(event.key==='Enter'||event.key===' ')switchSheet(0)">Sheet1</div>
+</div>
+
+<script>
+function switchSheet(idx) {
+    document.querySelectorAll('.sheet-tab').forEach(function(t) {
+        t.classList.toggle('active', parseInt(t.getAttribute('data-sheet')) === idx);
+    });
+    document.querySelectorAll('.sheet-content').forEach(function(c) {
+        c.classList.toggle('active', parseInt(c.getAttribute('data-sheet')) === idx);
+    });
+    window.scrollTo(0, 0);
+    adjustStickyHeights();
+}
+function adjustStickyHeights() {
+    document.querySelectorAll('.sheet-content.active .table-wrapper table').forEach(function(table) {
+        var thead = table.querySelector('thead');
+        if (!thead) return;
+        var theadH = thead.offsetHeight;
+        var cumTop = theadH;
+        var frozen = table.querySelectorAll('tr[data-frozen]');
+        frozen.forEach(function(tr) {
+            tr.querySelectorAll('th, td').forEach(function(cell) {
+                if (cell.style.position === 'sticky') cell.style.top = cumTop + 'px';
+            });
+            cumTop += tr.offsetHeight;
+        });
+    });
+}
+// Initial run
+adjustStickyHeights();
+</script>
+</body>
+</html>

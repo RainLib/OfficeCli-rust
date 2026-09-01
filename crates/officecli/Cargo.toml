@@ -14,6 +14,8 @@ docx-handler = { path = "../docx-handler" }
 xlsx-handler = { path = "../xlsx-handler" }
 pptx-handler = { path = "../pptx-handler" }
 pdf-handler = { path = "../pdf-handler" }
+hcd-core = { path = "../hcd-core" }
+hcd-formats = { path = "../hcd-formats" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -29,8 +31,9 @@ thiserror = { workspace = true }
 futures = "0.3"
 async-stream = "0.3"
 office_oxide = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-tempfile = "3"
+zip = { workspace = true }

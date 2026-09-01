@@ -1,4 +1,4 @@
-use crate::content_stream::PdfColor;
+use crate::content_stream::{ParsedContentStream, PdfColor, PdfTextBlock};
 use crate::reader::PdfReader;
 use handler_common::{HandlerError, ViewOptions};
 
@@ -72,7 +72,7 @@ fn map_pdf_font_to_css(base_font_name: &str) -> (String, String, String) {
     (family.to_string(), weight.to_string(), style.to_string())
 }
 
-fn get_page_dimensions(reader: &PdfReader, page_num: usize) -> (f32, f32, f32, f32) {
+pub fn page_dimensions(reader: &PdfReader, page_num: usize) -> (f32, f32, f32, f32) {
     let mut width = 612.0; // default Letter width
     let mut height = 792.0; // default Letter height
     let mut llx = 0.0;
@@ -82,8 +82,8 @@ fn get_page_dimensions(reader: &PdfReader, page_num: usize) -> (f32, f32, f32, f
     if let Some(&page_id) = pages.get(&(page_num as u32)) {
         if let Ok(page_dict) = reader.document().get_dictionary(page_id) {
             let box_obj = page_dict
-                .get(b"MediaBox")
-                .or_else(|_| page_dict.get(b"CropBox"));
+                .get(b"CropBox")
+                .or_else(|_| page_dict.get(b"MediaBox"));
             if let Ok(obj) = box_obj {
                 let resolved = reader
                     .document()
@@ -120,8 +120,73 @@ fn get_page_dimensions(reader: &PdfReader, page_num: usize) -> (f32, f32, f32, f
     (width, height, llx, lly)
 }
 
+/// Shared fixed-layout style mapping used by both the regular view/watch HTML
+/// renderer and HCD's editable PDF fragments.
+pub fn text_block_inline_style(
+    parsed: &ParsedContentStream,
+    block: &PdfTextBlock,
+    page_height: f32,
+    llx: f32,
+    lly: f32,
+) -> String {
+    let bbox = &block.bbox;
+    let size = block.style.font_size.unwrap_or(12.0);
+    let color = block
+        .style
+        .fill_color
+        .as_ref()
+        .map(pdf_color_to_css)
+        .unwrap_or_else(|| "black".to_string());
+    let background = block
+        .style
+        .bg_color
+        .as_ref()
+        .map(|color| format!("background-color:{};", pdf_color_to_css(color)))
+        .unwrap_or_default();
+    let (family, weight, font_style) = block
+        .style
+        .font_name
+        .as_ref()
+        .and_then(|font_id| parsed.font_map.get(font_id))
+        .and_then(|font| font.base_font.as_deref())
+        .map(map_pdf_font_to_css)
+        .unwrap_or_else(|| {
+            (
+                "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif".to_string(),
+                "normal".to_string(),
+                "normal".to_string(),
+            )
+        });
+    let top = page_height - (bbox.y - lly) - bbox.height;
+    let left = bbox.x - llx;
+    format!(
+        "position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{:.1}pt;height:{:.1}pt;font-family:{family};font-size:{size:.1}pt;font-weight:{weight};font-style:{font_style};color:{color};{background}line-height:1",
+        bbox.width, bbox.height
+    )
+}
+
+fn pdf_color_to_css(color: &PdfColor) -> String {
+    let (red, green, blue) = match color {
+        PdfColor::Gray(gray) => {
+            let channel = (gray * 255.0) as u8;
+            (channel, channel, channel)
+        }
+        PdfColor::Rgb(red, green, blue) => (
+            (red * 255.0) as u8,
+            (green * 255.0) as u8,
+            (blue * 255.0) as u8,
+        ),
+        PdfColor::Cmyk(cyan, magenta, yellow, black) => (
+            ((1.0 - cyan) * (1.0 - black) * 255.0) as u8,
+            ((1.0 - magenta) * (1.0 - black) * 255.0) as u8,
+            ((1.0 - yellow) * (1.0 - black) * 255.0) as u8,
+        ),
+    };
+    format!("#{red:02X}{green:02X}{blue:02X}")
+}
+
 pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, HandlerError> {
-    let (_width, height, llx, lly) = get_page_dimensions(reader, page_num);
+    let (_width, height, llx, lly) = page_dimensions(reader, page_num);
     let mut page_html = String::new();
 
     page_html.push_str(&format!(
@@ -148,81 +213,11 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
         for block in &parsed.text_blocks {
             let escaped = html_escape(&block.text);
             let bbox = &block.bbox;
-            let size = block.style.font_size.unwrap_or(12.0);
-
-            let color_style = block.style.fill_color.as_ref().map(|c| match c {
-                PdfColor::Gray(g) => format!(
-                    "rgb({},{},{})",
-                    (g * 255.0) as u8,
-                    (g * 255.0) as u8,
-                    (g * 255.0) as u8
-                ),
-                PdfColor::Rgb(r, g, b) => format!(
-                    "rgb({},{},{})",
-                    (r * 255.0) as u8,
-                    (g * 255.0) as u8,
-                    (b * 255.0) as u8
-                ),
-                PdfColor::Cmyk(c, m, y, k) => {
-                    let r = ((1.0 - c) * (1.0 - k) * 255.0) as u8;
-                    let g = ((1.0 - m) * (1.0 - k) * 255.0) as u8;
-                    let b = ((1.0 - y) * (1.0 - k) * 255.0) as u8;
-                    format!("rgb({},{},{})", r, g, b)
-                }
-            });
-
-            let color_attr = color_style.as_deref().unwrap_or("black");
-
-            let bg_color_style = block.style.bg_color.as_ref().map(|c| match c {
-                PdfColor::Gray(g) => format!(
-                    "rgb({},{},{})",
-                    (g * 255.0) as u8,
-                    (g * 255.0) as u8,
-                    (g * 255.0) as u8
-                ),
-                PdfColor::Rgb(r, g, b) => format!(
-                    "rgb({},{},{})",
-                    (r * 255.0) as u8,
-                    (g * 255.0) as u8,
-                    (b * 255.0) as u8
-                ),
-                PdfColor::Cmyk(c, m, y, k) => {
-                    let r = ((1.0 - c) * (1.0 - k) * 255.0) as u8;
-                    let g = ((1.0 - m) * (1.0 - k) * 255.0) as u8;
-                    let b = ((1.0 - y) * (1.0 - k) * 255.0) as u8;
-                    format!("rgb({},{},{})", r, g, b)
-                }
-            });
-
-            let bg_style_str = bg_color_style
-                .as_ref()
-                .map(|bg| format!("background-color:{};", bg))
-                .unwrap_or_default();
-
-            // Map font resources to standard styles
-            let mut font_family = "sans-serif".to_string();
-            let mut font_weight = "normal".to_string();
-            let mut font_style = "normal".to_string();
-
-            if let Some(ref font_id) = block.style.font_name {
-                if let Some(font_info) = parsed.font_map.get(font_id) {
-                    if let Some(ref base_font) = font_info.base_font {
-                        let (fam, w, s) = map_pdf_font_to_css(base_font);
-                        font_family = fam;
-                        font_weight = w;
-                        font_style = s;
-                    }
-                }
-            }
-
-            // PDF y coordinate is bottom-up (0 is bottom).
-            // HTML y coordinate is top-down (0 is top).
-            let top = height - (bbox.y - lly) - bbox.height;
-            let left = bbox.x - llx;
+            let style = text_block_inline_style(&parsed, block, height, llx, lly);
 
             page_html.push_str(&format!(
-                "  <span class=\"text-block\" data-path=\"/page[{}]/text[{}]\" data-bbox=\"{:.1},{:.1},{:.1},{:.1}\" style=\"position:absolute; left:{:.1}pt; top:{:.1}pt; width:{:.1}pt; height:{:.1}pt; font-family:{}; font-size:{:.1}pt; font-weight:{}; font-style:{}; color:{}; {}white-space:nowrap;\">{}</span>\n",
-                page_num, block.index, bbox.x, bbox.y, bbox.width, bbox.height, left, top, bbox.width, bbox.height, font_family, size, font_weight, font_style, color_attr, bg_style_str, escaped
+                "  <span class=\"text-block\" data-path=\"/page[{}]/text[{}]\" data-bbox=\"{:.1},{:.1},{:.1},{:.1}\" style=\"{}\">{}</span>\n",
+                page_num, block.index, bbox.x, bbox.y, bbox.width, bbox.height, style, escaped
             ));
         }
         if parsed.text_blocks.is_empty() && parsed.image_blocks.is_empty() {
@@ -416,7 +411,7 @@ pub fn view_as_html(reader: &PdfReader, opts: ViewOptions) -> Result<String, Han
                     page_num, total_pages
                 )));
             }
-            let (width, height, _, _) = get_page_dimensions(reader, page_num);
+            let (width, height, _, _) = page_dimensions(reader, page_num);
             let inner_html = view_page_as_html(reader, page_num)?;
             return Ok(format!(
                 "<div class=\"page\" data-path=\"/page[{}]\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden;\">\n{}\n</div>\n",
@@ -427,7 +422,7 @@ pub fn view_as_html(reader: &PdfReader, opts: ViewOptions) -> Result<String, Han
 
     let mut pages_html = String::new();
     for i in 1..=total_pages {
-        let (width, height, _, _) = get_page_dimensions(reader, i);
+        let (width, height, _, _) = page_dimensions(reader, i);
         if opts.lazy_load {
             pages_html.push_str(&format!(
                 "<div class=\"page placeholder\" data-page=\"{}\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.15); transition:transform 0.2s, box-shadow 0.2s; display:flex; align-items:center; justify-content:center;\">

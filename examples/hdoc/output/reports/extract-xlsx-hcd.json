@@ -1,0 +1,230 @@
+{
+  "data": {
+    "documentId": "hdoc-example-xlsx",
+    "entries": [
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "de33a057f1b00eaf114dcc498e897f94e2b15ee0e57ff1f6768cf555f230064c",
+        "nodeId": "n_e2f25cf57172b025f4a15378baff1895",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A1",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 1
+        },
+        "text": "智能脱敏服务转换验收"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "41427fc525be646b8c2ebf5d9b500291fe6a90e6cb4c5002e43c9034e15eb691",
+        "nodeId": "n_47ae47a2165a7a96dc1e365a99c84375",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A2",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 2
+        },
+        "text": "客户账号：Secret 123，中文内容（Unicode）"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "a689a299926d2d1ee38823d18c9c0a1e0a529c66372fb5c3623e556308412c41",
+        "nodeId": "n_574f2394cafb7f66b7fb4c0a92d87365",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A3",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 3
+        },
+        "text": "联系电话：13800138000；邮箱：alice@example.com"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "03491418d039b1c16419e4d103d82e0ae54472e773cef7b63afe5b3c102480ca",
+        "nodeId": "n_6167863b3768e58bbe2ed924d1b812ce",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A5",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 4
+        },
+        "text": "功能清单"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "7963c58e2e2c0f8dc7f7d66db5a7ad2b164ea64631880a4900d7ef813c34142c",
+        "nodeId": "n_01b8393722f9e549b1b24301385919a8",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A6",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 5
+        },
+        "text": "1. 文档转换为安全 canonical HTML"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "efd1663d0ab066c8f3ad5323fc04bc18635dbebd19616fa51e4431ecf8ded35c",
+        "nodeId": "n_cc5dba9dd922c7f3cbd570351c7a08c5",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A7",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 6
+        },
+        "text": "2. 通过稳定 nodeId 提交脱敏 patch"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "fbda4a568ad67b5d2108be9f34db88b8a83b1c8e4fd8ca60890eaf54d8537777",
+        "nodeId": "n_bf2205533fe5e8aa1f8ff74fffb54026",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A8",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 7
+        },
+        "text": "3. 从 HCD revision 导出 DOCX、XLSX、PPTX 和 PDF"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "a165abcb3cbe240bbd3b329b3f1012b55abb53116dc428a601e0874ea07d4c26",
+        "nodeId": "n_adb2a9014deaec840a055d9add6a7740",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A10",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 8
+        },
+        "text": "账户明细"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "50b5b1d2abefbca67243017fe7ccbc794bdc226218465c24e3d7a1793fb76965",
+        "nodeId": "n_efb54dde296ae92e9574e09a9741970d",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A11",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 9
+        },
+        "text": "姓名"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "311bb313fdeca6aa2ce7d9415821a0b0247e064340241f68bac3ca5b19ae6d76",
+        "nodeId": "n_9346cd99e73129aee7259a8673c83983",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "B11",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 10
+        },
+        "text": "账号"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "6320b4a8722a851fb99566e4eac1cfd4b93bc684b3a33d9f5cae37a116b8c734",
+        "nodeId": "n_0a56926a9843fe8b2f5929bc59c49b37",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "C11",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 11
+        },
+        "text": "状态"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "1d841bc0ee98309cb7916670b7f0fdef5f4c35150711a41405ef3633b56322cf",
+        "nodeId": "n_ccb875def5d2ddac8a1c02f56e3b4889",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A12",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 12
+        },
+        "text": "张三"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "1ffd3d595cc3dc955a422446815b3da52eacc847d1abc1646839d2f525485948",
+        "nodeId": "n_f3bbe90446f9ded955dff323e5904a90",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "B12",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 13
+        },
+        "text": "6222020012345678"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "296de0e31f8c22d9343c1f07f7fcd2e88a425d769cb0c88d8b24cc865f2c0685",
+        "nodeId": "n_a4b44e2d18e2023a6d8866fd7cee75a4",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "C12",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 14
+        },
+        "text": "正常"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "808b4f6221599eee052ba9c7a1a1c6374b96bb1a5f172f305dcd19bc8b7bc9a8",
+        "nodeId": "n_3ce2a88ebee3f0e654a4f39eb335f47e",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "A13",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 15
+        },
+        "text": "李四"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "40e548bccd58ea1a2b0815492ee8888b21bed44defb059ccd8a47bfe3ef61eb0",
+        "nodeId": "n_8172601c1348deddff9d002b9ea266a3",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "B13",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 16
+        },
+        "text": "Secret 456"
+      },
+      {
+        "chunkId": "c_5b6632a427f81f3088a74296b501af85",
+        "nodeHash": "999a459c3f3f2d1694440efc4afb9c9342069e0e4ee375b7dea943a28931283a",
+        "nodeId": "n_44731c3fce70b8ef81dd6ff22e5e7a01",
+        "source": {
+          "editable": true,
+          "nodeKind": "cell",
+          "paragraphId": "C13",
+          "part": "xl/worksheets/sheet1.xml",
+          "textOrdinal": 17
+        },
+        "text": "待处理"
+      }
+    ],
+    "revision": 0
+  },
+  "success": true
+}

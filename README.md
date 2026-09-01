@@ -209,14 +209,64 @@ officecli watch deck.pptx                # live server at :26315
 
 ### Format Conversion
 
-Multiple engines for legacy format conversion and PDF to DOCX:
+Multiple engines for legacy format conversion, PDF to DOCX, and standalone semantic HTML import:
 
 ```bash
 officecli convert old.doc              # .doc -> .docx (LibreOffice, default)
 officecli convert old.xls -o new.xlsx  # .xls -> .xlsx
 officecli convert old.ppt --engine oxide  # pure-Rust engine, no external deps
 officecli convert input.pdf --engine pdf2docx  # PDF -> DOCX via Python pdf2docx
+officecli convert input.html -o report.docx    # headings/paragraphs/lists/tables -> Word
+officecli convert input.html -o report.xlsx    # tables/content -> worksheet cells
+officecli convert input.html -o report.pptx    # sections/H1 headings -> slides
+officecli convert input.html -o report.pdf     # semantic paginated PDF
 ```
+
+HTML conversion is always performed in-process by OfficeCLI's Rust handlers and reports
+`engine=rust-html-semantic` with `fidelity=semantic`. It never invokes LibreOffice, WPS,
+`pdf2docx`, or a browser renderer, even when one of those engines is supplied on the command line.
+It does not require an original Office file. CSS layout, scripts, active content, and exact browser
+pagination are not carried into the output. Standalone HTML never fetches local or remote image
+URLs and represents them as safe alt text. Source-free HCD export can instead embed validated,
+content-addressed raster assets natively in DOCX/XLSX/PPTX and as PNG/JPEG PDF image XObjects;
+bounded source dimensions are retained and direct PPTX picture coordinates are reused when present.
+Cropping, wrapping and page collision still remain semantic rather than source-layout exact. Input
+is bounded to 64 MiB and each semantic text block to 2 MiB.
+
+HTML/HCD tables are emitted as native Word/Excel structures and editable DrawingML tables in PPTX.
+PPTX tables wider than 12 columns or taller than 18 rows are split into bounded table slides with
+the first row repeated. Logical PPTX tables split across HCD chunks are validated and reassembled by
+stable table ID and contiguous row ranges before this layout step; PDF currently keeps the table as
+aligned semantic row text.
+
+For incremental editing, `officecli hdoc import` accepts `.docx`, `.xlsx`, `.pptx`, `.pdf`,
+`.html`/`.htm`, and UTF-8 `.txt`. It emits immutable canonical HTML chunks and source maps;
+HTML headings, paragraphs, lists, and tables remain safe canonical structures, while each editable
+text span retains its exact UTF-8 source byte range. Large HTML tables use stable IDs and contiguous
+128-row fragments for frontend virtualization and source-free native Office table reconstruction.
+When `--document-id` is omitted, an immutable source SHA-256-derived ID makes byte-identical imports
+repeat the same document and node IDs; production systems should pass their persistent business ID
+to preserve lineage when source bytes change. `hdoc get-node <bundle> <nodeId>` resolves one current
+node through chunk bloom filters and source maps without building a full-text buffer. `hdoc apply`
+then appends nodeId-addressed text/annotation revisions. With `--source`, `hdoc export` writes the selected
+revision back against the SHA-256-verified immutable source; without a source (or with a different
+target), it can rebuild DOCX/XLSX/PPTX/PDF at explicitly reported `SEMANTIC` fidelity through the
+same in-process Rust HTML handlers. HTML and TXT source-backed export rewrites only mapped text byte
+ranges, preserving all other source bytes. These HCD commands are implemented entirely in Rust and
+do not invoke an installed office suite. The PPTX adapter materializes direct text/picture
+geometry and DrawingML table grids, merges, direct cell formatting, and editable cell text while
+preserving the original presentation as the source-backed export authority. Large DrawingML tables
+stream as bounded row-group fragments (at most 128 rows per normal fragment); each fragment repeats
+its frame geometry and column grid, and row-spanning merge groups are never split.
+PDF HCD import uses a pinned pure-Rust Hayro renderer to composite each CropBox page into a
+content-addressed 96-DPI PNG visual authority layer. Extractable nodeId text remains in a separate
+transparent HTML interaction layer, and pages after the first are lazy-loaded. This preserves the
+source page layout far better than XObject/image reconstruction, but `VISUAL` does not mean that two
+different PDF engines produce byte- or pixel-identical color management and antialiasing. Edited PDF
+text requires dirty-page recomposition to retain the same visual guarantee. The current lopdf/Hayro
+backend also does not yet meet the 512 MiB RSS target on high-resolution JPEG2000-heavy files.
+
+The engine table below applies to non-HTML conversion paths:
 
 | Engine                  | Fidelity                                | Speed                  | Dependency           |
 | ----------------------- | --------------------------------------- | ---------------------- | -------------------- |

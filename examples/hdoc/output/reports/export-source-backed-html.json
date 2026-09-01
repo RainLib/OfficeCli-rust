@@ -1,0 +1,22 @@
+{
+  "data": {
+    "dropped": [],
+    "flattened": [
+      "edited HTML text ranges are serialized with safe entity escaping"
+    ],
+    "level": "HIGH",
+    "preserved": [
+      "all immutable source bytes outside explicitly edited text ranges",
+      "source markup, CSS, attributes and inactive/active opaque content"
+    ],
+    "schemaVersion": "hcd/1",
+    "warnings": [
+      {
+        "code": "HTML_SOURCE_ACTIVE_CONTENT_PRESERVED",
+        "message": "source-backed HTML export preserves original markup, CSS and active content outside edited text ranges; treat the exported file as untrusted HTML",
+        "sourcePart": "html/document"
+      }
+    ]
+  },
+  "success": true
+}

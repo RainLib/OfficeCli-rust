@@ -8,6 +8,41 @@ use ttf_parser::{Face, GlyphId};
 /// Bundled CJK fallback font (Noto Sans SC, variable TTF).
 const BUNDLED_NOTO: &[u8] = include_bytes!("../assets/NotoSansSC-Regular.ttf");
 
+/// Return whether the first face in a font file covers every requested character.
+///
+/// Semantic exporters use this to select one optional system font that covers
+/// mixed CJK, Latin and phonetic text before asking the PDF writer to subset it.
+pub fn font_file_covers_chars(
+    path: &Path,
+    chars_needed: &HashSet<char>,
+) -> Result<bool, HandlerError> {
+    Ok(font_file_missing_chars(path, chars_needed)?.is_empty())
+}
+
+/// Return the requested characters that the first face in a font file cannot render.
+pub fn font_file_missing_chars(
+    path: &Path,
+    chars_needed: &HashSet<char>,
+) -> Result<HashSet<char>, HandlerError> {
+    let font_bytes = std::fs::read(path).map_err(|error| {
+        HandlerError::OperationFailed(format!(
+            "failed to read font file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let face = Face::parse(&font_bytes, 0).map_err(|error| {
+        HandlerError::OperationFailed(format!(
+            "failed to parse font file '{}': {error:?}",
+            path.display()
+        ))
+    })?;
+    Ok(chars_needed
+        .iter()
+        .copied()
+        .filter(|character| face.glyph_index(*character).is_none())
+        .collect())
+}
+
 /// Ensure a CJK-capable font is embedded on the given page so the requested
 /// characters can be rendered.
 ///
@@ -23,14 +58,28 @@ pub fn ensure_cjk_font_for_chars(
     chars_needed: &HashSet<char>,
     preferred_name: Option<&str>,
     user_font_file: Option<&str>,
+    force_embed: bool,
 ) -> Result<Option<String>, HandlerError> {
     let pages = doc.get_pages();
     let page_id = *pages
         .get(&(page_num as u32))
         .ok_or_else(|| HandlerError::PathNotFound(format!("page {}", page_num)))?;
 
+    // A semantic export supplies the same complete character set for the first
+    // text block on every page. Reuse an already embedded Type0 font object
+    // instead of subsetting and embedding the same font once per page.
+    if force_embed {
+        if let Some(preferred_name) = preferred_name {
+            if let Some(font_id) = find_embedded_font_covering_chars(doc, chars_needed) {
+                let page_font_name = choose_pdf_font_name(doc, page_id, Some(preferred_name));
+                register_font_on_page(doc, page_id, &page_font_name, font_id)?;
+                return Ok(Some(page_font_name));
+            }
+        }
+    }
+
     // Determine which chars actually need embedding.
-    let chars_to_embed: HashSet<char> = if user_font_file.is_some() {
+    let chars_to_embed: HashSet<char> = if user_font_file.is_some() || force_embed {
         chars_needed.clone()
     } else {
         let already_supported = collect_supported_chars(doc, page_id, chars_needed);
@@ -185,6 +234,35 @@ pub fn ensure_cjk_font_for_chars(
     Ok(Some(pdf_font_name))
 }
 
+fn find_embedded_font_covering_chars(
+    doc: &LopdfDocument,
+    chars_needed: &HashSet<char>,
+) -> Option<ObjectId> {
+    doc.objects.iter().find_map(|(object_id, object)| {
+        let dictionary = object.as_dict().ok()?;
+        if dictionary
+            .get(b"Subtype")
+            .ok()
+            .and_then(|value| value.as_name().ok())
+            != Some(b"Type0".as_slice())
+        {
+            return None;
+        }
+        let to_unicode_id = dictionary.get(b"ToUnicode").ok()?.as_reference().ok()?;
+        let stream = doc.get_object(to_unicode_id).ok()?.as_stream().ok()?;
+        let bytes = stream
+            .decompressed_content()
+            .unwrap_or_else(|_| stream.content.clone());
+        let content = String::from_utf8_lossy(&bytes);
+        let cmap = crate::content_stream::parse_to_unicode_cmap(&content);
+        let covered: HashSet<char> = cmap.values().flat_map(|value| value.chars()).collect();
+        chars_needed
+            .iter()
+            .all(|character| covered.contains(character))
+            .then_some(*object_id)
+    })
+}
+
 /// Inspect each page font and collect which of `chars_needed` it can already render.
 fn collect_supported_chars(
     doc: &LopdfDocument,
@@ -227,7 +305,10 @@ fn collect_supported_chars(
         if let Ok(to_unicode) = font.get(b"ToUnicode") {
             if let Ok(ref_id) = to_unicode.as_reference() {
                 if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
-                    let content = String::from_utf8_lossy(&stream.content);
+                    let bytes = stream
+                        .decompressed_content()
+                        .unwrap_or_else(|_| stream.content.clone());
+                    let content = String::from_utf8_lossy(&bytes);
                     let cmap = crate::content_stream::parse_to_unicode_cmap(&content);
                     if !cmap.is_empty() {
                         custom_cmap = Some(cmap);
@@ -441,4 +522,18 @@ fn ensure_font_in_resources(
         Object::Reference(font_obj_id),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_cjk_font_coverage_is_reported_exactly() {
+        let font_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("NotoSansSC-Regular.ttf");
+        assert!(font_file_covers_chars(&font_path, &HashSet::from(['中', 'A'])).unwrap());
+        assert!(!font_file_covers_chars(&font_path, &HashSet::from(['ə', 'ʊ'])).unwrap());
+    }
 }

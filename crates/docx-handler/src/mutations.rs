@@ -8670,6 +8670,7 @@ pub fn add_image_part_aware_on_part(
             properties
                 .get("src")
                 .or_else(|| properties.get("path"))
+                .or_else(|| properties.get("file"))
                 .and_then(|p| Path::new(p).extension())
                 .and_then(|e| e.to_str())
         })
@@ -8705,9 +8706,14 @@ pub fn add_image_part_aware_on_part(
     let media_path = format!("word/media/image{}.{}", image_idx, ext_norm);
 
     // Write image binary — priority: src file > payloadBase64 > payloadHex > empty stub.
-    let bytes_written = if let Some(src) = properties.get("src").or_else(|| properties.get("path"))
+    let bytes_written = if let Some(src) = properties
+        .get("src")
+        .or_else(|| properties.get("path"))
+        .or_else(|| properties.get("file"))
     {
-        std::fs::read(src).ok()
+        Some(std::fs::read(src).map_err(|error| {
+            HandlerError::OperationFailed(format!("failed to read image source '{src}': {error}"))
+        })?)
     } else if let Some(b64) = properties.get("payloadBase64") {
         docx_base64_decode(b64).ok()
     } else if let Some(hex) = properties.get("payloadHex") {
@@ -8716,7 +8722,9 @@ pub fn add_image_part_aware_on_part(
         Some(Vec::new())
     };
     if let Some(bytes) = bytes_written {
-        let _ = package.write_part(&media_path, bytes);
+        package
+            .write_part(&media_path, bytes)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
     }
 
     // Wire the owning part's .rels → image relationship.
@@ -10763,16 +10771,22 @@ fn update_docx_content_types_for_image(
         "<Default Extension=\"{}\" ContentType=\"{}\"/>",
         ext, content_type
     );
-    let new_xml = if let Some(close) = xml.find('>') {
-        // Insert Default right after <Types ...>.
-        let mut out = String::with_capacity(xml.len() + default_xml.len());
-        out.push_str(&xml[..close + 1]);
-        out.push_str(&default_xml);
-        out.push_str(&xml[close + 1..]);
-        out
-    } else {
-        xml.replace("</Types>", &format!("{}{}</Types>", default_xml, ""))
-    };
+    let root_start = xml.find("<Types").ok_or_else(|| {
+        HandlerError::OperationFailed("invalid [Content_Types].xml: missing Types root".to_string())
+    })?;
+    let close = xml[root_start..]
+        .find('>')
+        .map(|offset| root_start + offset)
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(
+                "invalid [Content_Types].xml: unterminated Types root".to_string(),
+            )
+        })?;
+    // Insert Default inside the Types root, after an optional XML declaration.
+    let mut new_xml = String::with_capacity(xml.len() + default_xml.len());
+    new_xml.push_str(&xml[..close + 1]);
+    new_xml.push_str(&default_xml);
+    new_xml.push_str(&xml[close + 1..]);
     package
         .write_part_xml("[Content_Types].xml", &new_xml)
         .map_err(|e| HandlerError::SaveError(e.to_string()))?;
@@ -10804,6 +10818,26 @@ fn insert_drawing_in_paragraph(
             out.push_str(&wrap);
             out.push_str(&doc_xml[body_end..]);
             return Ok(out);
+        }
+        // Removing the only blank paragraph can make the DOM serializer emit
+        // a self-closing body. Expand it before inserting the first image.
+        if let Some(body_start) = doc_xml.find("<w:body") {
+            if let Some(relative_end) = doc_xml[body_start..].find('>') {
+                let body_end = body_start + relative_end;
+                if doc_xml[body_start..=body_end]
+                    .trim_end_matches('>')
+                    .trim_end()
+                    .ends_with('/')
+                {
+                    let mut out = String::with_capacity(doc_xml.len() + wrap.len() + 9);
+                    out.push_str(&doc_xml[..body_end - 1]);
+                    out.push('>');
+                    out.push_str(&wrap);
+                    out.push_str("</w:body>");
+                    out.push_str(&doc_xml[body_end + 1..]);
+                    return Ok(out);
+                }
+            }
         }
         return Err(HandlerError::OperationFailed(
             "could not locate body for image insertion".to_string(),
@@ -11590,6 +11624,14 @@ mod doc_settings_tests {
         assert_eq!(key_to_para_attr("p.spacing"), "w:spacing");
         assert_eq!(key_to_para_attr("para.align"), "w:jc");
         assert_eq!(key_to_para_attr("p.ind"), "w:ind");
+    }
+
+    #[test]
+    fn first_image_expands_a_self_closing_word_body() {
+        let xml = r#"<w:document xmlns:w="w"><w:body/></w:document>"#;
+        let drawing = "<w:r><w:drawing/></w:r>";
+        let output = insert_drawing_in_paragraph(xml, "/body", drawing).unwrap();
+        assert!(output.contains("<w:body><w:p><w:r><w:drawing/></w:r></w:p></w:body>"));
     }
 }
 

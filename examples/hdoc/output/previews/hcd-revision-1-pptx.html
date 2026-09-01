@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Presentation Preview</title>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+<style>
+:root {
+  --slide-design-w: 720pt;
+  --slide-design-h: 540pt;
+  --slide-aspect: 1.3333;
+}
+/* OfficeCli HTML Preview Stylesheet */
+:root {
+    --sidebar-w: 180px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #1a1a2e;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
+.sidebar {
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+    background: #12122a;
+    border-right: 1px solid #2a2a4a;
+    overflow-y: auto;
+    padding: 12px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.sidebar-title {
+    color: #888;
+    font-size: 11px;
+    text-align: center;
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.thumb {
+    cursor: pointer;
+    border: 2px solid transparent;
+    border-radius: 3px;
+    padding: 2px;
+    transition: border-color 0.15s;
+    position: relative;
+}
+.thumb:hover { border-color: #555; }
+.thumb.active { border-color: #5b9bd5; }
+.thumb-inner {
+    width: 100%;
+    aspect-ratio: var(--slide-aspect);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+    pointer-events: none;
+}
+.thumb-slide {
+    width: var(--slide-design-w);
+    height: var(--slide-design-h);
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    background: white;
+}
+.thumb-num {
+    position: absolute;
+    bottom: 2px;
+    right: 4px;
+    color: #888;
+    font-size: 10px;
+}
+.main {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+    gap: 24px;
+    scroll-behavior: smooth;
+}
+.file-title {
+    display: none;
+}
+.slide-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+.slide-label {
+    display: none;
+}
+.slide-wrapper {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+}
+.slide {
+    width: var(--slide-design-w);
+    height: var(--slide-design-h);
+    position: relative;
+    overflow: hidden;
+    background: white;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    border-radius: 2px;
+    transform-origin: center top;
+    flex-shrink: 0;
+}
+.slide-notes {
+    width: var(--slide-design-w);
+    margin-top: 8px;
+    padding: 10px 14px;
+    background: #1f1f1f;
+    color: #ddd;
+    border-left: 3px solid #888;
+    border-radius: 2px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 12pt;
+    line-height: 1.4;
+    box-sizing: border-box;
+}
+.slide-notes[dir="rtl"] {
+    border-left: none;
+    border-right: 3px solid #888;
+    text-align: right;
+}
+.slide-notes-label {
+    font-size: 10pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #888;
+    margin-bottom: 4px;
+}
+.slide-notes-body div { margin: 2px 0; }
+.page-counter {
+    position: fixed;
+    bottom: 16px;
+    right: 24px;
+    background: rgba(0,0,0,0.6);
+    color: #ccc;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    z-index: 100;
+    pointer-events: none;
+    transition: opacity 0.3s;
+}
+body.fullscreen .sidebar { display: none; }
+body.fullscreen .main {
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+    scroll-behavior: auto;
+}
+body.fullscreen .slide-container {
+    width: 100vw;
+    height: 100vh;
+    justify-content: center;
+    display: none;
+    gap: 0;
+}
+body.fullscreen .slide-container.fs-active { display: flex; }
+body.fullscreen .slide-label { color: #444; font-size: 11px; }
+body.fullscreen .slide {
+    box-shadow: none;
+    border-radius: 0;
+}
+.sidebar-toggle {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 200;
+    background: rgba(30,30,60,0.85);
+    color: #aaa;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 14px;
+    display: none;
+    opacity: 0;
+    transition: opacity 0.25s;
+}
+.sidebar-toggle:hover { color: #fff; border-color: #888; }
+.toggle-zone {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 60px;
+    height: 60px;
+    z-index: 199;
+    display: none;
+}
+.toggle-zone:hover + .sidebar-toggle,
+.sidebar-toggle:hover {
+    opacity: 1;
+}
+body.sidebar-hidden .sidebar { display: none; }
+body.sidebar-hidden .sidebar-toggle { left: 8px; }
+html.headless .sidebar,
+html.headless .sidebar-toggle,
+html.headless .toggle-zone,
+html.headless .page-counter { display: none !important; }
+
+@media (max-width: 900px) {
+    .sidebar { display: none; }
+    .sidebar-toggle { display: block; }
+    .toggle-zone { display: block; }
+    body.sidebar-visible .sidebar { display: flex; position: fixed; top: 0; left: 0; bottom: 0; z-index: 150; }
+    body.sidebar-visible .sidebar-toggle { left: calc(var(--sidebar-w) + 8px); opacity: 1; }
+    body.sidebar-visible .toggle-zone { display: none; }
+}
+
+.shape {
+    position: absolute;
+    overflow: visible;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.shape.has-fill {
+    overflow: hidden;
+}
+.shape-text {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+.shape-text.valign-top { justify-content: flex-start; }
+.shape-text.valign-center { justify-content: center; }
+.shape-text.valign-bottom { justify-content: flex-end; }
+.para { width: 100%; line-height: 1.2; }
+.picture { position: absolute; overflow: hidden; }
+.picture img { width: 100%; height: 100%; object-fit: fill; }
+.table-container { position: absolute; overflow: visible; }
+.slide-table { width: 100%; height: 100%; border-collapse: collapse; table-layout: fixed; }
+.slide-table td { padding: 4px 6px; vertical-align: top; overflow: hidden; font-size: 10pt; color: inherit; }
+.connector { position: absolute; pointer-events: none; }
+.group { position: absolute; }
+
+</style>
+<script>if(navigator.webdriver||/HeadlessChrome/.test(navigator.userAgent))document.documentElement.classList.add('headless')</script>
+</head>
+<body>
+<div class="toggle-zone"></div><button class="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+<div class="sidebar">
+  <div class="sidebar-title">Presentation Preview</div>
+  <div class="thumb" data-slide="1">
+    <div class="thumb-inner"></div>
+    <span class="thumb-num">1</span>
+  </div>
+  <div class="thumb" data-slide="2">
+    <div class="thumb-inner"></div>
+    <span class="thumb-num">2</span>
+  </div>
+  <div class="thumb" data-slide="3">
+    <div class="thumb-inner"></div>
+    <span class="thumb-num">3</span>
+  </div>
+</div>
+<div class="main">
+  <h1 class="file-title">Presentation Preview</h1>
+<div class="slide-container" data-slide="1">
+  <div class="slide-label">Slide 1</div>
+  <div class="slide-wrapper">
+    <div class="slide" style="">
+    <div class="shape" data-path="/slide[1]/shape[1]" title="HTML Content 1" style="left:36.00pt;top:21.63pt;width:660.00pt;height:24.00pt;padding:3.60pt 7.20pt 3.60pt 7.20pt">
+      <div class="shape-text valign-top">
+        <div class="para" data-path="/slide[1]/shape[1]/paragraph[1]">
+<span style="font-family:'Calibri',sans-serif">OfficeCLI HCD 脱敏转换测试</span>        </div>
+      </div>
+    </div>
+    </div>
+  </div>
+</div>
+<div class="slide-container" data-slide="2">
+  <div class="slide-label">Slide 2</div>
+  <div class="slide-wrapper">
+    <div class="slide" style="">
+    <div class="shape" data-path="/slide[2]/shape[1]" title="HTML Content 2" style="left:36.00pt;top:21.63pt;width:660.00pt;height:24.00pt;padding:3.60pt 7.20pt 3.60pt 7.20pt">
+      <div class="shape-text valign-top">
+        <div class="para" data-path="/slide[2]/shape[1]/paragraph[1]">
+<span style="font-family:'Calibri',sans-serif">智能脱敏服务转换验收
+客户账号：Secret ***，中文内容（Unicode）
+联系电话：13800138000；邮箱：alice@example.com
+功能清单
+1. 文档转换为安全 canonical HTML
+2. 通过稳定 nodeId 提交脱敏 patch
+3. 从 HCD revision 导出 DOCX、XLSX、PPTX 和 PDF
+账户明细</span>        </div>
+      </div>
+    </div>
+    </div>
+  </div>
+</div>
+<div class="slide-container" data-slide="3">
+  <div class="slide-label">Slide 3</div>
+  <div class="slide-wrapper">
+    <div class="slide" style="">
+    <div class="table-container" style="left:36.00pt;top:54.00pt;width:648.00pt;height:75.60pt;">
+      <table class="slide-table" data-path="/slide[3]/table[2]">
+        <colgroup><col style="width:216.00pt"><col style="width:216.00pt"><col style="width:216.00pt"></colgroup>
+        <tr style="height:25.20pt" data-path="/slide[3]/table[2]/tr[1]">
+          <td data-path="/slide[3]/table[2]/tr[1]/tc[1]" style="background:#4472C4;color:#ffffff;border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+姓名        </div>
+          </td>
+          <td data-path="/slide[3]/table[2]/tr[1]/tc[2]" style="background:#4472C4;color:#ffffff;border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+账号        </div>
+          </td>
+          <td data-path="/slide[3]/table[2]/tr[1]/tc[3]" style="background:#4472C4;color:#ffffff;border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+状态        </div>
+          </td>
+        </tr>
+        <tr style="height:25.20pt" data-path="/slide[3]/table[2]/tr[2]">
+          <td data-path="/slide[3]/table[2]/tr[2]/tc[1]" style="background:#E7E6E6;border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+张三        </div>
+          </td>
+          <td data-path="/slide[3]/table[2]/tr[2]/tc[2]" style="background:#E7E6E6;border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+6222020012345678        </div>
+          </td>
+          <td data-path="/slide[3]/table[2]/tr[2]/tc[3]" style="background:#E7E6E6;border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+正常        </div>
+          </td>
+        </tr>
+        <tr style="height:25.20pt" data-path="/slide[3]/table[2]/tr[3]">
+          <td data-path="/slide[3]/table[2]/tr[3]/tc[1]" style="border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+李四        </div>
+          </td>
+          <td data-path="/slide[3]/table[2]/tr[3]/tc[2]" style="border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+Secret 456        </div>
+          </td>
+          <td data-path="/slide[3]/table[2]/tr[3]/tc[3]" style="border-left:1px solid #ccc;border-right:1px solid #ccc;border-top:1px solid #ccc;border-bottom:1px solid #ccc">
+        <div class="para">
+待处理        </div>
+          </td>
+        </tr>
+      </table>
+    </div>
+    </div>
+  </div>
+</div>
+</div>
+<div class="page-counter">1 / 3</div>
+<script>
+(function() {
+    const main = document.querySelector('.main');
+    const sidebar = document.querySelector('.sidebar');
+    const counter = document.querySelector('.page-counter');
+    let currentSlide = 0;
+    let isFullscreen = false;
+
+    function getContainers() { return [...document.querySelectorAll('.main > .slide-container')]; }
+    function getThumbs() { return [...document.querySelectorAll('.sidebar > .thumb')]; }
+    function getTotal() { return getContainers().length; }
+
+    function scaleSlides() {
+        const availW = main.clientWidth - 40;
+        document.querySelectorAll('.main > .slide-container .slide').forEach(slide => {
+            const designW = slide.offsetWidth;
+            if (designW > availW && availW > 0) {
+                const s = availW / designW;
+                slide.style.transform = `scale(${s})`;
+                slide.style.transformOrigin = 'center top';
+                const designH = slide.offsetHeight;
+                slide.parentElement.style.height = (designH * s) + 'px';
+                slide.parentElement.style.width = (designW * s) + 'px';
+            } else {
+                slide.style.transform = '';
+                slide.parentElement.style.height = '';
+                slide.parentElement.style.width = '';
+            }
+        });
+    }
+    scaleSlides();
+    window.scaleSlides = scaleSlides;
+    window.addEventListener('resize', scaleSlides);
+
+    function setActiveThumb(idx) {
+        getThumbs().forEach((t, i) => t.classList.toggle('active', i === idx));
+        currentSlide = idx;
+        if (counter) counter.textContent = `${idx + 1} / ${getTotal()}`;
+    }
+
+    if (sidebar) {
+        sidebar.addEventListener('click', function(e) {
+            const thumb = e.target.closest('.thumb');
+            if (!thumb) return;
+            const thumbs = getThumbs();
+            const idx = thumbs.indexOf(thumb);
+            if (idx < 0) return;
+            if (isFullscreen) { showFullscreenSlide(idx); return; }
+            const containers = getContainers();
+            if (containers[idx]) {
+                containers[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            setActiveThumb(idx);
+        });
+    }
+
+    let scrollObserver;
+    if (main) {
+        scrollObserver = new IntersectionObserver(entries => {
+            if (isFullscreen) return;
+            const containers = getContainers();
+            entries.forEach(e => {
+                if (e.isIntersecting && e.intersectionRatio > 0.3) {
+                    const idx = containers.indexOf(e.target);
+                    if (idx >= 0) setActiveThumb(idx);
+                }
+            });
+        }, { root: main, threshold: 0.3 });
+        getContainers().forEach(c => scrollObserver.observe(c));
+
+        new MutationObserver(mutations => {
+            mutations.forEach(m => {
+                m.addedNodes.forEach(node => {
+                    if (node.nodeType === 1 && node.classList.contains('slide-container')) {
+                        scrollObserver.observe(node);
+                    }
+                });
+            });
+        }).observe(main, { childList: true });
+    }
+
+    function showFullscreenSlide(idx) {
+        const containers = getContainers();
+        const total = containers.length;
+        idx = Math.max(0, Math.min(idx, total - 1));
+        containers.forEach((c, i) => c.classList.toggle('fs-active', i === idx));
+        setActiveThumb(idx);
+        const slide = containers[idx]?.querySelector('.slide');
+        if (slide) {
+            const vw = window.innerWidth, vh = window.innerHeight - 30;
+            const sw = slide.scrollWidth || slide.offsetWidth;
+            const sh = slide.scrollHeight || slide.offsetHeight;
+            const s = Math.min(vw / sw, vh / sh, 1);
+            slide.style.transform = `scale(${s})`;
+            slide.style.transformOrigin = 'center top';
+        }
+    }
+    function enterFullscreen() {
+        isFullscreen = true;
+        document.body.classList.add('fullscreen');
+        showFullscreenSlide(currentSlide);
+    }
+    function exitFullscreen() {
+        isFullscreen = false;
+        document.body.classList.remove('fullscreen');
+        getContainers().forEach(c => { c.classList.remove('fs-active'); c.style.display = ''; });
+        scaleSlides();
+        getContainers()[currentSlide]?.scrollIntoView({ block: 'center' });
+    }
+
+    document.addEventListener('keydown', e => {
+        if (e.key === 'f' || e.key === 'F') {
+            e.preventDefault();
+            isFullscreen ? exitFullscreen() : enterFullscreen();
+            return;
+        }
+        if (e.key === 'Escape' && isFullscreen) {
+            e.preventDefault();
+            exitFullscreen();
+            return;
+        }
+        const next = e.key === 'ArrowDown' || e.key === ' ' || e.key === 'ArrowRight';
+        const prev = e.key === 'ArrowUp' || e.key === 'ArrowLeft';
+        if (!next && !prev) return;
+        e.preventDefault();
+
+        const total = getTotal();
+        if (isFullscreen) {
+            showFullscreenSlide(currentSlide + (next ? 1 : -1));
+        } else {
+            const target = next
+                ? Math.min(currentSlide + 1, total - 1)
+                : Math.max(currentSlide - 1, 0);
+            const containers = getContainers();
+            if (containers[target]) {
+                containers[target].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            setActiveThumb(target);
+        }
+    });
+
+    function buildThumbs() {
+        const slides = document.querySelectorAll('.main > .slide-container .slide');
+        const inners = document.querySelectorAll('.thumb-inner');
+        slides.forEach((slide, i) => {
+            if (i >= inners.length) return;
+            const inner = inners[i];
+            if (inner.querySelector('.thumb-slide')) return;
+            const clone = slide.cloneNode(true);
+            clone.className = 'thumb-slide';
+            clone.style.transform = '';
+            clone.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+            clone.querySelectorAll('script').forEach(el => el.remove());
+            inner.appendChild(clone);
+        });
+        scaleThumbs();
+    }
+    function scaleThumbs() {
+        document.querySelectorAll('.thumb-inner').forEach(inner => {
+            const thumbSlide = inner.querySelector('.thumb-slide');
+            if (!thumbSlide) return;
+            const thumbW = inner.clientWidth;
+            const slideW = thumbSlide.scrollWidth || thumbSlide.offsetWidth;
+            if (slideW > 0 && thumbW > 0) {
+                thumbSlide.style.transform = `scale(${thumbW / slideW})`;
+                thumbSlide.style.transformOrigin = '0 0';
+            }
+        });
+    }
+    buildThumbs();
+    window.buildThumbs = buildThumbs;
+    window.scaleThumbs = scaleThumbs;
+    window.addEventListener('resize', scaleThumbs);
+
+    window.toggleSidebar = function() {
+        document.body.classList.toggle('sidebar-visible');
+        document.body.classList.toggle('sidebar-hidden');
+        requestAnimationFrame(() => {
+            scaleSlides();
+            buildThumbs();
+            scaleThumbs();
+        });
+    };
+
+    if (getTotal() > 0) setActiveThumb(0);
+})();
+</script>
+<script>
+(function() {
+    var _katexRetries = 0;
+    function fallbackKatex() {
+        document.querySelectorAll('.katex-formula:not(.katex-rendered)').forEach(function(el) {
+            el.textContent = el.dataset.formula;
+            el.style.fontFamily = 'monospace';
+            el.style.color = '#666';
+            el.classList.add('katex-rendered');
+        });
+    }
+    function renderKatex() {
+        var pending = document.querySelectorAll('.katex-formula:not(.katex-rendered)');
+        if (pending.length === 0) return;
+        if (typeof katex === 'undefined') {
+            if (!window._katexLoading) {
+                window._katexLoading = true;
+                var link = document.createElement('link');
+                link.rel = 'stylesheet';
+                link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css';
+                link.onerror = function() { this.remove(); };
+                document.head.appendChild(link);
+                var script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js';
+                script.onload = renderKatex;
+                script.onerror = fallbackKatex;
+                document.head.appendChild(script);
+                return;
+            }
+            if (++_katexRetries > 20) { fallbackKatex(); return; }
+            setTimeout(renderKatex, 100); return;
+        }
+        pending.forEach(function(el) {
+            try {
+                katex.render(el.dataset.formula, el, { throwOnError: false, displayMode: true });
+                el.classList.add('katex-rendered');
+            } catch(e) { el.textContent = el.dataset.formula + ' (Error: ' + e.message + '. See https://katex.org/docs/supported.html for supported syntax.)'; }
+        });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', renderKatex);
+    else renderKatex();
+    new MutationObserver(function() { renderKatex(); }).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+</body>
+</html>

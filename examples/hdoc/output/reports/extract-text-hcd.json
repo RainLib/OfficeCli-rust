@@ -1,0 +1,65 @@
+{
+  "data": {
+    "documentId": "hdoc-example-text",
+    "entries": [
+      {
+        "chunkId": "c_43cb83165ac8be81af13a7bfcc8316f5",
+        "nodeHash": "62ca32b1c3553648240e8a3cf6eed46038110446e3ff8d7870a67f50d372ba2c",
+        "nodeId": "n_5ff16e7a64dad6a82547923f314173b3",
+        "source": {
+          "editable": true,
+          "nodeKind": "text-line",
+          "paragraphId": "line-1",
+          "part": "text/document",
+          "textId": "bytes:0:32",
+          "textOrdinal": 1
+        },
+        "text": "OfficeCLI HCD 文本输入示例"
+      },
+      {
+        "chunkId": "c_43cb83165ac8be81af13a7bfcc8316f5",
+        "nodeHash": "330f44c1221b6536a0907ff3c382200d9156375abb66b6a1fb3eea5e821a032e",
+        "nodeId": "n_ab9c565c0ac42f78529ebb578ab76924",
+        "source": {
+          "editable": true,
+          "nodeKind": "text-line",
+          "paragraphId": "line-2",
+          "part": "text/document",
+          "textId": "bytes:33:58",
+          "textOrdinal": 2
+        },
+        "text": "客户账号：Secret 789"
+      },
+      {
+        "chunkId": "c_43cb83165ac8be81af13a7bfcc8316f5",
+        "nodeHash": "4fd4f9671f09e964aef21a66ae3e6e90c36c73017ee25e32bf85a945b3f0fc2f",
+        "nodeId": "n_82888ae686e764781d84b6eade64c207",
+        "source": {
+          "editable": true,
+          "nodeKind": "text-line",
+          "paragraphId": "line-3",
+          "part": "text/document",
+          "textId": "bytes:59:85",
+          "textOrdinal": 3
+        },
+        "text": "联系电话：13800138000"
+      },
+      {
+        "chunkId": "c_43cb83165ac8be81af13a7bfcc8316f5",
+        "nodeHash": "e2cfdc7be2d890d30c59f24ebf04e8c27decfcfc5f43b743632439935f04920b",
+        "nodeId": "n_f4b4e24703b50a5316f9715dffdc665c",
+        "source": {
+          "editable": true,
+          "nodeKind": "text-line",
+          "paragraphId": "line-4",
+          "part": "text/document",
+          "textId": "bytes:86:170",
+          "textOrdinal": 4
+        },
+        "text": "该文件用于验证 TXT → HCD → DOCX/XLSX/PPTX/PDF 的纯 Rust 语义链路。"
+      }
+    ],
+    "revision": 0
+  },
+  "success": true
+}
