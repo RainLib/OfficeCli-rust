@@ -49,6 +49,16 @@ struct AssetRecord {
 struct RenderedBlock {
     html: String,
     entries: Vec<NodeMapEntry>,
+    visual_placement: Option<VisualPlacement>,
+    requires_overflow_visible: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct VisualPlacement {
+    left_px: f64,
+    top_px: f64,
+    width_px: f64,
+    height_px: f64,
 }
 
 #[derive(Default)]
@@ -2004,6 +2014,7 @@ struct CellBuilder {
 
 #[derive(Default)]
 struct DrawingBuilder {
+    ordinal: u64,
     layout: Option<DrawingLayout>,
     width_emu: Option<u64>,
     height_emu: Option<u64>,
@@ -2028,6 +2039,44 @@ struct DrawingBuilder {
     distance_bottom_emu: Option<u64>,
     distance_left_emu: Option<u64>,
     distance_right_emu: Option<u64>,
+    is_textbox: bool,
+    textbox_content: Vec<RenderedBlock>,
+    shape_geometry: Option<String>,
+    shape_rotation: Option<i64>,
+    shape_fill: Option<String>,
+    shape_fill_alpha: Option<u32>,
+    gradient_colors: Vec<String>,
+    gradient_angle: Option<i64>,
+    no_shape_fill: bool,
+    line_color: Option<String>,
+    line_width_emu: Option<u64>,
+    line_dash: Option<String>,
+    no_line: bool,
+    body_left_inset_emu: Option<u64>,
+    body_top_inset_emu: Option<u64>,
+    body_right_inset_emu: Option<u64>,
+    body_bottom_inset_emu: Option<u64>,
+    body_vertical: Option<String>,
+    body_anchor: Option<String>,
+    has_outer_shadow: bool,
+}
+
+#[derive(Clone, Copy)]
+enum DrawingColorTarget {
+    Shape,
+    Line,
+}
+
+#[derive(Default)]
+struct DrawingPropertyState {
+    shape_properties_depth: Option<usize>,
+    transform_depth: Option<usize>,
+    line_depth: Option<usize>,
+    shape_solid_fill_depth: Option<usize>,
+    line_solid_fill_depth: Option<usize>,
+    gradient_fill_depth: Option<usize>,
+    outer_shadow_depth: Option<usize>,
+    color_scope: Option<(usize, DrawingColorTarget)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2605,6 +2654,7 @@ where
     entries: Vec<NodeMapEntry>,
     block_count: usize,
     continuation: bool,
+    requires_overflow_visible: bool,
     writer: &'a mut BundleWriter,
     emit: &'a mut F,
 }
@@ -2632,6 +2682,7 @@ where
             entries: Vec::new(),
             block_count: 0,
             continuation: false,
+            requires_overflow_visible: false,
             writer,
             emit,
         }
@@ -2655,6 +2706,7 @@ where
         self.entries.extend(block.entries);
         self.block_count += 1;
         self.continuation |= continuation;
+        self.requires_overflow_visible |= block.requires_overflow_visible;
         Ok(())
     }
 
@@ -2665,8 +2717,13 @@ where
         let chunk_seed = format!("{}:{}", self.part, self.chunk_ordinal);
         let chunk_id =
             stable_node_id(&[self.document_id, &chunk_seed, "chunk"]).replacen("n_", "c_", 1);
+        let overflow_class = if self.requires_overflow_visible {
+            " hcd-chunk-overflow"
+        } else {
+            ""
+        };
         let html = format!(
-            "<section class=\"hcd-chunk\" data-hcd-chunk-id=\"{}\" data-hcd-region=\"{}\">{}</section>",
+            "<section class=\"hcd-chunk{overflow_class}\" data-hcd-chunk-id=\"{}\" data-hcd-region=\"{}\">{}</section>",
             escape_attribute(&chunk_id),
             escape_attribute(self.region),
             self.html
@@ -2689,6 +2746,7 @@ where
         self.html.clear();
         self.block_count = 0;
         self.continuation = false;
+        self.requires_overflow_visible = false;
         Ok(())
     }
 }
@@ -2847,13 +2905,15 @@ where
                 "common decimal, letter, Roman and bullet list markers".to_string(),
                 "tables including bounded vertical merge row groups, hyperlinks, inline/anchored image geometry and document regions"
                     .to_string(),
+                "common DrawingML textbox geometry, independent shape grouping, nested tables, fill, border, rotation, vertical text, body insets and z-order"
+                    .to_string(),
                 "tracked insert/delete/move semantics with historical property snapshots kept read-only"
                     .to_string(),
                 "opaque OOXML parts in the immutable source".to_string(),
             ],
             flattened: vec![
                 "Word physical pagination is represented as semantic flow".to_string(),
-                "floating DrawingML offsets, wrap modes and z-order are exposed, while page collision and custom wrap polygons remain best-effort"
+                "floating DrawingML offsets, wrap modes and z-order are materialized, while Word page collision, custom geometry, exact gradient/effect parameters and custom wrap polygons remain best-effort"
                     .to_string(),
                 "unrecognized language scripts, diagonal borders, tblPrEx width/alignment/spacing/indent/layout/look exceptions and legacy Word table-style compatibility modes are best-effort"
                     .to_string(),
@@ -3012,7 +3072,10 @@ where
     let mut runs: Vec<RunBuilder> = Vec::new();
     let mut cells: Vec<CellBuilder> = Vec::new();
     let mut drawings: Vec<DrawingBuilder> = Vec::new();
+    let mut drawing_properties = DrawingPropertyState::default();
     let mut drawing_text: Option<PendingDrawingText> = None;
+    let mut alternate_content_support: Vec<bool> = Vec::new();
+    let mut skipped_fallback_depth = None;
     let mut hyperlink_tags: Vec<bool> = Vec::new();
     let mut fields: Vec<FieldFrame> = Vec::new();
     let mut current_text: Option<PendingText> = None;
@@ -3033,6 +3096,7 @@ where
     let mut cell_margins_depth = None;
     let mut text_ordinal = 0u64;
     let mut image_ordinal = 0u64;
+    let mut drawing_ordinal = 0u64;
     let mut paragraph_ordinal = 0u64;
     let mut table_ordinal = 0u64;
     let mut table_depth = 0usize;
@@ -3061,6 +3125,29 @@ where
                 }
                 let qualified_name = start.name();
                 let name = local_name(qualified_name.as_ref());
+                if skipped_fallback_depth.is_some() {
+                    buffer.clear();
+                    continue;
+                }
+                if name == "AlternateContent" {
+                    alternate_content_support.push(false);
+                } else if name == "Choice" {
+                    if attribute_by_local_name(start, "Requires").is_some_and(|requires| {
+                        requires
+                            .split_ascii_whitespace()
+                            .any(|value| value == "wps")
+                    }) {
+                        if let Some(supported) = alternate_content_support.last_mut() {
+                            *supported = true;
+                        }
+                    }
+                } else if name == "Fallback"
+                    && alternate_content_support.last().copied() == Some(true)
+                {
+                    skipped_fallback_depth = Some(xml_depth);
+                    buffer.clear();
+                    continue;
+                }
                 if matches!(
                     name,
                     "pPrChange"
@@ -3095,9 +3182,12 @@ where
                             }
                         }
                         "tr" if table_depth > 0 => {
+                            let table_is_in_textbox =
+                                drawings.last().is_some_and(|drawing| drawing.is_textbox);
                             if let Some(table) = &mut table {
                                 if table_depth == 1 {
                                     if table.rows_in_fragment > 0
+                                        && !table_is_in_textbox
                                         && !table.has_active_vertical_merges()
                                         && (table.rows_in_fragment >= TABLE_ROWS_PER_FRAGMENT
                                             || table.html.len() >= chunks.soft_bytes)
@@ -3206,7 +3296,14 @@ where
                                 simple: true,
                             });
                         }
-                        "drawing" => drawings.push(DrawingBuilder::default()),
+                        "drawing" => {
+                            drawing_ordinal += 1;
+                            drawings.push(DrawingBuilder {
+                                ordinal: drawing_ordinal,
+                                ..Default::default()
+                            });
+                            drawing_properties = DrawingPropertyState::default();
+                        }
                         "anchor" | "inline" if !drawings.is_empty() => {
                             capture_drawing_layout(start, drawings.last_mut());
                         }
@@ -3230,6 +3327,76 @@ where
                             if !drawings.is_empty() =>
                         {
                             capture_drawing_wrap(start, drawings.last_mut());
+                        }
+                        "spPr" if !drawings.is_empty() => {
+                            drawing_properties.shape_properties_depth = Some(xml_depth);
+                        }
+                        "xfrm" if drawing_properties.shape_properties_depth.is_some() => {
+                            drawing_properties.transform_depth = Some(xml_depth);
+                            capture_textbox_transform(start, drawings.last_mut());
+                        }
+                        "prstGeom" if drawing_properties.shape_properties_depth.is_some() => {
+                            capture_textbox_geometry(start, drawings.last_mut());
+                        }
+                        "ln" if drawing_properties.shape_properties_depth.is_some() => {
+                            drawing_properties.line_depth = Some(xml_depth);
+                            capture_textbox_line(start, drawings.last_mut());
+                        }
+                        "solidFill" if drawing_properties.line_depth.is_some() => {
+                            drawing_properties.line_solid_fill_depth = Some(xml_depth);
+                        }
+                        "solidFill" if drawing_properties.shape_properties_depth.is_some() => {
+                            drawing_properties.shape_solid_fill_depth = Some(xml_depth);
+                        }
+                        "gradFill" if drawing_properties.shape_properties_depth.is_some() => {
+                            drawing_properties.gradient_fill_depth = Some(xml_depth);
+                        }
+                        "outerShdw" if drawing_properties.shape_properties_depth.is_some() => {
+                            drawing_properties.outer_shadow_depth = Some(xml_depth);
+                            if let Some(drawing) = drawings.last_mut() {
+                                drawing.has_outer_shadow = true;
+                            }
+                        }
+                        "srgbClr" | "schemeClr" if !drawings.is_empty() => {
+                            if let Some(target) = capture_textbox_color(
+                                start,
+                                drawings.last_mut(),
+                                &drawing_properties,
+                                theme,
+                            ) {
+                                drawing_properties.color_scope = Some((xml_depth, target));
+                            }
+                        }
+                        "alpha" if !drawings.is_empty() => {
+                            capture_textbox_alpha(
+                                start,
+                                drawings.last_mut(),
+                                drawing_properties.color_scope.map(|(_, target)| target),
+                            );
+                        }
+                        "lin" if drawing_properties.gradient_fill_depth.is_some() => {
+                            capture_textbox_gradient_angle(start, drawings.last_mut());
+                        }
+                        "prstDash" if drawing_properties.line_depth.is_some() => {
+                            capture_textbox_line_dash(start, drawings.last_mut());
+                        }
+                        "noFill" if drawing_properties.line_depth.is_some() => {
+                            if let Some(drawing) = drawings.last_mut() {
+                                drawing.no_line = true;
+                            }
+                        }
+                        "noFill" if drawing_properties.shape_properties_depth.is_some() => {
+                            if let Some(drawing) = drawings.last_mut() {
+                                drawing.no_shape_fill = true;
+                            }
+                        }
+                        "txbx" | "txbxContent" if !drawings.is_empty() => {
+                            if let Some(drawing) = drawings.last_mut() {
+                                drawing.is_textbox = true;
+                            }
+                        }
+                        "bodyPr" if !drawings.is_empty() => {
+                            capture_textbox_body_properties(start, drawings.last_mut());
                         }
                         "t" | "delText" => {
                             ensure_run_open(paragraphs.last_mut(), runs.last_mut());
@@ -3320,6 +3487,10 @@ where
                 }
                 let qualified_name = empty.name();
                 let name = local_name(qualified_name.as_ref());
+                if skipped_fallback_depth.is_some() {
+                    buffer.clear();
+                    continue;
+                }
                 if property_change_depth.is_some() {
                     buffer.clear();
                     continue;
@@ -3377,11 +3548,17 @@ where
                             numbering,
                             &mut numbering_state,
                         );
-                        if let Some(parent) = paragraphs.last_mut() {
-                            parent.nested.push(block);
-                        } else if let Some(table) = &mut table {
+                        if let Some(table) = &mut table {
                             table.html.push_str(&block.html);
                             table.entries.extend(block.entries);
+                        } else if paragraphs.last().is_some()
+                            && drawings.last().is_some_and(|drawing| drawing.is_textbox)
+                        {
+                            if let Some(drawing) = drawings.last_mut() {
+                                drawing.textbox_content.push(block);
+                            }
+                        } else if let Some(parent) = paragraphs.last_mut() {
+                            parent.nested.push(block);
                         } else {
                             chunks.push_block(block, false)?;
                         }
@@ -3455,6 +3632,54 @@ where
                     {
                         capture_drawing_wrap(empty, drawings.last_mut());
                     }
+                    "xfrm" if drawing_properties.shape_properties_depth.is_some() => {
+                        capture_textbox_transform(empty, drawings.last_mut());
+                    }
+                    "prstGeom" if drawing_properties.shape_properties_depth.is_some() => {
+                        capture_textbox_geometry(empty, drawings.last_mut());
+                    }
+                    "ln" if drawing_properties.shape_properties_depth.is_some() => {
+                        capture_textbox_line(empty, drawings.last_mut());
+                    }
+                    "srgbClr" | "schemeClr" if !drawings.is_empty() => {
+                        capture_textbox_color(
+                            empty,
+                            drawings.last_mut(),
+                            &drawing_properties,
+                            theme,
+                        );
+                    }
+                    "alpha" if !drawings.is_empty() => {
+                        capture_textbox_alpha(
+                            empty,
+                            drawings.last_mut(),
+                            drawing_properties.color_scope.map(|(_, target)| target),
+                        );
+                    }
+                    "lin" if drawing_properties.gradient_fill_depth.is_some() => {
+                        capture_textbox_gradient_angle(empty, drawings.last_mut());
+                    }
+                    "prstDash" if drawing_properties.line_depth.is_some() => {
+                        capture_textbox_line_dash(empty, drawings.last_mut());
+                    }
+                    "noFill" if drawing_properties.line_depth.is_some() => {
+                        if let Some(drawing) = drawings.last_mut() {
+                            drawing.no_line = true;
+                        }
+                    }
+                    "noFill" if drawing_properties.shape_properties_depth.is_some() => {
+                        if let Some(drawing) = drawings.last_mut() {
+                            drawing.no_shape_fill = true;
+                        }
+                    }
+                    "txbx" | "txbxContent" if !drawings.is_empty() => {
+                        if let Some(drawing) = drawings.last_mut() {
+                            drawing.is_textbox = true;
+                        }
+                    }
+                    "bodyPr" if !drawings.is_empty() => {
+                        capture_textbox_body_properties(empty, drawings.last_mut());
+                    }
                     "blip" => {
                         ensure_run_open(paragraphs.last_mut(), runs.last_mut());
                         image_ordinal += 1;
@@ -3472,6 +3697,10 @@ where
                 }
             }
             Event::Text(ref text) => {
+                if skipped_fallback_depth.is_some() {
+                    buffer.clear();
+                    continue;
+                }
                 if text.as_ref().len() > MAX_CHUNK_BYTES {
                     return Err(HcdError::ResourceLimit(format!(
                         "NODE_TOO_LARGE: XML text in {part} exceeds {MAX_CHUNK_BYTES} bytes"
@@ -3502,6 +3731,10 @@ where
                 }
             }
             Event::CData(ref text) => {
+                if skipped_fallback_depth.is_some() {
+                    buffer.clear();
+                    continue;
+                }
                 if let Some(pending) = &mut drawing_text {
                     pending
                         .value
@@ -3523,6 +3756,16 @@ where
             Event::End(ref end) => {
                 let qualified_name = end.name();
                 let name = local_name(qualified_name.as_ref());
+                if let Some(skip_depth) = skipped_fallback_depth {
+                    if xml_depth == skip_depth && name == "Fallback" {
+                        skipped_fallback_depth = None;
+                    }
+                    xml_depth = xml_depth.checked_sub(1).ok_or_else(|| {
+                        HcdError::InvalidBundle(format!("unbalanced XML depth in {part}"))
+                    })?;
+                    buffer.clear();
+                    continue;
+                }
                 if property_change_depth.is_some() {
                     if property_change_depth == Some(xml_depth) {
                         property_change_depth = None;
@@ -3594,7 +3837,15 @@ where
                             );
                         }
                         "drawing" => {
-                            drawings.pop();
+                            if let Some(drawing) = drawings.pop() {
+                                if drawing.is_textbox {
+                                    let block = render_textbox(document_id, part, drawing);
+                                    if let Some(paragraph) = paragraphs.last_mut() {
+                                        paragraph.nested.push(block);
+                                    }
+                                }
+                            }
+                            drawing_properties = DrawingPropertyState::default();
                         }
                         "posOffset" | "align" => {
                             finish_drawing_text(drawing_text.take(), drawings.last_mut(), part)?;
@@ -3618,11 +3869,17 @@ where
                                 numbering,
                                 &mut numbering_state,
                             );
-                            if let Some(parent) = paragraphs.last_mut() {
-                                parent.nested.push(block);
-                            } else if let Some(table) = &mut table {
+                            if let Some(table) = &mut table {
                                 table.html.push_str(&block.html);
                                 table.entries.extend(block.entries);
+                            } else if paragraphs.last().is_some()
+                                && drawings.last().is_some_and(|drawing| drawing.is_textbox)
+                            {
+                                if let Some(drawing) = drawings.last_mut() {
+                                    drawing.textbox_content.push(block);
+                                }
+                            } else if let Some(parent) = paragraphs.last_mut() {
+                                parent.nested.push(block);
                             } else {
                                 chunks.push_block(block, false)?;
                             }
@@ -3690,13 +3947,49 @@ where
                                 if finished.rows_in_fragment > 0 || !finished.entries.is_empty() {
                                     finished.mark_final_fragment();
                                     let continuation = finished.continuation;
-                                    chunks.push_block(
-                                        take_table_fragment(&mut finished),
-                                        continuation,
-                                    )?;
+                                    let block = take_table_fragment(&mut finished);
+                                    if drawings.last().is_some_and(|drawing| drawing.is_textbox) {
+                                        if let Some(drawing) = drawings.last_mut() {
+                                            drawing.textbox_content.push(block);
+                                        }
+                                    } else {
+                                        chunks.push_block(block, continuation)?;
+                                    }
                                 }
                             }
                             table_depth -= 1;
+                        }
+                        "srgbClr" | "schemeClr"
+                            if drawing_properties
+                                .color_scope
+                                .is_some_and(|(depth, _)| depth == xml_depth) =>
+                        {
+                            drawing_properties.color_scope = None;
+                        }
+                        "solidFill"
+                            if drawing_properties.line_solid_fill_depth == Some(xml_depth) =>
+                        {
+                            drawing_properties.line_solid_fill_depth = None;
+                        }
+                        "solidFill"
+                            if drawing_properties.shape_solid_fill_depth == Some(xml_depth) =>
+                        {
+                            drawing_properties.shape_solid_fill_depth = None;
+                        }
+                        "gradFill" if drawing_properties.gradient_fill_depth == Some(xml_depth) => {
+                            drawing_properties.gradient_fill_depth = None;
+                        }
+                        "outerShdw" if drawing_properties.outer_shadow_depth == Some(xml_depth) => {
+                            drawing_properties.outer_shadow_depth = None;
+                        }
+                        "ln" if drawing_properties.line_depth == Some(xml_depth) => {
+                            drawing_properties.line_depth = None;
+                        }
+                        "xfrm" if drawing_properties.transform_depth == Some(xml_depth) => {
+                            drawing_properties.transform_depth = None;
+                        }
+                        "spPr" if drawing_properties.shape_properties_depth == Some(xml_depth) => {
+                            drawing_properties.shape_properties_depth = None;
                         }
                         _ => {
                             if let Some(kind) = RevisionKind::from_ooxml(name) {
@@ -3704,6 +3997,9 @@ where
                             }
                         }
                     }
+                }
+                if name == "AlternateContent" {
+                    alternate_content_support.pop();
                 }
                 xml_depth = xml_depth.checked_sub(1).ok_or_else(|| {
                     HcdError::InvalidBundle(format!("unbalanced XML depth in {part}"))
@@ -4580,6 +4876,117 @@ fn capture_drawing_wrap(element: &BytesStart<'_>, drawing: Option<&mut DrawingBu
         .filter(|value| matches!(value.as_str(), "bothSides" | "left" | "right" | "largest"));
 }
 
+fn capture_textbox_transform(element: &BytesStart<'_>, drawing: Option<&mut DrawingBuilder>) {
+    let Some(drawing) = drawing else {
+        return;
+    };
+    drawing.shape_rotation = attribute_by_local_name(element, "rot")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| (-21_600_000..=21_600_000).contains(value));
+}
+
+fn capture_textbox_geometry(element: &BytesStart<'_>, drawing: Option<&mut DrawingBuilder>) {
+    let Some(drawing) = drawing else {
+        return;
+    };
+    drawing.shape_geometry = attribute_by_local_name(element, "prst").filter(|value| {
+        matches!(
+            value.as_str(),
+            "rect" | "roundRect" | "ellipse" | "triangle" | "rtTriangle"
+        )
+    });
+}
+
+fn capture_textbox_line(element: &BytesStart<'_>, drawing: Option<&mut DrawingBuilder>) {
+    let Some(drawing) = drawing else {
+        return;
+    };
+    drawing.line_width_emu = unsigned_drawing_emu_attribute(element, "w");
+}
+
+fn capture_textbox_color(
+    element: &BytesStart<'_>,
+    drawing: Option<&mut DrawingBuilder>,
+    state: &DrawingPropertyState,
+    theme: &WordTheme,
+) -> Option<DrawingColorTarget> {
+    let drawing = drawing?;
+    let qualified_name = element.name();
+    let name = local_name(qualified_name.as_ref());
+    let color = attribute_by_local_name(element, "val").and_then(|value| match name {
+        "srgbClr" => normalized_hex_color(&value),
+        "schemeClr" => theme.color(&value).map(str::to_string),
+        _ => None,
+    })?;
+    let target = if state.line_solid_fill_depth.is_some() {
+        drawing.line_color = Some(color);
+        DrawingColorTarget::Line
+    } else if state.gradient_fill_depth.is_some() {
+        if drawing.gradient_colors.len() < 8 {
+            drawing.gradient_colors.push(color);
+        }
+        DrawingColorTarget::Shape
+    } else if state.shape_solid_fill_depth.is_some() {
+        drawing.shape_fill = Some(color);
+        DrawingColorTarget::Shape
+    } else {
+        return None;
+    };
+    Some(target)
+}
+
+fn capture_textbox_alpha(
+    element: &BytesStart<'_>,
+    drawing: Option<&mut DrawingBuilder>,
+    target: Option<DrawingColorTarget>,
+) {
+    let (Some(drawing), Some(DrawingColorTarget::Shape)) = (drawing, target) else {
+        return;
+    };
+    drawing.shape_fill_alpha = attribute_by_local_name(element, "val")
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value <= 100_000);
+}
+
+fn capture_textbox_gradient_angle(element: &BytesStart<'_>, drawing: Option<&mut DrawingBuilder>) {
+    let Some(drawing) = drawing else {
+        return;
+    };
+    drawing.gradient_angle = attribute_by_local_name(element, "ang")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| (0..=21_600_000).contains(value));
+}
+
+fn capture_textbox_line_dash(element: &BytesStart<'_>, drawing: Option<&mut DrawingBuilder>) {
+    let Some(drawing) = drawing else {
+        return;
+    };
+    drawing.line_dash = attribute_by_local_name(element, "val").filter(|value| {
+        matches!(
+            value.as_str(),
+            "solid" | "dash" | "dashDot" | "dot" | "lgDash" | "lgDashDot"
+        )
+    });
+}
+
+fn capture_textbox_body_properties(element: &BytesStart<'_>, drawing: Option<&mut DrawingBuilder>) {
+    let Some(drawing) = drawing else {
+        return;
+    };
+    drawing.body_left_inset_emu = unsigned_drawing_emu_attribute(element, "lIns");
+    drawing.body_top_inset_emu = unsigned_drawing_emu_attribute(element, "tIns");
+    drawing.body_right_inset_emu = unsigned_drawing_emu_attribute(element, "rIns");
+    drawing.body_bottom_inset_emu = unsigned_drawing_emu_attribute(element, "bIns");
+    drawing.body_vertical = attribute_by_local_name(element, "vert").filter(|value| {
+        matches!(
+            value.as_str(),
+            "horz" | "vert" | "vert270" | "eaVert" | "wordArtVert"
+        )
+    });
+    drawing.body_anchor = attribute_by_local_name(element, "anchor")
+        .filter(|value| matches!(value.as_str(), "t" | "ctr" | "b" | "just" | "dist"));
+}
+
 fn signed_drawing_emu_attribute(element: &BytesStart<'_>, name: &str) -> Option<i64> {
     attribute_by_local_name(element, name)
         .and_then(|value| value.parse::<i64>().ok())
@@ -5127,6 +5534,7 @@ fn finish_paragraph(
             paragraph.format.numbering_level.as_deref(),
         )
         .unwrap_or_default();
+    let mut requires_overflow_visible = false;
     let html = if paragraph.nested.is_empty() {
         format!(
             "<p class=\"hcd-paragraph{style_class}\" data-hcd-id=\"{}\"{}>{marker}{}</p>",
@@ -5136,21 +5544,41 @@ fn finish_paragraph(
         )
     } else {
         let mut nested_html = String::new();
+        let mut flow_html = String::new();
+        let mut canvas_height_px = 0.0f64;
+        let mut canvas_width_px = 0.0f64;
         for nested in paragraph.nested.drain(..) {
-            nested_html.push_str(&nested.html);
+            requires_overflow_visible |= nested.requires_overflow_visible;
+            if let Some(placement) = nested.visual_placement {
+                canvas_height_px = canvas_height_px.max(placement.top_px + placement.height_px);
+                canvas_width_px = canvas_width_px.max(placement.left_px + placement.width_px);
+                nested_html.push_str(&nested.html);
+            } else {
+                flow_html.push_str(&nested.html);
+            }
             paragraph.entries.extend(nested.entries);
         }
+        let canvas = if nested_html.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<div class=\"hcd-textbox-canvas\" style=\"height:{:.2}px;width:{:.2}px\">{nested_html}</div>",
+                canvas_height_px.max(1.0),
+                canvas_width_px.max(1.0)
+            )
+        };
         format!(
-            "<div class=\"hcd-paragraph-group\" data-hcd-id=\"{}\"><p class=\"hcd-paragraph{style_class}\"{}>{marker}{}</p><aside class=\"hcd-textbox\">{}</aside></div>",
+            "<div class=\"hcd-paragraph-group\" data-hcd-id=\"{}\"><p class=\"hcd-paragraph{style_class}\"{}>{marker}{}</p>{canvas}{flow_html}</div>",
             escape_attribute(&block_id),
             format_attributes,
-            paragraph.html,
-            nested_html
+            paragraph.html
         )
     };
     RenderedBlock {
         html,
         entries: paragraph.entries,
+        visual_placement: None,
+        requires_overflow_visible,
     }
 }
 
@@ -5159,7 +5587,215 @@ fn take_table_fragment(table: &mut TableBuilder) -> RenderedBlock {
     RenderedBlock {
         html: std::mem::take(&mut table.html),
         entries: std::mem::take(&mut table.entries),
+        visual_placement: None,
+        requires_overflow_visible: false,
     }
+}
+
+fn render_textbox(document_id: &str, part: &str, mut drawing: DrawingBuilder) -> RenderedBlock {
+    let identity = drawing
+        .drawing_id
+        .map(|id| format!("drawing-{id}"))
+        .unwrap_or_else(|| format!("drawing-{}", drawing.ordinal));
+    let node_id = stable_node_id(&[document_id, part, "textbox", &identity]);
+    let width_px = drawing
+        .width_emu
+        .map(|value| emu_to_px(value as i64))
+        .unwrap_or(1.0)
+        .max(1.0);
+    let height_px = drawing
+        .height_emu
+        .map(|value| emu_to_px(value as i64))
+        .unwrap_or(1.0)
+        .max(1.0);
+    let left_px = drawing
+        .horizontal_offset_emu
+        .or(drawing.simple_x_emu)
+        .map(emu_to_px)
+        .unwrap_or(0.0);
+    let top_px = drawing
+        .vertical_offset_emu
+        .or(drawing.simple_y_emu)
+        .map(emu_to_px)
+        .unwrap_or(0.0);
+
+    let mut content = String::new();
+    let mut entries = Vec::new();
+    for block in drawing.textbox_content.drain(..) {
+        content.push_str(&block.html);
+        entries.extend(block.entries);
+    }
+
+    let mut attributes = format!(
+        " class=\"hcd-textbox hcd-drawing\" data-hcd-id=\"{}\" data-hcd-node-kind=\"textbox\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"/drawing[{}]\"",
+        escape_attribute(&node_id),
+        escape_attribute(part),
+        drawing.ordinal
+    );
+    push_data_number(&mut attributes, "data-hcd-drawing-id", drawing.drawing_id);
+    push_data_number(&mut attributes, "data-hcd-width-emu", drawing.width_emu);
+    push_data_number(&mut attributes, "data-hcd-height-emu", drawing.height_emu);
+    push_data_number(
+        &mut attributes,
+        "data-hcd-position-h-offset-emu",
+        drawing.horizontal_offset_emu,
+    );
+    push_data_number(
+        &mut attributes,
+        "data-hcd-position-v-offset-emu",
+        drawing.vertical_offset_emu,
+    );
+    push_data_number(
+        &mut attributes,
+        "data-hcd-relative-height",
+        drawing.relative_height,
+    );
+    push_data_bool(
+        &mut attributes,
+        "data-hcd-behind-document",
+        drawing.behind_document,
+    );
+    push_data_attribute(
+        &mut attributes,
+        "data-hcd-shape-geometry",
+        drawing.shape_geometry.as_deref(),
+    );
+    push_data_attribute(
+        &mut attributes,
+        "data-hcd-text-direction",
+        drawing.body_vertical.as_deref(),
+    );
+
+    let mut style = vec![
+        "position:absolute".to_string(),
+        format!("left:{left_px:.2}px"),
+        format!("top:{top_px:.2}px"),
+        format!("width:{width_px:.2}px"),
+        format!("height:{height_px:.2}px"),
+        "overflow:hidden".to_string(),
+    ];
+    if let Some(relative_height) = drawing.relative_height {
+        style.push(format!("z-index:{}", relative_height.min(i32::MAX as u64)));
+    }
+    if let Some(rotation) = drawing.shape_rotation {
+        style.push(format!(
+            "transform:rotate({:.3}deg)",
+            rotation as f64 / 60_000.0
+        ));
+        style.push("transform-origin:center".to_string());
+    }
+    match drawing.shape_geometry.as_deref() {
+        Some("roundRect") => style.push("border-radius:12px".to_string()),
+        Some("ellipse") => style.push("border-radius:50%".to_string()),
+        _ => {}
+    }
+    if drawing.no_shape_fill {
+        style.push("background-color:transparent".to_string());
+    } else if drawing.gradient_colors.len() >= 2 {
+        let angle = drawing
+            .gradient_angle
+            .map(|value| value as f64 / 60_000.0 + 90.0)
+            .unwrap_or(90.0);
+        style.push(format!(
+            "background-image:linear-gradient({angle:.2}deg,#{},#{})",
+            drawing.gradient_colors[0],
+            drawing.gradient_colors[drawing.gradient_colors.len() - 1]
+        ));
+    } else if let Some(fill) = &drawing.shape_fill {
+        if let Some(alpha) = drawing.shape_fill_alpha.filter(|value| *value < 100_000) {
+            if let Some(color) = css_hex_alpha(fill, alpha) {
+                style.push(format!("background-color:{color}"));
+            } else {
+                style.push(format!("background-color:#{fill}"));
+            }
+        } else {
+            style.push(format!("background-color:#{fill}"));
+        }
+    }
+    if drawing.no_line {
+        for side in ["top", "right", "bottom", "left"] {
+            style.push(format!("border-{side}:none"));
+        }
+    } else if drawing.line_color.is_some() || drawing.line_width_emu.is_some() {
+        let width_pt = drawing.line_width_emu.unwrap_or(12_700) as f64 / 12_700.0;
+        let dash = match drawing.line_dash.as_deref() {
+            Some("dash" | "lgDash") => "dashed",
+            Some("dot") => "dotted",
+            Some("dashDot" | "lgDashDot") => "dashed",
+            _ => "solid",
+        };
+        for side in ["top", "right", "bottom", "left"] {
+            style.push(format!(
+                "border-{side}:{width_pt:.2}pt {dash} #{}",
+                drawing.line_color.as_deref().unwrap_or("000000")
+            ));
+        }
+    } else {
+        for side in ["top", "right", "bottom", "left"] {
+            style.push(format!("border-{side}:none"));
+        }
+    }
+    if drawing.has_outer_shadow {
+        style.push("box-shadow:4px 4px 8px rgba(0,0,0,.35)".to_string());
+    }
+    let insets = [
+        drawing.body_top_inset_emu.unwrap_or(0),
+        drawing.body_right_inset_emu.unwrap_or(0),
+        drawing.body_bottom_inset_emu.unwrap_or(0),
+        drawing.body_left_inset_emu.unwrap_or(0),
+    ];
+    for (side, inset) in ["top", "right", "bottom", "left"].into_iter().zip(insets) {
+        style.push(format!("padding-{side}:{:.2}px", emu_to_px(inset as i64)));
+    }
+
+    let mut content_style = vec!["height:100%".to_string()];
+    match drawing.body_vertical.as_deref() {
+        Some("vert" | "eaVert" | "wordArtVert") => {
+            content_style.push("writing-mode:vertical-rl".to_string());
+            content_style.push("text-orientation:mixed".to_string());
+        }
+        Some("vert270") => {
+            content_style.push("writing-mode:vertical-lr".to_string());
+            content_style.push("text-orientation:mixed".to_string());
+        }
+        _ => {}
+    }
+    if matches!(drawing.body_anchor.as_deref(), Some("ctr" | "b")) {
+        content_style.push("display:flex".to_string());
+        content_style.push("flex-direction:column".to_string());
+        content_style.push(format!(
+            "justify-content:{}",
+            if drawing.body_anchor.as_deref() == Some("b") {
+                "flex-end"
+            } else {
+                "center"
+            }
+        ));
+    }
+    attributes.push_str(" style=\"");
+    attributes.push_str(&style.join(";"));
+    attributes.push('"');
+    let html = format!(
+        "<aside{attributes}><div class=\"hcd-textbox-content\" style=\"{}\">{content}</div></aside>",
+        content_style.join(";")
+    );
+    RenderedBlock {
+        html,
+        entries,
+        visual_placement: Some(VisualPlacement {
+            left_px,
+            top_px,
+            width_px,
+            height_px,
+        }),
+        requires_overflow_visible: true,
+    }
+}
+
+fn css_hex_alpha(hex: &str, alpha: u32) -> Option<String> {
+    strict_hex_color(hex)?;
+    let alpha = ((alpha.min(100_000) as f64 / 100_000.0) * 255.0).round() as u8;
+    Some(format!("#{hex}{alpha:02X}"))
 }
 
 fn append_image(
@@ -5611,7 +6247,7 @@ fn escape_attribute(text: &str) -> String {
 }
 
 fn default_styles() -> &'static str {
-    r#"article,.hcd-chunk{display:block}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{border:1px solid #d9d9d9;padding:.25em .4em;vertical-align:top}.hcd-textbox{border:1px dashed #aaa;padding:.35em;margin:.35em 0}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
+    r#"article,.hcd-chunk{display:block}.hcd-chunk-overflow{content-visibility:visible;contain:none;overflow:visible}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{border:1px solid #d9d9d9;padding:.25em .4em;vertical-align:top}.hcd-paragraph-group{min-width:0}.hcd-textbox-canvas{position:relative;max-width:100%}.hcd-textbox{box-sizing:border-box;margin:0}.hcd-textbox-content>.hcd-table{margin:0;max-width:100%}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
 }
 
 #[cfg(test)]
@@ -6028,6 +6664,33 @@ mod tests {
         let styles = std::fs::read_to_string(root.join("styles.css")).unwrap();
         assert!(styles.contains("data-hcd-image-hitboxes"));
         assert!(styles.contains("data-hcd-text-hitboxes"));
+    }
+
+    #[test]
+    fn drawingml_textboxes_preserve_geometry_grouping_and_nested_tables() {
+        let xml = r#"<w:document xmlns:w="w" xmlns:mc="mc" xmlns:wps="wps" xmlns:wp="wp" xmlns:a="a"><w:body><w:p>
+          <w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor relativeHeight="9" behindDoc="0"><wp:positionH relativeFrom="column"><wp:posOffset>1900000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>400000</wp:posOffset></wp:positionV><wp:extent cx="1700000" cy="1400000"/><wp:docPr id="77"/><wps:wsp><wps:spPr><a:xfrm rot="2700000"/><a:prstGeom prst="roundRect"/><a:solidFill><a:srgbClr val="E3F2FD"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="1565C0"/></a:solidFill><a:prstDash val="dash"/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>inside</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:txbxContent></wps:txbx><wps:bodyPr vert="eaVert" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="ctr"/></wps:wsp></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><w:txbxContent><w:p><w:r><w:t>fallback duplicate</w:t></w:r></w:p></w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r>
+          <w:r><w:drawing><wp:anchor relativeHeight="10"><wp:positionH relativeFrom="column"><wp:posOffset>3800000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1700000" cy="1400000"/><wp:docPr id="78"/><wps:wsp><wps:spPr><a:prstGeom prst="rect"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>second</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wp:anchor></w:drawing></w:r>
+        </w:p></w:body></w:document>"#;
+
+        let (html, map) = render_test_part(xml, &WordTheme::default(), None);
+        assert!(html.contains("class=\"hcd-chunk hcd-chunk-overflow\""));
+        assert_eq!(html.matches("data-hcd-node-kind=\"textbox\"").count(), 2);
+        assert!(html.contains("data-hcd-drawing-id=\"77\""));
+        assert!(html.contains("left:199.48px;top:41.99px;width:178.48px;height:146.98px"));
+        assert!(html.contains("transform:rotate(45.000deg)"));
+        assert!(html.contains("background-color:#E3F2FD"));
+        assert!(html.contains("border-top:1.00pt dashed #1565C0"));
+        assert!(html.contains("border-radius:12px"));
+        assert!(html.contains("writing-mode:vertical-rl"));
+        assert!(html.contains("<aside class=\"hcd-textbox hcd-drawing\""));
+        let first_aside = html.find("data-hcd-drawing-id=\"77\"").unwrap();
+        let nested_table = html.find("<table class=\"hcd-table").unwrap();
+        let first_aside_end = html[first_aside..].find("</aside>").unwrap() + first_aside;
+        assert!(nested_table > first_aside && nested_table < first_aside_end);
+        assert!(!html.contains("fallback duplicate"));
+        assert!(html.contains("background-color:transparent"));
+        assert_eq!(map.entries.len(), 3);
     }
 
     #[test]

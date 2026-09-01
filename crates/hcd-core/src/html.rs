@@ -196,6 +196,16 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "left"
                 | "top"
                 | "overflow"
+                | "z-index"
+                | "transform"
+                | "transform-origin"
+                | "background-image"
+                | "border-radius"
+                | "box-shadow"
+                | "writing-mode"
+                | "text-orientation"
+                | "flex-direction"
+                | "justify-content"
         ) {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS property {property} is not allowed"
@@ -207,7 +217,10 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
             || !value.chars().all(|character| {
                 character.is_alphanumeric()
                     || character.is_ascii_whitespace()
-                    || matches!(character, '#' | '.' | '-' | '_' | ',' | '%' | '\'' | '"')
+                    || matches!(
+                        character,
+                        '#' | '.' | '-' | '_' | ',' | '%' | '\'' | '"' | '(' | ')'
+                    )
             })
         {
             return Err(HcdError::InvalidBundle(format!(
@@ -215,6 +228,11 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
             )));
         }
         let normalized_value = value.to_ascii_lowercase();
+        if normalized_value.contains("url(") {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS value for {property} is unsafe"
+            )));
+        }
         if property == "position" && !matches!(normalized_value.as_str(), "relative" | "absolute") {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS position {value} is not allowed"
@@ -235,6 +253,73 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
         if property == "break-inside" && !matches!(normalized_value.as_str(), "avoid" | "auto") {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS break-inside {value} is not allowed"
+            )));
+        }
+        if property == "writing-mode"
+            && !matches!(
+                normalized_value.as_str(),
+                "horizontal-tb" | "vertical-rl" | "vertical-lr"
+            )
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS writing-mode {value} is not allowed"
+            )));
+        }
+        if property == "text-orientation"
+            && !matches!(normalized_value.as_str(), "mixed" | "upright" | "sideways")
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS text-orientation {value} is not allowed"
+            )));
+        }
+        if property == "flex-direction" && !matches!(normalized_value.as_str(), "row" | "column") {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS flex-direction {value} is not allowed"
+            )));
+        }
+        if property == "justify-content"
+            && !matches!(
+                normalized_value.as_str(),
+                "flex-start" | "center" | "flex-end" | "space-between" | "space-around"
+            )
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS justify-content {value} is not allowed"
+            )));
+        }
+        if property == "transform-origin"
+            && !matches!(
+                normalized_value.as_str(),
+                "center" | "top" | "bottom" | "left" | "right"
+            )
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS transform-origin {value} is not allowed"
+            )));
+        }
+        if property == "transform"
+            && !(normalized_value.starts_with("rotate(")
+                && normalized_value.ends_with("deg)")
+                && normalized_value[7..normalized_value.len() - 4]
+                    .parse::<f64>()
+                    .is_ok())
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS transform {value} is not allowed"
+            )));
+        }
+        if property == "background-image"
+            && !(normalized_value.starts_with("linear-gradient(")
+                && normalized_value.ends_with(')')
+                && normalized_value.matches('#').count() >= 2)
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS background-image {value} is not allowed"
+            )));
+        }
+        if property == "z-index" && value.parse::<i32>().is_err() {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS z-index {value} is not allowed"
             )));
         }
     }
@@ -272,11 +357,18 @@ mod tests {
             "table-layout:fixed;min-height:18pt;break-inside:avoid;border-top:1pt solid #123456;padding-left:5pt"
         )
         .is_ok());
+        assert!(validate_inline_style(
+            "z-index:7;transform:rotate(45deg);transform-origin:center;background-image:linear-gradient(90deg,#FF0000,#FFFF00);border-radius:12px;writing-mode:vertical-rl;text-orientation:mixed;flex-direction:column;justify-content:center"
+        )
+        .is_ok());
         assert!(validate_inline_style("position:fixed").is_err());
         assert!(validate_inline_style("overflow:scroll").is_err());
         assert!(validate_inline_style("table-layout:inherit").is_err());
         assert!(validate_inline_style("break-inside:page").is_err());
         assert!(validate_inline_style("color:expression(alert(1))").is_err());
         assert!(validate_inline_style("background-color:url(javascript:x)").is_err());
+        assert!(validate_inline_style("background-image:url(relative.png)").is_err());
+        assert!(validate_inline_style("transform:translate(10px)").is_err());
+        assert!(validate_inline_style("writing-mode:sideways-lr").is_err());
     }
 }

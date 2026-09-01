@@ -2,6 +2,8 @@
 
 本目录用于直接查看 OfficeCLI 的分片 HCD、稳定 `nodeId`、文本 patch、source-backed HTML 回写，以及纯 Rust HTML/HCD → DOCX/XLSX/PPTX/PDF 的实际效果。
 
+仓库内全部现存 DOCX 样例的批量 HCD 文件测试位于 [`docx-suite/`](docx-suite/README.md)。它会为每个文件生成源预览、HCD 预览、稳定 nodeId 对比、revision 0 无修改回写、nodeId patch 和 revision 1 DOCX 回写产物。
+
 ## 已提交内容
 
 - `source.html`：标题、段落、Unicode 中文、列表、表格、敏感文本和活动脚本输入。
