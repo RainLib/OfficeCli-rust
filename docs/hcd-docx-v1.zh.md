@@ -70,13 +70,15 @@ bundle/
 
 HCD v1 的 `capabilities.stylePatch=false`、`structurePatch=false`：样式和结构可在 HTML 中渲染，但前端不得提交样式/结构修改。当前可写闭环只接受正文 splice 和独立 annotation；这样可以保证不会把只读渲染能力误报为可编辑能力。
 
-XLSX sharedStrings 通过磁盘 offset/value store 解析，不构造全量字符串表；HTML 会表达 `cellXfs` 中可安全映射的直接字体、填充、边框、对齐，以及行高和列宽。常见内置/自定义 `numFmt` 的数字、日期、时间、百分比、货币、科学计数与分数，以及 1900/1904 日期系统已物化为显示文本；地区化、条件式和高级 token 继续以 warning 标记 best-effort。编辑后的单元格写成 inline string，公式节点只读。
+XLSX sharedStrings 通过磁盘 offset/value store 解析，不构造全量字符串表；HTML 会表达 `cellXfs` 中可安全映射的直接字体、填充、边框、对齐，以及行高和列宽。常见内置/自定义 `numFmt` 的数字、日期、时间、百分比、货币、科学计数与分数，以及 1900/1904 日期系统已物化为显示文本；地区化、条件式和高级 token 继续以 warning 标记 best-effort。编辑后的单元格写成 inline string，公式节点只读。worksheet DrawingML 图片会在媒体内容寻址完成后生成独立 `sheet` 图片层：图片使用稳定 `data-hcd-id`，记录 worksheet/drawing source part、picture source path、单元格 anchor 和有界 EMU 几何，并可继续参与无源 HCD→DOCX/XLSX/PPTX/PDF 的图片导出。由于 Excel 实际列宽/行高可能受样式和 DPI 影响，图片层中的绝对像素位置仍明确视为近似值。
 
 由于 `mergeCells` 通常位于 `sheetData` 之后，importer 会对每个 worksheet 做一次有界事件流预扫描，再进行正文流式输出；同一次预扫描还读取 `sheetView/pane`，只保留固定大小的视图状态并优先选择 `workbookViewId=0`。每个 worksheet chunk（包括空工作表）都会重复冻结/拆分窗格、RTL、网格线、行列标题、零值、公式显示标志、缩放和初始可见单元格元数据，便于前端独立虚拟化任意分片。按照 Office 实际语义，冻结状态的 `xSplit` 表示左侧可见列数，映射为冻结列；`ySplit` 表示顶部可见行数，映射为冻结行。`showFormulas` 只作为视图元数据保留，HCD 正文仍显示缓存单元格值，公式表达式保持只读。
 
 合并区域最多接受 1,000,000 个固定坐标范围，不构造 worksheet DOM。已物化锚点使用 `rowspan`/`colspan` 和 `data-hcd-merge`，跨多行的 merge row group 不会被普通分片边界切开；若该不可拆分 row group 超过 2 MiB 则返回 `NODE_TOO_LARGE`。worksheet chunk 会先于只读媒体资产发布。条件格式、图表和 drawing 仍在 fidelity warning 中明确标记为未完全物化。
 
 PPTX 按 `presentation.xml` relationship 顺序生成 slide，随后生成 notes；HTML 会按演示文稿尺寸建立画布，并表达普通文本形状的直接位置、大小、段落对齐和 run 字体/字号/颜色/强调。通过页面 relationship 引用的嵌入图片会复用内容寻址资产并表达直接位置和尺寸。
+
+DOCX、PPTX、XLSX 与 PDF 的文字 hover 和图片 visual node hover 使用独立开关：`hdoc render-html` 默认同时开启，可分别用 `--text-hitboxes off` 与 `--image-hitboxes off` 关闭；HTML body 公开 `data-hcd-text-hitboxes`、`data-hcd-image-hitboxes`，前端也可独立切换。图片节点统一提供稳定 `data-hcd-id`、`data-hcd-node-kind=image`、`data-hcd-source-part/path`、`data-hcd-editable=false` 和格式可提供的 geometry/anchor 元数据。同一源文件、documentId 与 importer 版本重跑时 ID 和 root hash 保持一致。这些 visual node 当前是结构标定，不进入仅面向 canonical text 的 `hcd/1` source-map，也不能使用 `text.splice`；图片内容/几何 patch 需要后续独立 schema。
 
 DrawingML 表格使用同一事件流解析器物化为 HTML table，不构造整页 DOM；会保留 graphic frame 位置/尺寸、`tblGrid` 列宽、行高、`gridSpan/rowSpan`、`hMerge/vMerge`、直接单元格填充、四边边框、内边距、垂直对齐和文本方向元数据。大表按安全 row group 渐进输出，每个 fragment 最多 128 行并重复 graphic-frame 几何和 `<colgroup>`，因此首个 `chunk_ready` 可早于 slide XML EOF。fragment 通过稳定的 `data-hcd-table-node-id`、`data-hcd-table-fragment`、`data-hcd-row-start/end`、`data-hcd-table-continuation` 和末片 `data-hcd-table-final` 拼接；source-map 仍保持原 `a:t` ordinal，不因分片改变节点 ID。
 

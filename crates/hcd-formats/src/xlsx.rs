@@ -23,6 +23,9 @@ const MAX_CONTROL_BYTES: u64 = 16 * 1024 * 1024;
 const ROWS_PER_WINDOW: usize = 128;
 const MAX_MERGED_RANGES: usize = 1_000_000;
 const MAX_FORMAT_CODE_BYTES: usize = 1_024;
+const MAX_DRAWING_IMAGES: usize = 100_000;
+const DEFAULT_COLUMN_WIDTH_EMU: i64 = 609_600;
+const DEFAULT_ROW_HEIGHT_EMU: i64 = 190_500;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +34,42 @@ struct AssetRecord {
     hash: String,
     href: String,
     byte_length: u64,
+}
+
+#[derive(Default)]
+struct XlsxDrawingAnchor {
+    kind: String,
+    from_col: Option<u32>,
+    from_row: Option<u32>,
+    from_col_offset: Option<i64>,
+    from_row_offset: Option<i64>,
+    to_col: Option<u32>,
+    to_row: Option<u32>,
+    to_col_offset: Option<i64>,
+    to_row_offset: Option<i64>,
+    x: Option<i64>,
+    y: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    picture_id: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    relationship_id: Option<String>,
+}
+
+struct XlsxDrawingPicture {
+    sheet_name: String,
+    sheet_part: String,
+    drawing_part: String,
+    ordinal: u64,
+    anchor: XlsxDrawingAnchor,
+    asset: AssetRecord,
+}
+
+#[derive(Clone, Copy)]
+enum DrawingMarker {
+    From,
+    To,
 }
 
 #[derive(Debug)]
@@ -692,7 +731,7 @@ fn render_xlsx_styles(
     archive: &mut StreamingOxmlArchive,
 ) -> Result<(String, XlsxStyleCatalog), HcdError> {
     let mut css = String::from(
-        ".hcd-grid{border-collapse:collapse}.hcd-grid td{border:1px solid #ddd;padding:.2em .35em}.hcd-grid span{white-space:pre-wrap}.hcd-sheet[data-hcd-show-grid-lines=\"false\"] .hcd-grid td{border-color:transparent}",
+        ".hcd-grid{border-collapse:collapse}.hcd-grid td{border:1px solid #ddd;padding:.2em .35em}.hcd-grid span{white-space:pre-wrap}.hcd-sheet[data-hcd-show-grid-lines=\"false\"] .hcd-grid td{border-color:transparent}.hcd-sheet-drawing-layer{position:relative;overflow:auto;background:repeating-linear-gradient(0deg,#fff 0,#fff 19px,#eef1f5 20px),repeating-linear-gradient(90deg,transparent 0,transparent 63px,#eef1f5 64px)}.hcd-sheet-picture{position:absolute;box-sizing:border-box;overflow:hidden}.hcd-sheet-picture img{display:block;width:100%;height:100%;object-fit:contain}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
     );
     if !archive.contains("xl/styles.xml") {
         return Ok((css, XlsxStyleCatalog::default()));
@@ -1905,7 +1944,7 @@ where
     writer.write_styles(&rendered_styles)?;
     let mut format_stats = XlsxFormatStats::default();
 
-    for sheet in workbook.sheets {
+    for sheet in &workbook.sheets {
         let WorksheetScan {
             mut merged_ranges,
             view,
@@ -1929,7 +1968,7 @@ where
                 parse_worksheet(
                     source,
                     &options.document_id,
-                    &sheet,
+                    sheet,
                     &mut shared_strings,
                     &mut merged_ranges,
                     &style_catalog,
@@ -1951,11 +1990,19 @@ where
         writer.root().join("assets/index.json"),
         serde_json::to_vec(&assets)?,
     )?;
+    let drawing_image_count = import_sheet_drawing_images(
+        &mut archive,
+        &workbook.sheets,
+        &assets,
+        &options.document_id,
+        &mut writer,
+        emit,
+    )?;
 
     let mut manifest = base_manifest(options, "xlsx", "grid", source_hash, source_size);
     manifest.warnings.push(FidelityWarning {
         code: "XLSX_ADVANCED_VISUALS_EXTERNAL".to_string(),
-        message: "HCD materializes worksheet view/frozen-pane metadata, merged ranges, direct cell styles, row/column dimensions and common numeric display formats; conditional formatting, charts and drawings remain authoritative in the immutable source".to_string(),
+        message: "HCD materializes worksheet view/frozen-pane metadata, merged ranges, direct cell styles, row/column dimensions, common numeric display formats and content-addressed worksheet pictures; conditional formatting, charts, shapes and unsupported drawing types remain authoritative in the immutable source".to_string(),
         node_id: None,
         source_part: Some("xl/styles.xml".to_string()),
     });
@@ -1978,6 +2025,9 @@ where
             "direct cell fonts, fills, borders, alignment, row height and column width"
                 .to_string(),
             "merged cell ranges as bounded HTML rowspans and colspans".to_string(),
+            format!(
+                "{drawing_image_count} worksheet pictures with stable visual node IDs, source anchors and bounded approximate drawing geometry"
+            ),
             "worksheet view metadata including frozen/split panes, RTL, grid/header/zero/formula flags, zoom and initial visible cells"
                 .to_string(),
             format!(
@@ -1987,7 +2037,7 @@ where
             "opaque workbook parts and media in the immutable source".to_string(),
         ],
         flattened: vec![
-            "locale-dependent, conditional and advanced number formats are best-effort; conditional formatting, charts and drawing layout are not fully materialized in HTML".to_string(),
+            "locale-dependent, conditional and advanced number formats are best-effort; conditional formatting, charts, shapes and exact Excel row/column drawing metrics are not fully materialized in HTML".to_string(),
             "showFormulas is preserved as view metadata, while HCD text continues to display cached cell values and formula expressions remain read-only"
                 .to_string(),
         ],
@@ -2037,6 +2087,547 @@ where
         });
     }
     Ok(assets)
+}
+
+fn import_sheet_drawing_images<F>(
+    archive: &mut StreamingOxmlArchive,
+    sheets: &[SheetPart],
+    assets: &[AssetRecord],
+    document_id: &str,
+    writer: &mut BundleWriter,
+    emit: &mut F,
+) -> Result<usize, HcdError>
+where
+    F: FnMut(&ImportEvent) -> Result<(), HcdError>,
+{
+    let assets_by_part: HashMap<String, AssetRecord> = assets
+        .iter()
+        .map(|asset| (asset.source_part.clone(), asset.clone()))
+        .collect();
+    let mut pictures = Vec::new();
+    for sheet in sheets {
+        let mut drawing_parts = worksheet_drawing_parts(archive, &sheet.part)?;
+        drawing_parts.sort();
+        drawing_parts.dedup();
+        for drawing_part in drawing_parts {
+            let relationships =
+                drawing_image_relationships(archive, &drawing_part, &assets_by_part)?;
+            if relationships.is_empty() || !archive.contains(&drawing_part) {
+                continue;
+            }
+            let remaining = MAX_DRAWING_IMAGES.saturating_sub(pictures.len());
+            if remaining == 0 {
+                return Err(HcdError::ResourceLimit(format!(
+                    "XLSX exceeds {MAX_DRAWING_IMAGES} worksheet pictures"
+                )));
+            }
+            let mut parsed = archive
+                .with_part(&drawing_part, |source| {
+                    parse_drawing_pictures(
+                        source,
+                        &sheet.name,
+                        &sheet.part,
+                        &drawing_part,
+                        &relationships,
+                        remaining,
+                    )
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                })
+                .map_err(package_error)?;
+            pictures.append(&mut parsed);
+        }
+    }
+
+    let mut sheet_picture_counts = HashMap::<String, usize>::new();
+    for picture in &pictures {
+        let identity = picture
+            .anchor
+            .picture_id
+            .clone()
+            .unwrap_or_else(|| picture.ordinal.to_string());
+        let node_id = stable_node_id(&[
+            document_id,
+            &picture.sheet_part,
+            &picture.drawing_part,
+            "picture",
+            &identity,
+        ]);
+        let chunk_id = stable_node_id(&[
+            document_id,
+            &picture.drawing_part,
+            "picture-chunk",
+            &identity,
+        ])
+        .replacen("n_", "c_", 1);
+        let (x, y, width, height) = drawing_geometry(&picture.anchor);
+        let source_path = picture
+            .anchor
+            .picture_id
+            .as_deref()
+            .map(|id| format!("/picture[@id={}]", escape_attribute(id)))
+            .unwrap_or_else(|| format!("/picture[{}]", picture.ordinal));
+        let from_cell = drawing_cell(picture.anchor.from_col, picture.anchor.from_row);
+        let to_cell = drawing_cell(picture.anchor.to_col, picture.anchor.to_row);
+        let mut attributes = format!(
+            " data-hcd-id=\"{node_id}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\" data-hcd-drawing-part=\"{}\" data-hcd-anchor-kind=\"{}\" data-hcd-x-emu=\"{x}\" data-hcd-y-emu=\"{y}\" data-hcd-width-emu=\"{width}\" data-hcd-height-emu=\"{height}\"",
+            escape_attribute(&picture.sheet_part),
+            escape_attribute(&picture.drawing_part),
+            escape_attribute(&picture.anchor.kind),
+        );
+        push_data_attribute(
+            &mut attributes,
+            "data-hcd-anchor-from",
+            from_cell.as_deref(),
+        );
+        push_data_attribute(&mut attributes, "data-hcd-anchor-to", to_cell.as_deref());
+        push_data_attribute(
+            &mut attributes,
+            "data-hcd-picture-id",
+            picture.anchor.picture_id.as_deref(),
+        );
+        push_data_attribute(
+            &mut attributes,
+            "data-hcd-picture-name",
+            picture.anchor.name.as_deref(),
+        );
+        let alt = picture
+            .anchor
+            .description
+            .as_deref()
+            .or(picture.anchor.name.as_deref())
+            .unwrap_or("");
+        let canvas_width = x.saturating_add(width).max(DEFAULT_COLUMN_WIDTH_EMU);
+        let canvas_height = y.saturating_add(height).max(DEFAULT_ROW_HEIGHT_EMU);
+        let html = format!(
+            "<section class=\"hcd-sheet-drawing-layer\" data-hcd-sheet=\"{}\" style=\"width:{:.2}px;height:{:.2}px\"><div class=\"hcd-sheet-picture\"{attributes} style=\"left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px\"><img src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\" alt=\"{}\"/></div></section>",
+            escape_attribute(&picture.sheet_name),
+            emu_to_px(canvas_width),
+            emu_to_px(canvas_height),
+            emu_to_px(x),
+            emu_to_px(y),
+            emu_to_px(width),
+            emu_to_px(height),
+            picture.asset.hash,
+            escape_attribute(&picture.asset.href),
+            escape_attribute(alt),
+        );
+        let count = sheet_picture_counts
+            .entry(picture.sheet_part.clone())
+            .or_default();
+        let descriptor = writer.write_chunk(
+            chunk_id,
+            "sheet".to_string(),
+            html,
+            ChunkSourceMap {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                chunk_id: stable_node_id(&[
+                    document_id,
+                    &picture.drawing_part,
+                    "picture-chunk",
+                    &identity,
+                ])
+                .replacen("n_", "c_", 1),
+                entries: Vec::new(),
+            },
+            1,
+            *count > 0,
+        )?;
+        *count += 1;
+        emit(&ImportEvent::ChunkReady { descriptor })?;
+    }
+    Ok(pictures.len())
+}
+
+fn worksheet_drawing_parts(
+    archive: &mut StreamingOxmlArchive,
+    worksheet_part: &str,
+) -> Result<Vec<String>, HcdError> {
+    let relationships_part = relationships_part_path(worksheet_part)?;
+    if !archive.contains(&relationships_part) {
+        return Ok(Vec::new());
+    }
+    let xml = archive
+        .read_control_part(&relationships_part, MAX_CONTROL_BYTES)
+        .map_err(package_error)?;
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut parts = Vec::new();
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("worksheet relationships XML: {error}"))
+        })?;
+        budget.observe(&event, &relationships_part)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let drawing =
+                    attribute(element, "Type").is_some_and(|kind| kind.ends_with("/drawing"));
+                let external = attribute(element, "TargetMode")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                if drawing && !external {
+                    if let Some(target) = attribute(element, "Target") {
+                        parts.push(resolve_part(worksheet_part, &target)?);
+                    }
+                }
+            }
+            Event::Eof => {
+                budget.finish(&relationships_part)?;
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(parts)
+}
+
+fn drawing_image_relationships(
+    archive: &mut StreamingOxmlArchive,
+    drawing_part: &str,
+    assets: &HashMap<String, AssetRecord>,
+) -> Result<HashMap<String, AssetRecord>, HcdError> {
+    let relationships_part = relationships_part_path(drawing_part)?;
+    if !archive.contains(&relationships_part) {
+        return Ok(HashMap::new());
+    }
+    let xml = archive
+        .read_control_part(&relationships_part, MAX_CONTROL_BYTES)
+        .map_err(package_error)?;
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut output = HashMap::new();
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("drawing relationships XML: {error}"))
+        })?;
+        budget.observe(&event, &relationships_part)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let image = attribute(element, "Type").is_some_and(|kind| kind.ends_with("/image"));
+                let external = attribute(element, "TargetMode")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                if image && !external {
+                    if let (Some(id), Some(target)) =
+                        (attribute(element, "Id"), attribute(element, "Target"))
+                    {
+                        let target = resolve_part(drawing_part, &target)?;
+                        if let Some(asset) = assets.get(&target) {
+                            output.insert(id, asset.clone());
+                        }
+                    }
+                }
+            }
+            Event::Eof => {
+                budget.finish(&relationships_part)?;
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(output)
+}
+
+fn parse_drawing_pictures(
+    source: &mut dyn Read,
+    sheet_name: &str,
+    sheet_part: &str,
+    drawing_part: &str,
+    relationships: &HashMap<String, AssetRecord>,
+    maximum: usize,
+) -> Result<Vec<XlsxDrawingPicture>, HcdError> {
+    let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::with_capacity(64 * 1024);
+    let mut pictures = Vec::new();
+    let mut anchor: Option<XlsxDrawingAnchor> = None;
+    let mut marker = None;
+    let mut capture: Option<(&'static str, String)> = None;
+    let mut in_picture = false;
+    let mut ordinal = 0u64;
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("drawing {drawing_part} XML: {error}"))
+        })?;
+        budget.observe(&event, drawing_part)?;
+        match event {
+            Event::Start(ref element) => {
+                let element_name = element.name();
+                let name = local_name(element_name.as_ref());
+                match name {
+                    "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
+                        if anchor.is_some() {
+                            return Err(HcdError::InvalidBundle(format!(
+                                "drawing {drawing_part} contains nested anchors"
+                            )));
+                        }
+                        anchor = Some(XlsxDrawingAnchor {
+                            kind: match name {
+                                "twoCellAnchor" => "two-cell",
+                                "oneCellAnchor" => "one-cell",
+                                _ => "absolute",
+                            }
+                            .to_string(),
+                            ..XlsxDrawingAnchor::default()
+                        });
+                    }
+                    "from" if anchor.is_some() => marker = Some(DrawingMarker::From),
+                    "to" if anchor.is_some() => marker = Some(DrawingMarker::To),
+                    "col" | "row" | "colOff" | "rowOff" if marker.is_some() => {
+                        capture = Some((
+                            match name {
+                                "col" => "col",
+                                "row" => "row",
+                                "colOff" => "colOff",
+                                _ => "rowOff",
+                            },
+                            String::new(),
+                        ));
+                    }
+                    "pic" if anchor.is_some() => in_picture = true,
+                    "cNvPr" if in_picture => capture_picture_metadata(element, anchor.as_mut()),
+                    "blip" if in_picture => capture_picture_blip(element, anchor.as_mut()),
+                    "pos" if anchor.is_some() => capture_anchor_position(element, anchor.as_mut()),
+                    "ext" if anchor.is_some() => capture_anchor_extent(element, anchor.as_mut()),
+                    _ => {}
+                }
+            }
+            Event::Empty(ref element) => {
+                let element_name = element.name();
+                let name = local_name(element_name.as_ref());
+                match name {
+                    "cNvPr" if in_picture => capture_picture_metadata(element, anchor.as_mut()),
+                    "blip" if in_picture => capture_picture_blip(element, anchor.as_mut()),
+                    "pos" if anchor.is_some() => capture_anchor_position(element, anchor.as_mut()),
+                    "ext" if anchor.is_some() => capture_anchor_extent(element, anchor.as_mut()),
+                    _ => {}
+                }
+            }
+            Event::Text(ref text) => {
+                if let Some((_, value)) = &mut capture {
+                    let decoded = text.unescape().map_err(|error| {
+                        HcdError::InvalidBundle(format!(
+                            "drawing {drawing_part} anchor text: {error}"
+                        ))
+                    })?;
+                    value.push_str(&decoded);
+                    if value.len() > 64 {
+                        return Err(HcdError::ResourceLimit(format!(
+                            "drawing {drawing_part} anchor value exceeds 64 bytes"
+                        )));
+                    }
+                }
+            }
+            Event::End(ref element) => {
+                let element_name = element.name();
+                let name = local_name(element_name.as_ref());
+                match name {
+                    "col" | "row" | "colOff" | "rowOff" => {
+                        if let Some((field, value)) = capture.take() {
+                            apply_anchor_marker(anchor.as_mut(), marker, field, &value);
+                        }
+                    }
+                    "from" | "to" => marker = None,
+                    "pic" => in_picture = false,
+                    "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
+                        let finished = anchor.take().ok_or_else(|| {
+                            HcdError::InvalidBundle(format!(
+                                "drawing {drawing_part} closes an anchor without opening it"
+                            ))
+                        })?;
+                        if let Some(asset) = finished
+                            .relationship_id
+                            .as_ref()
+                            .and_then(|id| relationships.get(id))
+                        {
+                            if pictures.len() >= maximum {
+                                return Err(HcdError::ResourceLimit(format!(
+                                    "XLSX exceeds {MAX_DRAWING_IMAGES} worksheet pictures"
+                                )));
+                            }
+                            ordinal += 1;
+                            pictures.push(XlsxDrawingPicture {
+                                sheet_name: sheet_name.to_string(),
+                                sheet_part: sheet_part.to_string(),
+                                drawing_part: drawing_part.to_string(),
+                                ordinal,
+                                anchor: finished,
+                                asset: asset.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Event::Eof => {
+                budget.finish(drawing_part)?;
+                if anchor.is_some() || capture.is_some() || in_picture {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "drawing {drawing_part} ends inside an anchor"
+                    )));
+                }
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(pictures)
+}
+
+fn capture_picture_metadata(element: &BytesStart<'_>, anchor: Option<&mut XlsxDrawingAnchor>) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    anchor.picture_id = attribute(element, "id");
+    anchor.name = attribute(element, "name");
+    anchor.description = attribute(element, "descr");
+}
+
+fn capture_picture_blip(element: &BytesStart<'_>, anchor: Option<&mut XlsxDrawingAnchor>) {
+    if let Some(anchor) = anchor {
+        anchor.relationship_id = attribute(element, "embed");
+    }
+}
+
+fn capture_anchor_position(element: &BytesStart<'_>, anchor: Option<&mut XlsxDrawingAnchor>) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    anchor.x = bounded_drawing_i64(attribute(element, "x"));
+    anchor.y = bounded_drawing_i64(attribute(element, "y"));
+}
+
+fn capture_anchor_extent(element: &BytesStart<'_>, anchor: Option<&mut XlsxDrawingAnchor>) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    if anchor.width.is_none() {
+        anchor.width = bounded_drawing_i64(attribute(element, "cx")).filter(|value| *value > 0);
+    }
+    if anchor.height.is_none() {
+        anchor.height = bounded_drawing_i64(attribute(element, "cy")).filter(|value| *value > 0);
+    }
+}
+
+fn apply_anchor_marker(
+    anchor: Option<&mut XlsxDrawingAnchor>,
+    marker: Option<DrawingMarker>,
+    field: &str,
+    value: &str,
+) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    let coordinate = value.trim().parse::<i64>().ok();
+    match (marker, field) {
+        (Some(DrawingMarker::From), "col") => {
+            anchor.from_col = coordinate.and_then(|value| u32::try_from(value).ok())
+        }
+        (Some(DrawingMarker::From), "row") => {
+            anchor.from_row = coordinate.and_then(|value| u32::try_from(value).ok())
+        }
+        (Some(DrawingMarker::From), "colOff") => {
+            anchor.from_col_offset = coordinate.and_then(bounded_drawing_coordinate)
+        }
+        (Some(DrawingMarker::From), "rowOff") => {
+            anchor.from_row_offset = coordinate.and_then(bounded_drawing_coordinate)
+        }
+        (Some(DrawingMarker::To), "col") => {
+            anchor.to_col = coordinate.and_then(|value| u32::try_from(value).ok())
+        }
+        (Some(DrawingMarker::To), "row") => {
+            anchor.to_row = coordinate.and_then(|value| u32::try_from(value).ok())
+        }
+        (Some(DrawingMarker::To), "colOff") => {
+            anchor.to_col_offset = coordinate.and_then(bounded_drawing_coordinate)
+        }
+        (Some(DrawingMarker::To), "rowOff") => {
+            anchor.to_row_offset = coordinate.and_then(bounded_drawing_coordinate)
+        }
+        _ => {}
+    }
+}
+
+fn bounded_drawing_i64(value: Option<String>) -> Option<i64> {
+    value
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(bounded_drawing_coordinate)
+}
+
+fn bounded_drawing_coordinate(value: i64) -> Option<i64> {
+    (-100_000_000..=100_000_000)
+        .contains(&value)
+        .then_some(value)
+}
+
+fn drawing_geometry(anchor: &XlsxDrawingAnchor) -> (i64, i64, i64, i64) {
+    let from_x = anchor.x.unwrap_or_else(|| {
+        i64::from(anchor.from_col.unwrap_or(0))
+            .saturating_mul(DEFAULT_COLUMN_WIDTH_EMU)
+            .saturating_add(anchor.from_col_offset.unwrap_or(0))
+    });
+    let from_y = anchor.y.unwrap_or_else(|| {
+        i64::from(anchor.from_row.unwrap_or(0))
+            .saturating_mul(DEFAULT_ROW_HEIGHT_EMU)
+            .saturating_add(anchor.from_row_offset.unwrap_or(0))
+    });
+    let to_x = anchor.to_col.map(|column| {
+        i64::from(column)
+            .saturating_mul(DEFAULT_COLUMN_WIDTH_EMU)
+            .saturating_add(anchor.to_col_offset.unwrap_or(0))
+    });
+    let to_y = anchor.to_row.map(|row| {
+        i64::from(row)
+            .saturating_mul(DEFAULT_ROW_HEIGHT_EMU)
+            .saturating_add(anchor.to_row_offset.unwrap_or(0))
+    });
+    let width = anchor
+        .width
+        .or_else(|| to_x.map(|value| value.saturating_sub(from_x)))
+        .unwrap_or(3_657_600)
+        .clamp(1, 100_000_000);
+    let height = anchor
+        .height
+        .or_else(|| to_y.map(|value| value.saturating_sub(from_y)))
+        .unwrap_or(2_743_200)
+        .clamp(1, 100_000_000);
+    (
+        from_x.clamp(0, 100_000_000),
+        from_y.clamp(0, 100_000_000),
+        width,
+        height,
+    )
+}
+
+fn drawing_cell(column: Option<u32>, row: Option<u32>) -> Option<String> {
+    let column = column?.checked_add(1)?;
+    let row = row?.checked_add(1)?;
+    (column <= 16_384 && row <= 1_048_576).then(|| format!("{}{row}", column_name(column)))
+}
+
+fn relationships_part_path(source_part: &str) -> Result<String, HcdError> {
+    let source = Path::new(source_part);
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| HcdError::InvalidBundle(format!("invalid OOXML part path {source_part}")))?;
+    Ok(source
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("_rels")
+        .join(format!("{}.rels", file_name.to_string_lossy()))
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
+fn emu_to_px(value: i64) -> f64 {
+    value.clamp(0, 100_000_000) as f64 * 96.0 / 914_400.0
 }
 
 fn scan_worksheet_metadata(source: &mut dyn Read, part: &str) -> Result<WorksheetScan, HcdError> {

@@ -323,7 +323,7 @@ where
     let (slide_width_emu, slide_height_emu) = presentation_size(&mut archive)?;
     let mut writer = BundleWriter::create(output)?;
     writer.write_styles(
-        ".hcd-slide{display:block;overflow:hidden;background:#fff}.hcd-slide-shape{box-sizing:border-box;white-space:pre-wrap}.hcd-slide-picture{box-sizing:border-box;overflow:hidden}.hcd-slide-picture img{display:block;width:100%;height:100%;object-fit:contain}.hcd-slide-table-frame{box-sizing:border-box;overflow:hidden}.hcd-ppt-table{border-collapse:collapse}.hcd-ppt-table td{box-sizing:border-box;overflow:hidden;vertical-align:top}.hcd-slide-text{white-space:pre-wrap;margin:0}.hcd-ppt-run{white-space:pre-wrap}.hcd-empty-slide{min-height:10em}",
+        ".hcd-slide{display:block;overflow:hidden;background:#fff}.hcd-slide-shape{box-sizing:border-box;white-space:pre-wrap}.hcd-slide-picture{box-sizing:border-box;overflow:hidden}.hcd-slide-picture img{display:block;width:100%;height:100%;object-fit:contain}.hcd-slide-table-frame{box-sizing:border-box;overflow:hidden}.hcd-ppt-table{border-collapse:collapse}.hcd-ppt-table td{box-sizing:border-box;overflow:hidden;vertical-align:top}.hcd-slide-text{white-space:pre-wrap;margin:0}.hcd-ppt-run{white-space:pre-wrap}.hcd-empty-slide{min-height:10em}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-slide-picture[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-slide-picture[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
     )?;
     let assets = import_assets(&mut archive, &writer, emit)?;
     let asset_records: HashMap<String, AssetRecord> = assets
@@ -1404,7 +1404,15 @@ fn finish_picture(
         .clone()
         .unwrap_or_else(|| picture.ordinal.to_string());
     let node_id = stable_node_id(&[document_id, part, "picture", &identity]);
-    let mut attributes = format!(" data-hcd-id=\"{node_id}\"");
+    let source_path = picture
+        .source_id
+        .as_deref()
+        .map(|source_id| format!("/picture[@id={}]", escape_attribute(source_id)))
+        .unwrap_or_else(|| format!("/picture[{}]", picture.ordinal));
+    let mut attributes = format!(
+        " data-hcd-id=\"{node_id}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\"",
+        escape_attribute(part)
+    );
     if let Some(source_id) = &picture.source_id {
         attributes.push_str(&format!(
             " data-hcd-picture-id=\"{}\"",
@@ -2465,8 +2473,15 @@ mod tests {
         assert!(html.contains("font-family:'Arial'"));
         assert!(html.contains("data-hcd-picture-id=\"4\""));
         assert!(html.contains("data-hcd-picture-name=\"Picture &amp; One\""));
+        assert!(html.contains("data-hcd-node-kind=\"image\""));
+        assert!(html.contains("data-hcd-editable=\"false\""));
+        assert!(html.contains("data-hcd-source-part=\"ppt/slides/slide2.xml\""));
+        assert!(html.contains("data-hcd-source-path=\"/picture[@id=4]\""));
         assert!(html.contains("<img src=\"asset://sha256/"));
         assert!(html.contains("alt=\"Picture &amp; One\""));
+        let styles = std::fs::read_to_string(bundle_path.join("styles.css")).unwrap();
+        assert!(styles.contains("data-hcd-image-hitboxes"));
+        assert!(styles.contains("data-hcd-text-hitboxes"));
     }
 
     #[test]

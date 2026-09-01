@@ -120,6 +120,29 @@ fn office_zip_text_parts(path: &Path, prefix: &str, suffix: &str) -> Vec<String>
     parts.into_iter().map(|(_, text)| text).collect()
 }
 
+fn bundle_html(bundle: &Path) -> String {
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    let mut output = String::new();
+    for page in 0..manifest["indexPageCount"].as_u64().unwrap() {
+        let index: Value = serde_json::from_slice(
+            &std::fs::read(
+                bundle
+                    .join(manifest["indexPrefix"].as_str().unwrap())
+                    .join(format!("{page:06}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for chunk in index["chunks"].as_array().unwrap() {
+            output.push_str(
+                &std::fs::read_to_string(bundle.join(chunk["htmlHref"].as_str().unwrap())).unwrap(),
+            );
+        }
+    }
+    output
+}
+
 fn pdf_contains_image_xobject(path: &Path) -> bool {
     let document = lopdf::Document::load(path).unwrap();
     document.objects.values().any(|object| {
@@ -302,14 +325,8 @@ fn xlsx_hcd_media_is_content_addressed() {
     let source = temp.path().join("image.xlsx");
     let image = temp.path().join("pixel.png");
     let bundle = temp.path().join("bundle");
-    std::fs::write(
-        &image,
-        [
-            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, b'I', b'E', b'N', b'D',
-            0xae, 0x42, 0x60, 0x82,
-        ],
-    )
-    .unwrap();
+    let repeated_bundle = temp.path().join("repeated-bundle");
+    std::fs::write(&image, ONE_PIXEL_PNG).unwrap();
     officecli()
         .args(["create", source.to_string_lossy().as_ref()])
         .assert()
@@ -318,13 +335,18 @@ fn xlsx_hcd_media_is_content_addressed() {
         .args([
             "add",
             source.to_string_lossy().as_ref(),
-            "--parent",
             "/Sheet1",
-            "--type-name",
-            "cell",
-            "--properties",
-            "ref=B2",
-            &format!("image={}", image.display()),
+            "--type",
+            "image",
+            "--prop",
+            &format!("file={}", image.display()),
+            "--prop",
+            "anchor=B2",
+            "--prop",
+            "width=2in",
+            "--prop",
+            "height=1in",
+            "--prop",
             "alt=Sensitive image",
         ])
         .assert()
@@ -340,7 +362,46 @@ fn xlsx_hcd_media_is_content_addressed() {
         .unwrap()
         .starts_with("xl/media/"));
     assert!(bundle.join(assets[0]["href"].as_str().unwrap()).is_file());
-    assert_eq!(assets[0]["byteLength"], 20);
+    assert_eq!(assets[0]["byteLength"], ONE_PIXEL_PNG.len());
+    let html = bundle_html(&bundle);
+    assert!(html.contains("class=\"hcd-sheet-picture\""));
+    assert!(html.contains("data-hcd-node-kind=\"image\""));
+    assert!(html.contains("data-hcd-editable=\"false\""));
+    assert!(html.contains("data-hcd-source-part=\"xl/worksheets/sheet1.xml\""));
+    assert!(html.contains("data-hcd-anchor-from=\"B2\""));
+    assert!(html.contains("data-hcd-width-emu=\"1828800\""));
+    assert!(html.contains("data-hcd-height-emu=\"914400\""));
+    assert!(html.contains("<img src=\"asset://sha256/"));
+    let styles = std::fs::read_to_string(bundle.join("styles.css")).unwrap();
+    assert!(styles.contains("data-hcd-image-hitboxes"));
+    assert!(styles.contains("data-hcd-text-hitboxes"));
+
+    import_and_extract(&source, &repeated_bundle, "xlsx-image-doc");
+    assert_eq!(html, bundle_html(&repeated_bundle));
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    let repeated_manifest: Value =
+        serde_json::from_slice(&std::fs::read(repeated_bundle.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["rootHash"], repeated_manifest["rootHash"]);
+
+    let docx = temp.path().join("from-xlsx.docx");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            docx.to_string_lossy().as_ref(),
+            "--to",
+            "docx",
+            "--revision",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success();
+    assert!(office_zip_contains_png(&docx, "word/media/"));
 }
 
 #[test]

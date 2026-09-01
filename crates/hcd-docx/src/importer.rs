@@ -3032,6 +3032,7 @@ where
     let mut cell_borders_depth = None;
     let mut cell_margins_depth = None;
     let mut text_ordinal = 0u64;
+    let mut image_ordinal = 0u64;
     let mut paragraph_ordinal = 0u64;
     let mut table_ordinal = 0u64;
     let mut table_depth = 0usize;
@@ -3258,8 +3259,12 @@ where
                         }
                         "blip" => {
                             ensure_run_open(paragraphs.last_mut(), runs.last_mut());
+                            image_ordinal += 1;
                             append_image(
                                 start,
+                                document_id,
+                                part,
+                                image_ordinal,
                                 relationships,
                                 drawings.last(),
                                 paragraphs.last_mut(),
@@ -3452,7 +3457,16 @@ where
                     }
                     "blip" => {
                         ensure_run_open(paragraphs.last_mut(), runs.last_mut());
-                        append_image(empty, relationships, drawings.last(), paragraphs.last_mut());
+                        image_ordinal += 1;
+                        append_image(
+                            empty,
+                            document_id,
+                            part,
+                            image_ordinal,
+                            relationships,
+                            drawings.last(),
+                            paragraphs.last_mut(),
+                        );
                     }
                     _ => {}
                 }
@@ -5150,6 +5164,9 @@ fn take_table_fragment(table: &mut TableBuilder) -> RenderedBlock {
 
 fn append_image(
     element: &BytesStart<'_>,
+    document_id: &str,
+    part: &str,
+    image_ordinal: u64,
     relationships: &PartRelationships,
     drawing: Option<&DrawingBuilder>,
     paragraph: Option<&mut ParagraphBuilder>,
@@ -5161,6 +5178,11 @@ fn append_image(
         return;
     };
     if let Some(asset) = relationships.assets.get(&relationship_id) {
+        let source_identity = drawing
+            .and_then(|drawing| drawing.drawing_id)
+            .map(|drawing_id| format!("drawing-{drawing_id}"))
+            .unwrap_or_else(|| format!("image-{image_ordinal}-{relationship_id}"));
+        let node_id = stable_node_id(&[document_id, part, "image", &source_identity]);
         let mut classes = vec!["hcd-drawing"];
         if let Some(layout) = drawing.and_then(|drawing| drawing.layout) {
             classes.push(match layout {
@@ -5172,8 +5194,11 @@ fn append_image(
             classes.push(wrap_class);
         }
         let mut attributes = format!(
-            " class=\"{}\" src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\"",
+            " class=\"{}\" data-hcd-id=\"{}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"/drawing[{}]\" src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\"",
             classes.join(" "),
+            escape_attribute(&node_id),
+            escape_attribute(part),
+            image_ordinal,
             asset.hash,
             escape_attribute(&asset.href)
         );
@@ -5586,7 +5611,7 @@ fn escape_attribute(text: &str) -> String {
 }
 
 fn default_styles() -> &'static str {
-    r#"article,.hcd-chunk{display:block}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{border:1px solid #d9d9d9;padding:.25em .4em;vertical-align:top}.hcd-textbox{border:1px dashed #aaa;padding:.35em;margin:.35em 0}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}"#
+    r#"article,.hcd-chunk{display:block}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{border:1px solid #d9d9d9;padding:.25em .4em;vertical-align:top}.hcd-textbox{border:1px dashed #aaa;padding:.35em;margin:.35em 0}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
 }
 
 #[cfg(test)]
@@ -5991,11 +6016,18 @@ mod tests {
         assert!(html.contains("data-hcd-wrap=\"square\""));
         assert!(html.contains("data-hcd-wrap-side=\"right\""));
         assert!(html.contains("data-hcd-drawing-id=\"42\""));
+        assert!(html.contains("data-hcd-node-kind=\"image\""));
+        assert!(html.contains("data-hcd-editable=\"false\""));
+        assert!(html.contains("data-hcd-source-part=\"word/document.xml\""));
+        assert!(html.contains("data-hcd-source-path=\"/drawing[1]\""));
         assert!(html.contains("data-hcd-behind-document=\"false\""));
         assert!(html.contains("data-hcd-layout-in-cell=\"true\""));
         assert!(html.contains("data-hcd-allow-overlap=\"false\""));
         assert!(html.contains("class=\"hcd-drawing hcd-drawing-anchor hcd-drawing-wrap-right\""));
         assert!(html.contains("position:relative;left:96.00px;top:-48.00px"));
+        let styles = std::fs::read_to_string(root.join("styles.css")).unwrap();
+        assert!(styles.contains("data-hcd-image-hitboxes"));
+        assert!(styles.contains("data-hcd-text-hitboxes"));
     }
 
     #[test]

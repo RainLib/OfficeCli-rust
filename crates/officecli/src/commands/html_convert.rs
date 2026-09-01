@@ -635,9 +635,12 @@ impl HtmlParser {
                     .attributes
                     .get("class")
                     .is_some_and(|classes| {
-                        classes
-                            .split_ascii_whitespace()
-                            .any(|class| class == "hcd-slide-picture")
+                        classes.split_ascii_whitespace().any(|class| {
+                            matches!(
+                                class,
+                                "hcd-slide-picture" | "hcd-sheet-picture" | "hcd-drawing"
+                            )
+                        })
                     })
                     .then(|| image_geometry(&tag.attributes));
                 self.image_geometry_stack.push(geometry);
@@ -2300,6 +2303,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn xlsx_drawing_picture_geometry_is_available_to_semantic_office_export() {
+        let document = parse_html(
+            r#"<section class="hcd-sheet-drawing-layer"><div class="hcd-sheet-picture" data-hcd-id="n_0123456789abcdef0123456789abcdef" data-hcd-x-emu="609600" data-hcd-y-emu="190500" data-hcd-width-emu="1828800" data-hcd-height-emu="914400"><img src="asset://sha256/abc" alt="Sheet picture"/></div></section>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            document.blocks,
+            vec![HtmlBlock::Image {
+                source: "asset://sha256/abc".to_string(),
+                alt: "Sheet picture".to_string(),
+                geometry: ImageGeometry {
+                    x_emu: Some(609_600),
+                    y_emu: Some(190_500),
+                    width_emu: Some(1_828_800),
+                    height_emu: Some(914_400),
+                },
+            }]
+        );
     }
 
     #[test]
