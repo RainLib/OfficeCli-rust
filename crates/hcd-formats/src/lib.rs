@@ -1,6 +1,7 @@
-//! Streaming/source-backed HCD adapters for Office, PDF, HTML and plain text.
+//! Streaming/source-backed HCD adapters for Office, PDF, HTML, Markdown and plain text.
 
 mod common;
+mod mermaid;
 mod pdf;
 mod pptx;
 mod textual;
@@ -10,6 +11,12 @@ use hcd_core::{HcdError, HcdManifest, ImportEvent};
 use std::path::Path;
 
 pub use common::{ExportOptions, ImportOptions};
+
+/// Expand presentation-only Markdown features without changing canonical HCD.
+/// The transform is bounded to one chunk and safe to call after every revision.
+pub fn enhance_presentation_fragment(html: &str) -> Result<String, HcdError> {
+    mermaid::enhance_fragment(html)
+}
 
 pub fn import_document<F>(
     source: impl AsRef<Path>,
@@ -32,6 +39,7 @@ where
         "pptx" => pptx::import_pptx(source, output.as_ref(), options, emit),
         "pdf" => pdf::import_pdf(source, output.as_ref(), options, emit),
         "html" | "htm" => textual::import_html(source, output.as_ref(), options, emit),
+        "md" | "markdown" => textual::import_markdown(source, output.as_ref(), options, emit),
         "txt" => textual::import_text(source, output.as_ref(), options, emit),
         extension => Err(HcdError::Unsupported(format!(
             "HCD import does not support .{extension}"
@@ -61,6 +69,7 @@ pub fn export_document(
         "pptx" => pptx::export_pptx(&opened, source.as_ref(), target.as_ref(), options),
         "pdf" => pdf::export_pdf(&opened, source.as_ref(), target.as_ref(), options),
         "html" => textual::export_html(&opened, source.as_ref(), target.as_ref(), options),
+        "md" => textual::export_markdown(&opened, source.as_ref(), target.as_ref(), options),
         "txt" => textual::export_text(&opened, source.as_ref(), target.as_ref(), options),
         format => Err(HcdError::Unsupported(format!(
             "HCD export does not support source format {format}"

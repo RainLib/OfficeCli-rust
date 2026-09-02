@@ -98,6 +98,24 @@ pub struct FilledRect {
     pub color: PdfColor,
 }
 
+#[derive(Debug, Clone)]
+pub struct PdfVectorRect {
+    pub bbox: BBox,
+    pub fill_color: Option<PdfColor>,
+    pub stroke_color: Option<PdfColor>,
+    pub stroke_width: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PdfVectorLine {
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+    pub color: PdfColor,
+    pub width: f32,
+}
+
 /// Style properties extracted from PDF operators for a text block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TextStyle {
@@ -218,6 +236,10 @@ pub struct ParsedContentStream {
     pub image_blocks: Vec<PdfImageBlock>,
     /// Maps XObject name -> Base64 Data URI string
     pub image_map: HashMap<String, String>,
+    /// Bounded vector rectangles retained for faithful HTML preview.
+    pub vector_rects: Vec<PdfVectorRect>,
+    /// Bounded vector line segments retained for faithful HTML preview.
+    pub vector_lines: Vec<PdfVectorLine>,
 }
 
 /// Estimate text width using font metrics.
@@ -1332,6 +1354,8 @@ struct TextState {
     horizontal_scale: f32,
     rise: f32,
     fill_color: Option<PdfColor>,
+    stroke_color: Option<PdfColor>,
+    line_width: f32,
     in_bt: bool,
     bt_start_line: usize,
     tm_set: bool,
@@ -1346,9 +1370,19 @@ struct TextState {
     ctm_d: f32,
     ctm_e: f32,
     ctm_f: f32,
-    ctm_stack: Vec<[f32; 6]>,
+    graphics_stack: Vec<SavedGraphicsState>,
     filled_rects: Vec<FilledRect>,
     last_rect: Option<(f32, f32, f32, f32)>,
+    path_current: Option<(f32, f32)>,
+    path_segments: Vec<(f32, f32, f32, f32)>,
+}
+
+#[derive(Clone)]
+struct SavedGraphicsState {
+    ctm: [f32; 6],
+    fill_color: Option<PdfColor>,
+    stroke_color: Option<PdfColor>,
+    line_width: f32,
 }
 
 impl Default for TextState {
@@ -1365,6 +1399,8 @@ impl Default for TextState {
             horizontal_scale: 1.0,
             rise: 0.0,
             fill_color: None,
+            stroke_color: None,
+            line_width: 1.0,
             in_bt: false,
             bt_start_line: 0,
             tm_set: false,
@@ -1378,9 +1414,11 @@ impl Default for TextState {
             ctm_d: 1.0,
             ctm_e: 0.0,
             ctm_f: 0.0,
-            ctm_stack: Vec::new(),
+            graphics_stack: Vec::new(),
             filled_rects: Vec::new(),
             last_rect: None,
+            path_current: None,
+            path_segments: Vec::new(),
         }
     }
 }
@@ -1406,11 +1444,20 @@ fn is_pdf_operator(token: &str) -> bool {
             | "rg"
             | "g"
             | "k"
+            | "RG"
+            | "G"
+            | "K"
+            | "w"
             | "q"
             | "Q"
             | "cm"
             | "Do"
             | "re"
+            | "m"
+            | "l"
+            | "S"
+            | "s"
+            | "n"
             | "f"
             | "F"
             | "f*"
@@ -1571,7 +1618,7 @@ fn add_or_merge_text_block(
     state.cursor_x += width;
 }
 
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
     let mut i = 0;
@@ -2364,6 +2411,8 @@ fn parse_page_content_stream_inner(
     let mut state = TextState::default();
     let mut text_blocks = Vec::new();
     let mut image_blocks = Vec::new();
+    let mut vector_rects = Vec::new();
+    let mut vector_lines = Vec::new();
     let mut block_counter = 0usize;
     let mut image_counter = 0usize;
 
@@ -2499,25 +2548,64 @@ fn parse_page_content_stream_inner(
                             ));
                         }
                     }
+                    "RG" => {
+                        let len = operands.len();
+                        if len >= 3 {
+                            state.stroke_color = Some(PdfColor::Rgb(
+                                parse_float(&operands[len - 3]),
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            ));
+                        }
+                    }
+                    "G" => {
+                        if let Some(value) = operands.last() {
+                            state.stroke_color = Some(PdfColor::Gray(parse_float(value)));
+                        }
+                    }
+                    "K" => {
+                        let len = operands.len();
+                        if len >= 4 {
+                            state.stroke_color = Some(PdfColor::Cmyk(
+                                parse_float(&operands[len - 4]),
+                                parse_float(&operands[len - 3]),
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            ));
+                        }
+                    }
+                    "w" => {
+                        if let Some(value) = operands.last() {
+                            state.line_width = parse_float(value).abs().clamp(0.1, 1000.0);
+                        }
+                    }
                     "q" => {
-                        state.ctm_stack.push([
-                            state.ctm_a,
-                            state.ctm_b,
-                            state.ctm_c,
-                            state.ctm_d,
-                            state.ctm_e,
-                            state.ctm_f,
-                        ]);
+                        state.graphics_stack.push(SavedGraphicsState {
+                            ctm: [
+                                state.ctm_a,
+                                state.ctm_b,
+                                state.ctm_c,
+                                state.ctm_d,
+                                state.ctm_e,
+                                state.ctm_f,
+                            ],
+                            fill_color: state.fill_color.clone(),
+                            stroke_color: state.stroke_color.clone(),
+                            line_width: state.line_width,
+                        });
                         state.last_rect = None;
                     }
                     "Q" => {
-                        if let Some(restored) = state.ctm_stack.pop() {
-                            state.ctm_a = restored[0];
-                            state.ctm_b = restored[1];
-                            state.ctm_c = restored[2];
-                            state.ctm_d = restored[3];
-                            state.ctm_e = restored[4];
-                            state.ctm_f = restored[5];
+                        if let Some(restored) = state.graphics_stack.pop() {
+                            state.ctm_a = restored.ctm[0];
+                            state.ctm_b = restored.ctm[1];
+                            state.ctm_c = restored.ctm[2];
+                            state.ctm_d = restored.ctm[3];
+                            state.ctm_e = restored.ctm[4];
+                            state.ctm_f = restored.ctm[5];
+                            state.fill_color = restored.fill_color;
+                            state.stroke_color = restored.stroke_color;
+                            state.line_width = restored.line_width;
                         }
                         state.last_rect = None;
                     }
@@ -2557,8 +2645,36 @@ fn parse_page_content_stream_inner(
                             state.last_rect = Some((rx, ry, rw, rh));
                         }
                     }
+                    "m" => {
+                        let len = operands.len();
+                        if len >= 2 {
+                            state.path_current = Some((
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            ));
+                        }
+                    }
+                    "l" => {
+                        let len = operands.len();
+                        if len >= 2 {
+                            let next = (
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            );
+                            if let Some((x1, y1)) = state.path_current {
+                                state.path_segments.push((x1, y1, next.0, next.1));
+                            }
+                            state.path_current = Some(next);
+                        }
+                    }
                     "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                        let strokes = matches!(token.as_str(), "B" | "B*" | "b" | "b*");
                         if let Some((rx, ry, rw, rh)) = state.last_rect.take() {
+                            if vector_rects.len().saturating_add(vector_lines.len()) >= 100_000 {
+                                return Err(HandlerError::InvalidArgument(
+                                    "PDF page exceeds 100000 vector preview primitives".to_string(),
+                                ));
+                            }
                             state.filled_rects.push(FilledRect {
                                 x: rx,
                                 y: ry,
@@ -2566,7 +2682,65 @@ fn parse_page_content_stream_inner(
                                 height: rh,
                                 color: state.fill_color.clone().unwrap_or(PdfColor::Gray(0.0)),
                             });
+                            vector_rects.push(PdfVectorRect {
+                                bbox: BBox {
+                                    x: rx,
+                                    y: ry,
+                                    width: rw,
+                                    height: rh,
+                                },
+                                fill_color: state.fill_color.clone(),
+                                stroke_color: strokes.then(|| {
+                                    state.stroke_color.clone().unwrap_or(PdfColor::Gray(0.0))
+                                }),
+                                stroke_width: state.line_width,
+                            });
                         }
+                        state.path_current = None;
+                        state.path_segments.clear();
+                    }
+                    "S" | "s" => {
+                        if let Some((rx, ry, rw, rh)) = state.last_rect.take() {
+                            if vector_rects.len().saturating_add(vector_lines.len()) >= 100_000 {
+                                return Err(HandlerError::InvalidArgument(
+                                    "PDF page exceeds 100000 vector preview primitives".to_string(),
+                                ));
+                            }
+                            vector_rects.push(PdfVectorRect {
+                                bbox: BBox {
+                                    x: rx,
+                                    y: ry,
+                                    width: rw,
+                                    height: rh,
+                                },
+                                fill_color: None,
+                                stroke_color: Some(
+                                    state.stroke_color.clone().unwrap_or(PdfColor::Gray(0.0)),
+                                ),
+                                stroke_width: state.line_width,
+                            });
+                        }
+                        for (x1, y1, x2, y2) in state.path_segments.drain(..) {
+                            if vector_rects.len().saturating_add(vector_lines.len()) >= 100_000 {
+                                return Err(HandlerError::InvalidArgument(
+                                    "PDF page exceeds 100000 vector preview primitives".to_string(),
+                                ));
+                            }
+                            vector_lines.push(PdfVectorLine {
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                color: state.stroke_color.clone().unwrap_or(PdfColor::Gray(0.0)),
+                                width: state.line_width,
+                            });
+                        }
+                        state.path_current = None;
+                    }
+                    "n" => {
+                        state.last_rect = None;
+                        state.path_current = None;
+                        state.path_segments.clear();
                     }
                     "Do" => {
                         if let Some(operand) = operands.last() {
@@ -2713,6 +2887,8 @@ fn parse_page_content_stream_inner(
         font_map,
         image_blocks,
         image_map,
+        vector_rects,
+        vector_lines,
     })
 }
 
@@ -2854,6 +3030,20 @@ mod tests {
         assert_eq!(parsed.text_blocks.len(), 2);
         assert!((parsed.text_blocks[0].user_bbox.y - 480.0).abs() < 0.01);
         assert!((parsed.text_blocks[1].user_bbox.y - 460.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn graphics_state_restore_keeps_temporary_fill_out_of_later_text() {
+        let (document, page_id) = parser_document(Dictionary::new());
+        let content = b"0 g q 0.95 0.97 0.99 rg 0 0 100 20 re f Q BT /F1 11 Tf 1 0 0 1 54 700 Tm (Black text) Tj ET";
+        let parsed =
+            parse_page_content_stream_text_only_bounded(content, page_id, &document, 1024).unwrap();
+
+        assert_eq!(parsed.text_blocks.len(), 1);
+        assert!(matches!(
+            parsed.text_blocks[0].style.fill_color,
+            Some(PdfColor::Gray(value)) if value.abs() < f32::EPSILON
+        ));
     }
 
     #[test]

@@ -26,4 +26,6 @@ examples/pdf/
 # Generated HCD validation artifacts (real source documents stay local)
 examples/hdoc/real-documents/output*/
 examples/hdoc/docx-suite/output*/
+examples/hdoc/pptx-suite/output*/
+examples/hdoc/text-suite/output*/
 **/.hcd-write-lock

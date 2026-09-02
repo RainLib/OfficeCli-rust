@@ -12,7 +12,7 @@ use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -330,9 +330,14 @@ where
         .iter()
         .map(|asset| (asset.source_part.clone(), asset.clone()))
         .collect();
+    let mut indexed_hashes = HashSet::new();
+    let asset_index = assets
+        .iter()
+        .filter(|asset| indexed_hashes.insert(asset.hash.clone()))
+        .collect::<Vec<_>>();
     std::fs::write(
         writer.root().join("assets/index.json"),
-        serde_json::to_vec(&assets)?,
+        serde_json::to_vec(&asset_index)?,
     )?;
 
     let mut parts = presentation_slides(&mut archive)?;
@@ -2157,6 +2162,7 @@ where
         .map(|entry| entry.name.clone())
         .collect();
     let mut assets = Vec::new();
+    let mut published_hashes = HashSet::new();
     for part in parts {
         let extension = Path::new(&part)
             .extension()
@@ -2169,11 +2175,13 @@ where
                     .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
-        emit(&ImportEvent::AssetReady {
-            hash: hash.clone(),
-            href: href.clone(),
-            byte_length,
-        })?;
+        if published_hashes.insert(hash.clone()) {
+            emit(&ImportEvent::AssetReady {
+                hash: hash.clone(),
+                href: href.clone(),
+                byte_length,
+            })?;
+        }
         assets.push(AssetRecord {
             source_part: part,
             hash,
@@ -2430,14 +2438,21 @@ mod tests {
         let source = temp.path().join("styled.pptx");
         let bundle_path = temp.path().join("bundle");
         create_styled_fixture(&source);
+        let mut asset_events = 0usize;
 
         let manifest = import_pptx(
             &source,
             &bundle_path,
             &ImportOptions::new("styled-presentation"),
-            |_| Ok(()),
+            |event| {
+                if matches!(event, ImportEvent::AssetReady { .. }) {
+                    asset_events += 1;
+                }
+                Ok(())
+            },
         )
         .unwrap();
+        assert_eq!(asset_events, 1);
         assert_eq!(
             manifest.fidelity.as_ref().map(|report| &report.level),
             Some(&FidelityLevel::Visual)
@@ -2482,6 +2497,9 @@ mod tests {
         let styles = std::fs::read_to_string(bundle_path.join("styles.css")).unwrap();
         assert!(styles.contains("data-hcd-image-hitboxes"));
         assert!(styles.contains("data-hcd-text-hitboxes"));
+        let assets = bundle.read_asset_index().unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].source_part, "ppt/media/image1.png");
     }
 
     #[test]
@@ -2858,6 +2876,10 @@ mod tests {
             ),
             (
                 "ppt/media/image1.png",
+                "not-a-real-png-but-streamed-as-an-asset",
+            ),
+            (
+                "ppt/media/image2.png",
                 "not-a-real-png-but-streamed-as-an-asset",
             ),
         ];

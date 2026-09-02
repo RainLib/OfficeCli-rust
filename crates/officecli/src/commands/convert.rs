@@ -355,9 +355,10 @@ fn handle_html_convert(
     let summary = super::html_convert::convert_html(input_path, &output_path, &output_ext)?;
     match format {
         handler_common::OutputFormat::Text => Ok(format!(
-            "Converted '{}' -> '{}' [rust-html-semantic, fidelity={}, blocks={}, images={}/{}, warnings={}]",
+            "Converted '{}' -> '{}' [{}, fidelity={}, blocks={}, images={}/{}, warnings={}]",
             cmd.file,
             output_path.display(),
+            summary.engine,
             summary.fidelity,
             summary.block_count,
             summary.embedded_image_count,
@@ -369,7 +370,7 @@ fn handle_html_convert(
             "output": output_path.to_string_lossy(),
             "from_format": input_ext,
             "to_format": output_ext,
-            "engine": "rust-html-semantic",
+            "engine": summary.engine,
             "fidelity": summary.fidelity,
             "block_count": summary.block_count,
             "image_count": summary.image_count,

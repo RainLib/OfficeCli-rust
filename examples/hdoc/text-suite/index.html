@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Markdown / TXT HCD 验收</title>
+  <style>body{font:16px/1.6 system-ui,sans-serif;max-width:980px;margin:32px auto;padding:0 20px;color:#172033}h1,h2{line-height:1.25}section{border:1px solid #d8deea;border-radius:12px;padding:18px;margin:18px 0}a{display:inline-block;margin:4px 12px 4px 0;color:#075dd7}code{background:#f2f4f8;padding:2px 5px;border-radius:4px}.note{color:#586174}</style>
+</head>
+<body>
+  <h1>Markdown / TXT HCD 闭环产物</h1>
+  <p class="note">先运行 <code>./run.sh</code>。revision 0 是原始内容，revision 1 已通过 nodeId 将 Secret 123 修改为 Secret [MASKED]。</p>
+  <section><h2>Markdown</h2><a href="output/html/markdown-revision-0.html">HCD revision 0</a><a href="output/html/markdown-revision-1.html">HCD revision 1</a><a href="output/export/markdown/preview-docx.html">DOCX 预览</a><a href="output/export/markdown/preview-xlsx.html">XLSX 预览</a><a href="output/export/markdown/preview-pptx.html">PPTX 预览</a><a href="output/export/markdown/preview-pdf.html">PDF 预览</a><a href="output/source-backed/markdown-revision-1.md">HIGH Markdown 回写</a><a href="output/export/markdown/revision-1.txt">语义 TXT</a></section>
+  <section><h2>Markdown 全格式</h2><p class="note">覆盖 CommonMark + GFM 核心能力；扩展语法按报告明确标注为支持或安全降级。</p><a href="output/html/markdown-all-revision-0.html">HCD revision 0</a><a href="output/html/markdown-all-revision-1.html">HCD revision 1</a><a href="output/export/markdown-all/preview-docx.html">DOCX 预览</a><a href="output/export/markdown-all/preview-xlsx.html">XLSX 预览</a><a href="output/export/markdown-all/preview-pptx.html">PPTX 预览</a><a href="output/export/markdown-all/preview-pdf.html">PDF 预览</a><a href="output/source-backed/markdown-all-revision-1.md">HIGH Markdown 回写</a><a href="output/reports/markdown-all-feature-matrix.json">能力矩阵 JSON</a></section>
+  <section><h2>TXT</h2><a href="output/html/text-revision-0.html">HCD revision 0</a><a href="output/html/text-revision-1.html">HCD revision 1</a><a href="output/export/text/preview-docx.html">DOCX 预览</a><a href="output/export/text/preview-xlsx.html">XLSX 预览</a><a href="output/export/text/preview-pptx.html">PPTX 预览</a><a href="output/export/text/preview-pdf.html">PDF 预览</a><a href="output/source-backed/text-revision-1.txt">HIGH TXT 回写</a><a href="output/export/text/revision-1.md">语义 Markdown</a></section>
+</body>
+</html>

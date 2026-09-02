@@ -1,6 +1,6 @@
-# Office/PDF/HTML/TXT ↔ 分片 HCD v1
+# Office/PDF/HTML/Markdown/TXT ↔ 分片 HCD v1
 
-本实现为 OfficeCLI 增加一条独立于既有 `DocumentHandler`/`view_as_html()` 的 HCD 链路，覆盖 DOCX、XLSX、PPTX、PDF、HTML 和 UTF-8 TXT。HTML fragment 是唯一可编辑正文；JSON 仅包含清单、索引、节点 hash、源文件 anchor、revision 和保真信息，不保存正文副本。
+本实现为 OfficeCLI 增加一条独立于既有 `DocumentHandler`/`view_as_html()` 的 HCD 链路，覆盖 DOCX、XLSX、PPTX、PDF、HTML、UTF-8 Markdown 和 UTF-8 TXT。HTML fragment 是唯一可编辑正文；JSON 仅包含清单、索引、节点 hash、源文件 anchor、revision 和保真信息，不保存正文副本。
 
 各格式采用自然分片：
 
@@ -12,6 +12,7 @@
 | PDF | `fixed-layout` | `VISUAL` | 完整页面合成视觉层 + page 内透明 nodeId 文本层 | 可提取 PDF 文本层 |
 | HTML/HTM | `semantic-flow` | `SEMANTIC` | 标题、段落、列表项；table 每片最多 128 行 | canonical 安全结构中的 UTF-8 文本 |
 | TXT | `semantic-flow` | `SEMANTIC` | 最多 256 行 | UTF-8 行文本，包括空行 |
+| Markdown | `semantic-flow` | `SEMANTIC` | 最多 256 个行级 block | 标题、引用、列表、代码与常用 inline 语义；未支持扩展保留为可编辑文本 |
 
 这里的级别描述“导入后的 HCD HTML 能表达多少”，不是源文件导出级别。`manifest.fidelity` 明确列出 `preserved`、`flattened`、`dropped` 和 warnings。源文件未修改时，source-backed 导出仍可达到 `EXACT`；文本修改后通常为 `HIGH`，因为未修改 ZIP entry 原始复制、dirty XML part 只替换文本节点。
 
@@ -58,7 +59,7 @@ bundle/
 <span data-hcd-id="n_..." data-hcd-node-hash="sha256...">唯一正文</span>
 ```
 
-对应 map 只包含 `nodeId`、`nodeHash` 和 `source`，不存在正文 `text` 字段。OOXML/PDF source 定位到源 part 与文本序号；HTML/TXT source 额外以 `textId=bytes:<start>:<end>` 记录不可变源文件中的安全文本字节范围。validator 会检查范围存在、按源顺序不重叠且不越界。节点 ID 优先使用格式原生稳定 ID，否则由 documentId、part、节点类型和源序号确定性生成。省略 `--document-id` 时，CLI 以不可变源文件 SHA-256 的前 128 位生成 `doc-...`，因此相同源字节重复导入会得到相同 documentId、nodeId 和 root；同一逻辑文档发生源内容变化后若仍需维持身份，Java 必须传入并永久保存自己的稳定 business document ID。
+对应 map 只包含 `nodeId`、`nodeHash` 和 `source`，不存在正文 `text` 字段。OOXML/PDF source 定位到源 part 与文本序号；HTML/Markdown/TXT source 额外以 `textId=bytes:<start>:<end>` 记录不可变源文件中的安全文本字节范围。validator 会检查范围存在、按源顺序不重叠且不越界。节点 ID 优先使用格式原生稳定 ID，否则由 documentId、part、节点类型和源序号确定性生成。省略 `--document-id` 时，CLI 以不可变源文件 SHA-256 的前 128 位生成 `doc-...`，因此相同源字节重复导入会得到相同 documentId、nodeId 和 root；同一逻辑文档发生源内容变化后若仍需维持身份，Java 必须传入并永久保存自己的稳定 business document ID。
 
 正文、表格、嵌套文本框、页眉、页脚、脚注、尾注和原 DOCX 批注依次导入。DOCX HTML 会表达直接段落/运行格式、文档内直接 table/row/cell 宽度、`tblGrid` 列宽、布局、对齐、底纹、边框、边距、行高、禁止跨页和垂直对齐，`styles.xml` 的 `basedOn` 继承、linked character style、常用 table style 与条件格式、文档 relationship 指向的主题字体/颜色及 `themeTint`/`themeShade`、超链接、横向合并单元格、真实 `rowspan` 纵向合并，以及 DrawingML 图片的内容寻址引用和布局信息。
 
@@ -86,7 +87,7 @@ DrawingML 表格使用同一事件流解析器物化为 HTML table，不构造�
 
 母版与主题继承、table style 继承、组合形状变换、图片裁剪/效果、图表、SmartArt 和动画仍保留在源 OOXML 中，不计为 HTML 已完整呈现。PDF 当前仍由 lopdf 在内存保留压缩对象图，但已经移除打开时的全量 `doc.decompress()`；`/ObjStm` 和 `/XRef` 在 lopdf 之前先做有界结构预检，HCD 随后逐页有界解码文本 stream，并用固定 Hayro 版本完整解释当页绘制指令生成内容寻址 PNG，不再以 XObject 拼图作为正常路径。PNG 是只读视觉权威层，nodeId 文本作为透明交互层；编辑文字若需继续保持同等视觉保真，必须重新合成 dirty 页。不同 PDF 引擎对 ICC/JPEG2000/抗锯齿可能产生像素差，`VISUAL` 不表示跨引擎零像素差。manifest 使用 `PDF_OBJECT_GRAPH_IN_MEMORY` 明示剩余边界；这份 163 页教材的实测 maximum RSS 仍超过 512 MiB，因此严格 RSS 保证目前仍只适用于 OOXML 适配器。
 
-原生 HTML 导入不会把 `script`、`style`、`iframe`、`object`、`embed`、`template`、`noscript` 内容放入可编辑 chunk，源标签和任意属性也不会原样进入前端；前端只读取经过 HCD 元素/属性/CSS 白名单校验的 canonical fragment。安全的 `h1`–`h6`、段落、`pre`、引用、列表项和 table/row/cell 语义会保留；源 CSS、任意 class/属性和不支持或嵌套的 markup 会降为 canonical 安全结构。每个可编辑 span 仍以 `bytes:<start>:<end>` 精确锚定原 UTF-8 文本，因此结构化表达没有改变 source-backed patch 契约。HTML 大表使用稳定 `data-hcd-table-node-id` 和连续 row-range 元数据分片，可被无源 DOCX/XLSX/PPTX 导出重新识别为原生表格。source-backed HTML 导出只在记录的文本字节范围内写入实体转义后的修改值，其余原始 HTML 字节保持不变，因此导出的源 HTML 仍应按不可信活动内容处理。TXT 按行有界读取，不构造全文字符串；导出保留 UTF-8 BOM、CRLF/LF 和所有未修改字节。
+原生 HTML 导入不会把 `script`、`style`、`iframe`、`object`、`embed`、`template`、`noscript` 内容放入可编辑 chunk，源标签和任意属性也不会原样进入前端；前端只读取经过 HCD 元素/属性/CSS 白名单校验的 canonical fragment。安全的 `h1`–`h6`、段落、`pre`、引用、列表项和 table/row/cell 语义会保留；源 CSS、任意 class/属性和不支持或嵌套的 markup 会降为 canonical 安全结构。每个可编辑 span 仍以 `bytes:<start>:<end>` 精确锚定原 UTF-8 文本，因此结构化表达没有改变 source-backed patch 契约。HTML 大表使用稳定 `data-hcd-table-node-id` 和连续 row-range 元数据分片，可被无源 DOCX/XLSX/PPTX 导出重新识别为原生表格。source-backed HTML 导出只在记录的文本字节范围内写入实体转义后的修改值，其余原始 HTML 字节保持不变，因此导出的源 HTML 仍应按不可信活动内容处理。Markdown/TXT 都按行有界读取，不构造全文字符串；导出保留 UTF-8 BOM、CRLF/LF 和所有未修改字节。Markdown patch 会将 dirty 节点安全转义为普通 Markdown 文本，未修改节点的原语法字节不变。
 
 ## CLI
 
@@ -127,7 +128,11 @@ officecli hdoc export document.hcd \
   --json
 ```
 
-同一组命令也接受 `.xlsx`、`.pptx`、`.pdf`、`.html`/`.htm` 与 UTF-8 `.txt`。提供 `--source` 且输出扩展名与 bundle source format 相同时走 source-backed 回写；省略 `--source` 或选择不同目标时，`.docx/.xlsx/.pptx/.pdf` 走进程内 Rust semantic handler。`--to` 可省略并由 `--output` 推断，但显式值与扩展名不一致会在创建输出前失败。HTML/TXT 的逐字节回写仍要求原源文件。
+同一组命令也接受 `.xlsx`、`.pptx`、`.pdf`、`.html`/`.htm`、UTF-8 `.md`/`.markdown` 与 UTF-8 `.txt`。提供 `--source` 且输出扩展名与 bundle source format 相同时走 source-backed 回写；省略 `--source` 或选择不同目标时，`.docx/.xlsx/.pptx/.pdf/.md/.txt` 走进程内 Rust semantic handler。`--to` 可省略并由 `--output` 推断，但显式值与扩展名不一致会在创建输出前失败。HTML/Markdown/TXT 的逐字节回写仍要求原源文件。
+
+Markdown/HTML 导出 PDF 时，canonical HTML/CSS 由进程内纯 Rust 排版器直接分页；安全的 HTTP(S)/mailto 链接保留可见锚文本并写为原生 URI annotation，不把 `(URL)` 追加到正文。标题、inline style、fenced code、表格、引用、提示块和安全图片按 CSS 盒模型渲染。`mermaid` fenced block 的源码仍是带稳定 nodeId 的唯一可编辑正文；`render-html` 与 PDF 导出按当前 revision 逐 chunk 派生安全 SVG，当前覆盖 `flowchart`/`graph` 和 `sequenceDiagram`，不把派生图固化进 HCD root。JavaScript、任意外部资源和浏览器专属 CSS 保持禁用。PDF 的 `view html` 会继续还原文字、可点击链接、填充矩形、线段和图片。
+
+语义 PDF 同一页可嵌入多个字体子集并按字符切换；emoji 或罕见符号会优先使用可覆盖该字符的系统/配置回退字体，不再因为主中文字体缺字直接替换成 `?`。生产环境可通过 `OFFICECLI_SEMANTIC_PDF_EMOJI_FONT_FILE` 或按平台路径分隔符传入的 `OFFICECLI_SEMANTIC_PDF_FALLBACK_FONT_FILES` 固定回退字体集合。
 
 `--events ndjson` 与全局 `--json` 互斥。事件按实际完成顺序输出。正文直接引用的资产可能先于其 chunk；未引用资产会延后，不阻塞首批正文：
 
@@ -180,7 +185,7 @@ Java 生产服务仍应以数据库 revision/head 为权威，在对象上传完
 
 导出先校验源文件 SHA-256，再从目标 revision 的 HTML fragment 取正文，通过 revision 的 `dirtyNodeIds` 精确收集实际修改节点，不会因为一个节点变化而缓冲整个 dirty part。OOXML 只有 dirty XML parts 被事件流重写，其他 ZIP entry 使用 raw compressed copy；候选 ZIP 的全部 XML/.rels 会在目标文件原子发布前执行流式 well-formed、DOCTYPE、深度和元素预算校验。PDF 在同目录临时副本上修改后原子发布。HTML/TXT 只流式复制并替换 dirty source range；revision 0 导出与源文件逐字节一致。目标路径必须不存在。
 
-HCD 脱敏识别 annotation 默认不写回源格式。导出后会重新打开输出做结构检查并生成 `FidelityReport`。不支持的变更在写目标文件前报错，不做静默降级。source-free/cross-format 路径先按 revision index 顺序校验并物化 canonical chunks，整体 HTML 受 64 MiB 上限约束，再固定使用 OfficeCLI 进程内 Rust handler，不调用 LibreOffice/WPS/pdf2docx；Profile 专属几何、样式、分页、opaque part 和 annotation 会在 report 中标记为 flattened，而不是与 source-backed HCD 回写的 `EXACT/HIGH` 混为一谈。跨 chunk 的 PPTX canonical table 会先按稳定 table node ID、连续 fragment/row range、固定列数和 final 总行数重组；实际 `<tr>` 数也必须与元数据一致。重组后的表格在 PPTX 中建立为原生 DrawingML 表格；单 slide 限制为 18×12，超出时拆为行列窗口并重复首行，同时产生 fidelity warning。通过 HCD 内容寻址校验和栅格签名白名单的图片会原生写入 DOCX/XLSX/PPTX 媒体 part；PDF 以有界 PNG/JPEG Image XObject 写入。1–100,000,000 EMU 的图片宽高会传到四种目标，PPTX 直接 picture 的有界 x/y 会复用，PDF 在超出页框时等比缩小。报告记录实际嵌入数量，但裁剪、Word 相对锚点、环绕、文本碰撞和物理分页仍属于 flattened，不能提升为 source-backed 布局保真。PDF 文本生成会一次性嵌入文档所需 Unicode 字符子集并跨页复用，避免字体切段破坏连续文本层。
+HCD 脱敏识别 annotation 默认不写回源格式。导出后会重新打开输出做结构检查并生成 `FidelityReport`。不支持的变更在写目标文件前报错，不做静默降级。source-free/cross-format 路径先按 revision index 顺序校验并物化 canonical chunks，整体 HTML 受 64 MiB 上限约束，再固定使用 OfficeCLI 进程内 Rust handler，不调用 LibreOffice/WPS/pdf2docx/Chromium；Profile 专属源格式几何、opaque part 和 annotation 会在 report 中标记为 flattened。跨 chunk 的 PPTX canonical table 会先按稳定 table node ID、连续 fragment/row range、固定列数和 final 总行数重组；实际 `<tr>` 数也必须与元数据一致。重组后的表格在 PPTX 中建立为原生 DrawingML 表格；单 slide 限制为 18×12，超出时拆为行列窗口并重复首行。PDF 则直接排版 canonical HTML/CSS，保留常见样式、表格、代码块、链接、Unicode/emoji 文本层和分页，并报告 `HIGH`；它不等同于恢复源 Office/PDF 的物理页面，也不宣称任意浏览器 CSS 像素一致。通过 HCD 内容寻址校验和栅格签名白名单的图片会原生写入四种目标；1–100,000,000 EMU 的图片宽高会传递到输出，PPTX 直接 picture 的有界 x/y 会复用。
 
 ## Java 与前端接入
 
@@ -199,7 +204,7 @@ HCD 脱敏识别 annotation 默认不写回源格式。导出后会重新打开�
 2. XLSX：常见内置/自定义 `numFmt`（数字、日期、时间、百分比、货币、科学计数、分数）、1900/1904 日期系统、冻结/拆分窗格和常用 worksheet view 元数据已物化到 HTML；下一步完善地区化数字格式、条件格式及 drawing/chart 的可见布局，公式继续只读。
 3. PPTX：DrawingML 表格的直接几何、网格、合并、单元格格式、文本闭环及渐进 row-group fragment 已物化；下一步处理母版/版式/主题与 table style 继承、组合形状变换、图片裁剪、图表与 SmartArt，动画和切换保持源文件权威。
 4. PDF：当前已做到 lopdf 前置 `/ObjStm`/`/XRef` 有界预检、压缩对象图保留、逐页 content/字体 stream 有界解码、纯 Rust 完整页面合成视觉层以及透明 nodeId 文本交互层；下一步仍需替换整包 lopdf/Hayro 对象图，按 xref/page 真正随机读取，并以独立受限 worker 或缩放源图解码把 RSS 压到 512 MiB 内。扫描 PDF 需要独立 OCR 能力，dirty 文本页需要重新合成视觉层。
-5. 普通 HTML/HCD revision→Office/PDF：无源纯 Rust `SEMANTIC` 重建已覆盖 DOCX、XLSX、PPTX、PDF，HCD 内容寻址栅格图片、宽高、直接 PPTX picture 坐标、原生表格窗口、HTML-source 标题/段落/列表/表格结构化 source-map，以及按 `data-hcd-table-node-id` 拼接跨 fragment 大表均已安全映射；下一步完善裁剪/相对锚点和表格内图片。没有不可变源文件时仍不宣称与 source-backed HCD 回写相同的 `EXACT/HIGH` 保真。
+5. 普通 HTML/HCD revision→Office/PDF：DOCX/XLSX/PPTX 的无源纯 Rust `SEMANTIC` 重建与 PDF 的 canonical HTML/CSS `HIGH` 排版均已覆盖；HCD 内容寻址栅格图片、宽高、直接 PPTX picture 坐标、原生表格窗口、HTML-source 结构化 source-map，以及跨 fragment 大表均已安全映射。下一步完善 Office 裁剪/相对锚点和表格内图片；PDF 继续扩展 CSS 覆盖面，但不把 canonical HTML 排版等级误写成源格式物理布局 `EXACT`。
 
 ## 验证
 
@@ -228,13 +233,13 @@ make hcd-stress
 | 原方案交付项 | 当前状态 | 权威验收 |
 |---|---|---|
 | `hcd/1`、`hcd-patch/1`、内容寻址 bundle、Merkle root | 已实现 | `hcd-core` schema、bundle、root/validator 单元测试 |
-| 分片 index、稳定 nodeId、source-map、manifest 最后发布 | 已实现 | DOCX 重跑稳定测试；XLSX/PPTX/PDF/HTML/TXT 重跑 node/root 一致测试；page/ObjStm/XRef bomb 均不留下 bundle |
+| 分片 index、稳定 nodeId、source-map、manifest 最后发布 | 已实现 | DOCX 重跑稳定测试；XLSX/PPTX/PDF/HTML/Markdown/TXT 重跑 node/root 一致测试；page/ObjStm/XRef bomb 均不留下 bundle |
 | 流式 OOXML archive reader/rewriter、raw compressed copy | 已实现 | `oxml::archive` payload 一致与候选结构校验测试 |
 | DOCX 渐进 import、正文/表格/文本框/页眉页脚/脚注尾注/批注 | HCD v1 文本范围已实现 | importer golden/语言主题字体/颜色/tint-shade/linked style/直接 table-row-cell 格式/table style 继承与 band size/跨分片及 gridSpan 条件/修订语义/纵向 merge group/浮动 DrawingML anchor-wrap/坐标边界/大节点/首 chunk 早于 part EOF 测试；高级 Word 渲染仍按 fidelity warning 管理 |
 | append-only patch、幂等、冲突、annotation 独立 root | 已实现 | `hcd-core::patch` 与 revision-chain 测试 |
 | source-backed DOCX export 与 dirty part rewrite | 已实现 | DOCX patch/export 闭环、dirty-node 精确收集、未修改 ZIP payload 测试 |
-| XLSX/PPTX/PDF/HTML/TXT 扩展闭环 | 已实现当前声明的文本能力；PPTX 额外覆盖直接 DrawingML 表格视觉、渐进分片与文本回写 | `hdoc_multi_format` 文件测试；PPTX 表格 geometry/grid/merge/style/只读 continuation/patch-export、首片早于 part EOF、跨 rowSpan 不拆分、超大合并组发布前失败测试；各 manifest fidelity 不超报 |
-| 已编辑 HCD revision 无源跨格式导出 | DOCX/XLSX/PPTX/PDF 纯 Rust `SEMANTIC` 重建已实现；内容寻址安全栅格图片可原生嵌入，安全宽高和直接 PPTX picture 坐标可映射；PPTX 可建立有界原生 table slide 并重组跨 chunk 逻辑表；source-backed 路径保持不变 | 删除原 HTML 后从 revision 1 导出四种目标，逐个结构校验、重新提取脱敏文本并校验 fidelity report；另从带 2×1 英寸 PNG 的 DOCX 生成 HCD、删除原文件后验证 `word/xl/ppt media`、目标 EMU 与 PDF Image XObject/content matrix，损坏 asset 不发布输出；PPTX 来源另验证 1in/2in x/y 的无源重建、40×14 table 拆为 6 个不超过 18×12 的原生 table slide，以及 260×2 table 经至少 3 个 HCD fragment 重组为 16 个 slide；validator 拒绝缺片、乱序、范围/列数/final/实际行数不一致；`--to`/扩展名不一致不发布文件 |
+| XLSX/PPTX/PDF/HTML/Markdown/TXT 扩展闭环 | 已实现当前声明的文本能力；PPTX 额外覆盖直接 DrawingML 表格视觉、渐进分片与文本回写 | `hdoc_multi_format` 文件测试；Markdown/TXT nodeId patch 与 EXACT/HIGH source-backed 回写；PPTX 表格 geometry/grid/merge/style/只读 continuation/patch-export、首片早于 part EOF、跨 rowSpan 不拆分、超大合并组发布前失败测试；各 manifest fidelity 不超报 |
+| 已编辑 HCD revision 无源跨格式导出 | DOCX/XLSX/PPTX 纯 Rust `SEMANTIC` 重建和 PDF canonical HTML/CSS `HIGH` 排版已实现；内容寻址安全栅格图片可原生嵌入；source-backed 路径保持不变 | 删除原 HTML 后从 revision 1 导出四种目标，逐个结构校验、重新提取脱敏文本并校验 fidelity report；另验证 2×1 英寸图片的目标 EMU 与 PDF Image XObject/绘图矩阵，损坏 asset 不发布输出；PPTX 大表窗口、跨 chunk 重组及 validator 错误输入覆盖保持不变 |
 | DOCX 2 GiB 解压量、worker RSS ≤512 MiB | 已实现脚本验收 | `make hcd-stress`（正式值） |
 | PDF 真正 xref/page 随机读取 | 尚未完成 | 当前前置结构流预检和有界逐页解码已阻断已知解压 bomb，但 lopdf 仍整包读取并保留压缩对象图；不能声明严格流式完成 |
 | Java OSS、鉴权、数据库 authoritative head/CAS、前端虚拟分页 | OfficeCLI 仓库外责任 | 需要 Java/前端仓库分别实现与联调，本仓库只提供 NDJSON、revision 和 chunk 协议 |

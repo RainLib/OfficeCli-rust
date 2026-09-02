@@ -88,6 +88,19 @@ pub fn render_standalone_html(
     options: &HtmlPresentationOptions,
     output: &mut impl Write,
 ) -> Result<HtmlPresentationReport, HcdError> {
+    render_standalone_html_with_transform(bundle, options, output, |html| Ok(html.to_string()))
+}
+
+/// Materialize a standalone page while allowing a bounded, presentation-only
+/// transform for each immutable chunk. The authoritative chunk and its hash are
+/// always verified before the callback runs. This keeps derived previews (for
+/// example Mermaid SVG) out of canonical HCD and avoids a whole-document DOM.
+pub fn render_standalone_html_with_transform(
+    bundle: &Bundle,
+    options: &HtmlPresentationOptions,
+    output: &mut impl Write,
+    mut transform: impl FnMut(&str) -> Result<String, HcdError>,
+) -> Result<HtmlPresentationReport, HcdError> {
     let head = bundle.manifest()?;
     let (manifest, revision) = manifest_at_revision(bundle, &head, options.revision)?;
     let asset_hrefs = if options.asset_base_href.is_some() {
@@ -105,7 +118,7 @@ pub fn render_standalone_html(
         &mut written,
         options.max_output_bytes,
         format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>HCD revision {revision}</title><style>html{{background:#eef1f5}}body{{box-sizing:border-box;max-width:max-content;min-width:min(100%,960px);margin:24px auto;padding:24px;background:#fff;color:#111;box-shadow:0 3px 18px #0002}}.hcd-chunk{{content-visibility:auto;contain-intrinsic-size:auto 800px}}@media(max-width:720px){{body{{margin:0;padding:12px}}}}</style><style>"
+            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>HCD revision {revision}</title><style>html{{background:#eef1f5}}body{{box-sizing:border-box;max-width:max-content;min-width:min(100%,960px);margin:24px auto;padding:24px;background:#fff;color:#111;box-shadow:0 3px 18px #0002}}body[data-hcd-profile=\"semantic-flow\"]{{box-sizing:border-box;width:min(793.7px,calc(100% - 48px));max-width:793.7px;min-width:0;padding:53.333px;font-family:HCDSans,HCDEmoji,HCDFallback,\"Noto Sans SC\",\"PingFang SC\",\"Microsoft YaHei\",Arial,sans-serif;font-size:16px;line-height:1.6}}.hcd-chunk{{content-visibility:auto;contain-intrinsic-size:auto 800px}}@media(max-width:720px){{body,body[data-hcd-profile=\"semantic-flow\"]{{width:100%;max-width:none;margin:0;padding:16px}}}}</style><style>"
         )
         .as_bytes(),
     )?;
@@ -168,6 +181,14 @@ pub fn render_standalone_html(
             } else {
                 html
             };
+            let presented_html = transform(&presented_html)?;
+            if presented_html.len() > MAX_CHUNK_BYTES.saturating_mul(4) {
+                return Err(HcdError::ResourceLimit(format!(
+                    "presentation transform expanded chunk {} beyond {} bytes",
+                    descriptor.chunk_id,
+                    MAX_CHUNK_BYTES.saturating_mul(4)
+                )));
+            }
             write_bounded(
                 output,
                 &mut written,
@@ -269,5 +290,15 @@ mod tests {
         let rewritten = rewrite_asset_references(&html, &hrefs, "../bundle/");
         assert!(rewritten.contains(&format!("src=\"../bundle/assets/sha256/{hash}.png\"")));
         assert!(rewritten.contains("src=\"asset://sha256/unknown\""));
+    }
+
+    #[test]
+    fn semantic_flow_preview_metrics_match_a4_with_forty_point_margins() {
+        const A4_WIDTH_CSS_PX: f64 = 793.7;
+        const FORTY_POINTS_CSS_PX: f64 = 53.333;
+        const A4_CONTENT_WIDTH_CSS_PX: f64 = 687.034;
+        assert!(
+            (A4_WIDTH_CSS_PX - (FORTY_POINTS_CSS_PX * 2.0) - A4_CONTENT_WIDTH_CSS_PX).abs() < 0.001
+        );
     }
 }

@@ -369,7 +369,7 @@ where
     }
     let mut writer = BundleWriter::create(output)?;
     writer.write_styles(
-        ".hcd-pdf-page{display:block;padding:0;margin:0 auto 18pt;background:#fff;overflow:hidden;box-shadow:0 2px 12px #0003}.hcd-pdf-page[data-hcd-continuation=\"true\"]{background:transparent;box-shadow:none}.hcd-pdf-page-raster{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none}.hcd-pdf-image{position:absolute;display:block;z-index:1}.hcd-pdf-visual-node{pointer-events:none;background:transparent}.hcd-pdf-text{position:absolute;white-space:nowrap;margin:0;line-height:1;z-index:2;cursor:text}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text{color:transparent!important;text-shadow:none!important}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node{pointer-events:auto;cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node:hover{background:rgba(255,59,48,.10);outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) .hcd-pdf-text:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8);outline-offset:0}.hcd-empty-page{position:absolute;inset:0}",
+        ".hcd-pdf-page{display:block;padding:0;margin:0 auto 18pt;background:#fff;overflow:hidden;box-shadow:0 2px 12px #0003}.hcd-pdf-page[data-hcd-continuation=\"true\"]{background:transparent;box-shadow:none}.hcd-pdf-page-raster{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none}.hcd-pdf-image{position:absolute;display:block;z-index:1}.hcd-pdf-visual-node{pointer-events:none;background:transparent}.hcd-pdf-text{position:absolute;min-width:max-content;white-space:nowrap;margin:0;line-height:1;z-index:2;cursor:text}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text{color:transparent!important;text-shadow:none!important}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node{pointer-events:auto;cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node:hover{background:rgba(255,59,48,.10);outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) .hcd-pdf-text:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8);outline-offset:0}.hcd-empty-page{position:absolute;inset:0}",
     )?;
     let raster_source = std::fs::read(source)?;
     let (raster_pdf, raster_initialization_error) = match Pdf::new(Arc::new(raster_source)) {
@@ -864,6 +864,7 @@ mod tests {
             .contains("body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node:hover"));
         assert!(styles.contains(".hcd-pdf-visual-node{pointer-events:none"));
         assert!(styles.contains(".hcd-pdf-visual-node{pointer-events:auto"));
+        assert!(styles.contains(".hcd-pdf-text{position:absolute;min-width:max-content"));
         let assets: Vec<AssetDescriptor> =
             serde_json::from_slice(&std::fs::read(bundle_path.join("assets/index.json")).unwrap())
                 .unwrap();

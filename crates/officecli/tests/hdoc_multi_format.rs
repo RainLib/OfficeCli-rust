@@ -57,7 +57,7 @@ fn import_and_extract(source: &Path, bundle: &Path, document_id: &str) -> Value 
             Some("xlsx") => ("SEMANTIC", "grid"),
             Some("pptx") => ("VISUAL", "slide-canvas"),
             Some("pdf") => ("VISUAL", "fixed-layout"),
-            Some("html" | "htm" | "txt") => ("SEMANTIC", "semantic-flow"),
+            Some("html" | "htm" | "md" | "markdown" | "txt") => ("SEMANTIC", "semantic-flow"),
             other => panic!("unexpected test source format {other:?}"),
         };
     assert_eq!(manifest["fidelity"]["level"], expected_fidelity);
@@ -154,6 +154,28 @@ fn pdf_contains_image_xobject(path: &Path) -> bool {
             .get(b"Subtype")
             .and_then(|value| value.as_name_str())
             .is_ok_and(|name| name == "Image")
+    })
+}
+
+fn pdf_contains_image_placement(path: &Path, width: f32, height: f32) -> bool {
+    let document = lopdf::Document::load(path).unwrap();
+    document.get_pages().into_values().any(|page| {
+        let Ok(bytes) = document.get_page_content(page) else {
+            return false;
+        };
+        let Ok(content) = lopdf::content::Content::decode(&bytes) else {
+            return false;
+        };
+        content.operations.iter().any(|operation| {
+            operation.operator == "cm"
+                && operation.operands.len() == 6
+                && operation.operands[0]
+                    .as_float()
+                    .is_ok_and(|value| (value.abs() - width).abs() < 0.5)
+                && operation.operands[3]
+                    .as_float()
+                    .is_ok_and(|value| (value.abs() - height).abs() < 0.5)
+        })
     })
 }
 
@@ -565,6 +587,11 @@ fn edited_hcd_revision_semantically_exports_to_all_rust_targets_without_source()
     // consulted for these four targets.
     std::fs::remove_file(&source).unwrap();
     for extension in ["docx", "xlsx", "pptx", "pdf"] {
+        let expected_level = if extension == "pdf" {
+            r#""level": "HIGH""#
+        } else {
+            r#""level": "SEMANTIC""#
+        };
         let output = temp.path().join(format!("semantic-output.{extension}"));
         let fidelity = temp
             .path()
@@ -586,7 +613,7 @@ fn edited_hcd_revision_semantically_exports_to_all_rust_targets_without_source()
             ])
             .assert()
             .success()
-            .stdout(predicate::str::contains(r#""level": "SEMANTIC""#))
+            .stdout(predicate::str::contains(expected_level))
             .stdout(predicate::str::contains("HCD_CROSS_FORMAT_SEMANTIC_EXPORT"));
         officecli()
             .args(["validate", output.to_string_lossy().as_ref()])
@@ -611,7 +638,14 @@ fn edited_hcd_revision_semantically_exports_to_all_rust_targets_without_source()
             _ => unreachable!(),
         }
         let report: Value = serde_json::from_slice(&std::fs::read(&fidelity).unwrap()).unwrap();
-        assert_eq!(report["level"], "SEMANTIC");
+        assert_eq!(
+            report["level"],
+            if extension == "pdf" {
+                "HIGH"
+            } else {
+                "SEMANTIC"
+            }
+        );
         assert!(report["warnings"]
             .as_array()
             .unwrap()
@@ -850,6 +884,11 @@ fn hcd_content_addressed_image_exports_to_all_rust_targets_without_source() {
     std::fs::remove_file(&source).unwrap();
     std::fs::remove_file(&image).unwrap();
     for extension in ["docx", "xlsx", "pptx", "pdf"] {
+        let expected_level = if extension == "pdf" {
+            r#""level": "HIGH""#
+        } else {
+            r#""level": "SEMANTIC""#
+        };
         let output = temp.path().join(format!("image-output.{extension}"));
         let fidelity = temp.path().join(format!("image-{extension}-fidelity.json"));
         officecli()
@@ -869,7 +908,7 @@ fn hcd_content_addressed_image_exports_to_all_rust_targets_without_source() {
             ])
             .assert()
             .success()
-            .stdout(predicate::str::contains(r#""level": "SEMANTIC""#));
+            .stdout(predicate::str::contains(expected_level));
         officecli()
             .args(["validate", output.to_string_lossy().as_ref()])
             .assert()
@@ -897,10 +936,7 @@ fn hcd_content_addressed_image_exports_to_all_rust_targets_without_source() {
             }
             "pdf" => {
                 assert!(pdf_contains_image_xobject(&output));
-                let document = lopdf::Document::load(&output).unwrap();
-                let page = *document.get_pages().values().next().unwrap();
-                let content = document.get_page_content(page).unwrap();
-                assert!(String::from_utf8_lossy(&content).contains("144.00 0 0 72.00 54.00"));
+                assert!(pdf_contains_image_placement(&output, 144.0, 72.0));
             }
             _ => unreachable!(),
         }
@@ -1036,6 +1072,173 @@ fn txt_hcd_patch_roundtrip_preserves_bom_and_line_endings() {
 }
 
 #[test]
+fn markdown_hcd_patch_roundtrip_and_semantic_text_exports() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.md");
+    let bundle = temp.path().join("bundle");
+    let output = temp.path().join("output.markdown");
+    let text_output = temp.path().join("semantic.txt");
+    std::fs::write(
+        &source,
+        "# Customer\n\nAccount **6222**\n\n- First\n- Second\n",
+    )
+    .unwrap();
+    let extracted = import_and_extract(&source, &bundle, "markdown-doc");
+    let entry = extracted["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "6222")
+        .unwrap();
+    assert_eq!(entry["source"]["part"], "markdown/document");
+    apply_text_patch(temp.path(), &bundle, "markdown-doc", entry, 0, 4, "****");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--source",
+            source.to_string_lossy().as_ref(),
+            "--output",
+            output.to_string_lossy().as_ref(),
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""level": "HIGH""#));
+    let markdown = std::fs::read_to_string(&output).unwrap();
+    assert!(markdown.contains("Account **\\*\\*\\*\\***"));
+    assert!(markdown.contains("- First\n- Second"));
+
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            text_output.to_string_lossy().as_ref(),
+            "--to",
+            "txt",
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""level": "SEMANTIC""#));
+    let text = std::fs::read_to_string(text_output).unwrap();
+    assert!(text.contains("Customer"));
+    assert!(text.contains("Account ****"));
+}
+
+#[test]
+fn markdown_mermaid_preview_tracks_nodeid_patch_in_html_and_pdf() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("diagram.md");
+    let bundle = temp.path().join("bundle");
+    let first_html = temp.path().join("revision-0.html");
+    let second_html = temp.path().join("revision-1.html");
+    let pdf = temp.path().join("revision-1.pdf");
+    std::fs::write(&source, "```mermaid\ngraph LR\nA[Alpha] --> B[Beta]\n```\n").unwrap();
+    let extracted = import_and_extract(&source, &bundle, "markdown-mermaid-doc");
+    let entry = extracted["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["source"]["nodeKind"] == "markdown-code"
+                && entry["text"].as_str().unwrap_or("").contains("B[Beta]")
+        })
+        .unwrap();
+
+    officecli()
+        .args([
+            "hdoc",
+            "render-html",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            first_html.to_string_lossy().as_ref(),
+            "--revision",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let first = std::fs::read_to_string(&first_html).unwrap();
+    assert!(first.contains("class=\"hcd-mermaid-preview\""));
+    assert!(first.contains(">Beta</text>"));
+    let diagram_marker = "data-hcd-node-kind=\"diagram\"";
+    let first_diagram_id = first[..first.find(diagram_marker).unwrap()]
+        .rsplit_once("data-hcd-id=\"")
+        .unwrap()
+        .1
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let source_text = entry["text"].as_str().unwrap();
+    let byte_start = source_text.find("Beta").unwrap();
+    let scalar_start = source_text[..byte_start].chars().count();
+    apply_text_patch(
+        temp.path(),
+        &bundle,
+        "markdown-mermaid-doc",
+        entry,
+        scalar_start,
+        "Beta".chars().count(),
+        "Gamma",
+    );
+    officecli()
+        .args([
+            "hdoc",
+            "render-html",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            second_html.to_string_lossy().as_ref(),
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let second = std::fs::read_to_string(&second_html).unwrap();
+    assert!(second.contains(">Gamma</text>"));
+    assert!(!second.contains(">Beta</text>"));
+    assert!(second.contains(&format!("data-hcd-id=\"{first_diagram_id}\"")));
+    assert!(second.contains(&format!(
+        "data-hcd-source-node-id=\"{}\"",
+        entry["nodeId"].as_str().unwrap()
+    )));
+
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            pdf.to_string_lossy().as_ref(),
+            "--to",
+            "pdf",
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""level": "HIGH""#));
+    officecli()
+        .args(["view", pdf.to_string_lossy().as_ref(), "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alpha"))
+        .stdout(predicate::str::contains("Gamma"))
+        .stdout(predicate::str::contains("Beta").not());
+}
+
+#[test]
 fn supported_hcd_adapters_repeat_stable_ids_and_body_roots() {
     let temp = tempfile::tempdir().unwrap();
     let xlsx = temp.path().join("stable.xlsx");
@@ -1075,9 +1278,11 @@ fn supported_hcd_adapters_repeat_stable_ids_and_body_roots() {
     std::fs::write(&html, "<h1>Stable HTML</h1><p>Second node</p>").unwrap();
     let txt = temp.path().join("stable.txt");
     std::fs::write(&txt, "Stable text\nSecond line\n").unwrap();
+    let markdown = temp.path().join("stable.md");
+    std::fs::write(&markdown, "# Stable Markdown\n\nSecond **node**\n").unwrap();
     let pdf = workspace_root().join("examples/test.pdf");
 
-    for (index, source) in [xlsx, pptx, pdf, html, txt].iter().enumerate() {
+    for (index, source) in [xlsx, pptx, pdf, html, txt, markdown].iter().enumerate() {
         let document_id = format!("stable-format-{index}");
         let first_bundle = temp.path().join(format!("stable-{index}-first"));
         let second_bundle = temp.path().join(format!("stable-{index}-second"));

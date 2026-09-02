@@ -570,7 +570,7 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
     }
     if !matches!(
         manifest.source.format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
     ) {
         issues.push(issue(
             "SOURCE_FORMAT_INVALID",
@@ -990,7 +990,7 @@ fn validate_map_entry(
             ));
         }
     }
-    if matches!(source.format.as_str(), "html" | "txt") {
+    if matches!(source.format.as_str(), "html" | "md" | "txt") {
         validate_textual_source_range(entry, source, textual_range_end, path, issues);
     }
 }
@@ -1002,10 +1002,10 @@ fn validate_textual_source_range(
     path: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let expected_part = if source.format == "html" {
-        "html/document"
-    } else {
-        "text/document"
+    let expected_part = match source.format.as_str() {
+        "html" => "html/document",
+        "md" => "markdown/document",
+        _ => "text/document",
     };
     if entry.source.part != expected_part {
         issues.push(issue(
@@ -1082,6 +1082,7 @@ fn valid_source_part(value: &str) -> bool {
         || value.starts_with("ppt/")
         || value.starts_with("pdf/")
         || value.starts_with("html/")
+        || value.starts_with("markdown/")
         || value.starts_with("text/");
     allowed_prefix
         && !value.is_empty()
@@ -1591,6 +1592,7 @@ fn validate_html_element<B: std::io::BufRead>(
             | "h5"
             | "h6"
             | "pre"
+            | "code"
             | "blockquote"
             | "ul"
             | "ol"
@@ -1598,14 +1600,30 @@ fn validate_html_element<B: std::io::BufRead>(
             | "aside"
             | "a"
             | "span"
+            | "strong"
+            | "em"
+            | "del"
             | "br"
+            | "hr"
             | "table"
             | "colgroup"
             | "col"
+            | "thead"
             | "tbody"
+            | "tfoot"
             | "tr"
             | "th"
             | "td"
+            | "dl"
+            | "dt"
+            | "dd"
+            | "sup"
+            | "sub"
+            | "mark"
+            | "kbd"
+            | "u"
+            | "s"
+            | "small"
             | "img"
     ) {
         return Err(HcdError::InvalidBundle(format!(
@@ -1625,6 +1643,7 @@ fn validate_html_element<B: std::io::BufRead>(
         if !matches!(
             normalized_key.as_str(),
             "class"
+                | "id"
                 | "style"
                 | "href"
                 | "src"
@@ -1930,6 +1949,12 @@ mod tests {
         fs::write(
             &path,
             "<section><h1>Heading</h1><blockquote>Quote</blockquote><pre>Pre</pre><ol start=\"2\"><li>Item</li></ol><table><tbody><tr><th>Head</th></tr></tbody></table></section>",
+        )
+        .unwrap();
+        assert!(validate_html_fragment(&path, &assets).is_ok());
+        fs::write(
+            &path,
+            "<section><h2 id=\"setext\">Setext</h2><dl><dt>Term</dt><dd>Definition</dd></dl><table><thead><tr><th>Head</th></tr></thead><tbody><tr><td><mark><kbd>Ctrl</kbd> <u>U</u> <s>S</s> H<sub>2</sub>O x<sup>2</sup> <small>note</small></mark></td></tr></tbody><tfoot><tr><td>Foot</td></tr></tfoot></table></section>",
         )
         .unwrap();
         assert!(validate_html_fragment(&path, &assets).is_ok());

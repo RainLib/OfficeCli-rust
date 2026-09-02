@@ -40,7 +40,7 @@
       "additionalProperties": false,
       "required": ["format", "sha256", "sizeBytes"],
       "properties": {
-        "format": { "enum": ["docx", "xlsx", "pptx", "pdf", "html", "txt"] },
+        "format": { "enum": ["docx", "xlsx", "pptx", "pdf", "html", "md", "txt"] },
         "sha256": { "$ref": "#/$defs/sha256" },
         "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 268435456 }
       }
@@ -92,7 +92,7 @@
       "additionalProperties": false,
       "required": ["part", "textOrdinal", "nodeKind", "editable"],
       "properties": {
-        "part": { "type": "string", "pattern": "^(word|xl|ppt|pdf|html|text)/" },
+        "part": { "type": "string", "pattern": "^(word|xl|ppt|pdf|html|markdown|text)/" },
         "textOrdinal": { "type": "integer", "minimum": 1 },
         "paragraphId": { "type": "string", "maxLength": 256 },
         "textId": { "type": "string", "maxLength": 256 },

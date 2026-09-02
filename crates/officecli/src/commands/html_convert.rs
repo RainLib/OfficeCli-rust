@@ -1,10 +1,13 @@
 use docx_handler::WordHandler;
 use handler_common::{DocumentHandler, HandlerError, InsertPosition};
+use ironpress::{HtmlConverter, Margin, PageSize};
 use pdf_handler::PdfHandler;
 use pptx_handler::PptxHandler;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use unicode_segmentation::UnicodeSegmentation;
 use xlsx_handler::ExcelHandler;
 
 pub(crate) const MAX_HTML_BYTES: u64 = 64 * 1024 * 1024;
@@ -20,10 +23,18 @@ const MAX_SEMANTIC_IMAGE_EMU: i64 = 100_000_000;
 const DEFAULT_IMAGE_WIDTH_EMU: i64 = 3_657_600;
 const DEFAULT_IMAGE_HEIGHT_EMU: i64 = 2_743_200;
 const EMU_PER_POINT: f32 = 12_700.0;
+const SEMANTIC_PDF_PAGE_HEIGHT: f32 = 842.0;
+const SEMANTIC_PDF_TOP_MARGIN: f32 = 54.0;
+const SEMANTIC_PDF_BOTTOM_MARGIN: f32 = 54.0;
+const SEMANTIC_PDF_CONTENT_TOP: f32 = SEMANTIC_PDF_PAGE_HEIGHT - SEMANTIC_PDF_TOP_MARGIN;
+const SEMANTIC_PDF_IMAGE_GAP: f32 = 8.0;
+const SEMANTIC_PDF_TABLE_ROW_HEIGHT: f32 = 22.0;
+const SEMANTIC_PDF_CONTENT_WIDTH: f32 = 487.0;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HtmlConversionSummary {
+    pub engine: &'static str,
     pub fidelity: &'static str,
     pub block_count: usize,
     pub image_count: usize,
@@ -137,8 +148,28 @@ fn resolved_image<'a>(
 struct SemanticHtml {
     title: String,
     blocks: Vec<HtmlBlock>,
+    links: Vec<SemanticLink>,
+    table_links: Vec<SemanticTableLink>,
     assets: HashMap<String, SemanticAsset>,
     warnings: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticLink {
+    block_index: usize,
+    start: usize,
+    end: usize,
+    target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticTableLink {
+    block_index: usize,
+    row: usize,
+    column: usize,
+    start: usize,
+    end: usize,
+    target: String,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +206,20 @@ struct PdfLineBuilder {
 struct PendingBlock {
     kind: PendingKind,
     text: String,
+    links: Vec<PendingLink>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingLink {
+    start: usize,
+    end: usize,
+    target: String,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveLink {
+    target: String,
+    start: usize,
 }
 
 #[derive(Default)]
@@ -183,7 +228,17 @@ struct TableBuilder {
     row: Vec<String>,
     cell: Option<String>,
     cell_count: usize,
+    links: Vec<TablePendingLink>,
     fragment: Option<HcdTableFragment>,
+}
+
+#[derive(Debug, Clone)]
+struct TablePendingLink {
+    row: usize,
+    column: usize,
+    start: usize,
+    end: usize,
+    target: String,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +260,7 @@ struct LogicalTableBuilder {
     column_count: usize,
     rows: Vec<Vec<String>>,
     cell_count: usize,
+    links: Vec<TablePendingLink>,
 }
 
 #[derive(Default)]
@@ -220,7 +276,7 @@ struct HtmlParser {
     table: Option<TableBuilder>,
     logical_table: Option<LogicalTableBuilder>,
     lists: Vec<ListState>,
-    links: Vec<String>,
+    links: Vec<ActiveLink>,
     image_geometry_stack: Vec<Option<ImageGeometry>>,
     pdf_line: Option<PdfLineBuilder>,
     in_title: bool,
@@ -464,11 +520,17 @@ pub(crate) fn convert_html_with_assets(
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(HandlerError::IoError)?;
     let temporary = temporary_output_path(parent, output_format);
+    let legacy_pdf = output_format == "pdf"
+        && std::env::var("OFFICECLI_HTML_PDF_MODE")
+            .is_ok_and(|mode| mode.eq_ignore_ascii_case("semantic"));
     let conversion = match output_format {
         "docx" => export_docx(&document, &temporary),
         "xlsx" => export_xlsx(&document, &temporary),
         "pptx" => export_pptx(&document, &temporary),
-        "pdf" => export_pdf(&mut document, &temporary),
+        "pdf" if legacy_pdf => export_pdf(&mut document, &temporary),
+        "pdf" => export_pdf_css(&source, input, &document.assets, &temporary),
+        "md" => export_textual(&document, &temporary, true),
+        "txt" => export_textual(&document, &temporary, false),
         other => Err(HandlerError::UnsupportedMode(format!(
             "HTML semantic conversion does not support .{other}"
         ))),
@@ -499,16 +561,303 @@ pub(crate) fn convert_html_with_assets(
             ),
         );
     }
-    document
-        .warnings
-        .insert("CSS layout is not reproduced; output uses semantic document defaults".to_string());
+    if output_format == "pdf" && !legacy_pdf {
+        document.warnings.retain(|warning| {
+            warning != "inline CSS was ignored"
+                && warning != "ignored unsafe or non-semantic <style> content"
+        });
+        document.warnings.insert(
+            "HTML/CSS was paginated by the in-process pure-Rust print layout engine; browser JavaScript and unsupported browser-only CSS remain inactive"
+                .to_string(),
+        );
+    } else {
+        document.warnings.insert(
+            "CSS layout is not reproduced; output uses semantic document defaults".to_string(),
+        );
+    }
     Ok(HtmlConversionSummary {
-        fidelity: "semantic",
+        engine: if output_format == "pdf" && !legacy_pdf {
+            "rust-html-css-pdf"
+        } else {
+            "rust-html-semantic"
+        },
+        fidelity: if output_format == "pdf" && !legacy_pdf {
+            "high"
+        } else {
+            "semantic"
+        },
         block_count: document.blocks.len(),
         image_count,
         embedded_image_count,
         warnings: document.warnings.into_iter().collect(),
     })
+}
+
+fn export_pdf_css(
+    source: &str,
+    input: &Path,
+    assets: &HashMap<String, SemanticAsset>,
+    output: &Path,
+) -> Result<usize, HandlerError> {
+    let embedded = assets
+        .iter()
+        .filter(|(href, asset)| {
+            source.contains(href.as_str())
+                && matches!(asset.format.as_str(), "png" | "jpg" | "jpeg")
+        })
+        .count();
+    let (html, resource_root) = print_html_with_assets(source, input, assets)?;
+    let font = html_pdf_primary_font();
+    let mut converter = HtmlConverter::new()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(40.0))
+        .sanitize(true)
+        .add_font("HCDSans", font)
+        .add_font(
+            "HCDEmoji",
+            pdf_handler::font_embedder::bundled_noto_emoji().to_vec(),
+        );
+    if let Some(font) = html_pdf_fallback_font() {
+        converter = converter.add_font("HCDFallback", font);
+    }
+    if let Some(root) = resource_root.as_deref() {
+        converter = converter.base_path(root).resource_root(root);
+    }
+    let file = std::fs::File::create(output).map_err(HandlerError::IoError)?;
+    let mut writer = BufWriter::new(file);
+    converter
+        .convert_to_writer(&html, &mut writer)
+        .map_err(|error| {
+            HandlerError::OperationFailed(format!("pure-Rust HTML/CSS PDF layout failed: {error}"))
+        })?;
+    std::io::Write::flush(&mut writer).map_err(HandlerError::IoError)?;
+    Ok(embedded)
+}
+
+fn print_html_with_assets(
+    source: &str,
+    _input: &Path,
+    assets: &HashMap<String, SemanticAsset>,
+) -> Result<(String, Option<PathBuf>), HandlerError> {
+    // The print engine can register multiple fonts but does not currently use
+    // an authored secondary family as a per-glyph fallback. Mark emoji
+    // grapheme clusters explicitly in this presentation-only copy so the
+    // monochrome outline font is selected without changing canonical HCD HTML,
+    // text content, or data-hcd-id ownership.
+    let mut html = normalize_markdown_print_controls(&mark_print_emoji(source));
+    // Keep this rule deliberately compatible with the print engine's CSS
+    // selector subset. A compound attribute selector caused the whole reset to
+    // be skipped, which silently selected platform fonts and changed line
+    // breaks even though the browser preview looked correct.
+    let print_styles = "<style id=\"officecli-hcd-print\">html{background:#fff!important}body{box-sizing:border-box!important;width:auto!important;max-width:none!important;min-width:0!important;margin:0!important;padding:0!important;background:#fff!important;box-shadow:none!important;font-family:HCDSans,HCDEmoji,HCDFallback,sans-serif!important;font-size:12pt!important}.hcd-chunk{content-visibility:visible!important;contain:none!important}.hcd-print-emoji{font-family:HCDEmoji!important;font-style:normal!important}.hcd-print-kbd{display:inline!important;white-space:nowrap!important;font-family:ui-monospace,SFMono-Regular,Consolas,monospace!important}.hcd-markdown-image{display:inline-block!important;width:auto!important;max-width:100%!important}.hcd-markdown-task-item{list-style:none!important}.hcd-markdown-task{display:inline!important;margin-left:0!important}.hcd-markdown-task-marker{display:inline-block!important;width:1.05em!important;margin-right:.4em!important;font-family:HCDSans!important}.hcd-markdown-paragraph mark,.hcd-markdown-paragraph u,.hcd-markdown-paragraph s,.hcd-markdown-paragraph small,.hcd-markdown-paragraph sub,.hcd-markdown-paragraph sup{display:inline!important}.hcd-markdown-paragraph sub,.hcd-markdown-paragraph sup{line-height:0!important}</style>";
+    if let Some(position) = html.rfind("</head>") {
+        html.insert_str(position, print_styles);
+    } else {
+        html.insert_str(0, print_styles);
+    }
+
+    let mut root = None;
+    for (href, asset) in assets {
+        let canonical = std::fs::canonicalize(&asset.path).map_err(HandlerError::IoError)?;
+        html = html.replace(href, &canonical.to_string_lossy());
+        root = Some(common_resource_root(root.as_deref(), &canonical));
+    }
+    Ok((html, root.filter(|path| path.is_dir())))
+}
+
+fn normalize_markdown_print_controls(source: &str) -> String {
+    source
+        // Ironpress 1.6 models kbd as a block box before applying author CSS.
+        // Canonical HCD keeps the semantic tag; the print copy uses a known
+        // inline element while preserving the same text and node ownership.
+        .replace("<kbd>", "<span class=\"hcd-print-kbd\">")
+        .replace("</kbd>", "</span>")
+        .replace(
+            "<li><span class=\"hcd-markdown-task",
+            "<li class=\"hcd-markdown-task-item\"><span class=\"hcd-markdown-task",
+        )
+        .replace(
+            "<span class=\"hcd-markdown-task-marker\">☐</span>",
+            "<span class=\"hcd-markdown-task-marker\">□</span>",
+        )
+        .replace(
+            "<span class=\"hcd-markdown-task-marker\">☑</span>",
+            "<span class=\"hcd-markdown-task-marker\"><span class=\"hcd-print-emoji\">☑</span></span>",
+        )
+}
+
+fn mark_print_emoji(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    let mut raw_text_element: Option<String> = None;
+
+    while cursor < source.len() {
+        let Some(relative_tag_start) = source[cursor..].find('<') else {
+            append_print_text(&mut output, &source[cursor..], raw_text_element.is_none());
+            break;
+        };
+        let tag_start = cursor + relative_tag_start;
+        append_print_text(
+            &mut output,
+            &source[cursor..tag_start],
+            raw_text_element.is_none(),
+        );
+
+        let tag_end = html_tag_end(source, tag_start).unwrap_or(source.len());
+        let tag = &source[tag_start..tag_end];
+        output.push_str(tag);
+        update_raw_text_element(tag, &mut raw_text_element);
+        cursor = tag_end;
+    }
+
+    output
+}
+
+fn append_print_text(output: &mut String, text: &str, mark_emoji: bool) {
+    if !mark_emoji {
+        output.push_str(text);
+        return;
+    }
+    for grapheme in text.graphemes(true) {
+        if is_print_emoji_grapheme(grapheme) {
+            output.push_str("<span class=\"hcd-print-emoji\">");
+            output.push_str(grapheme);
+            output.push_str("</span>");
+        } else {
+            output.push_str(grapheme);
+        }
+    }
+}
+
+fn html_tag_end(source: &str, start: usize) -> Option<usize> {
+    if source[start..].starts_with("<!--") {
+        return source[start + 4..]
+            .find("-->")
+            .map(|relative| start + 4 + relative + 3);
+    }
+    let mut quote = None;
+    for (relative, character) in source[start + 1..].char_indices() {
+        match (quote, character) {
+            (Some(active), current) if active == current => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, '>') => return Some(start + 1 + relative + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn update_raw_text_element(tag: &str, raw_text_element: &mut Option<String>) {
+    let inner = tag
+        .strip_prefix('<')
+        .and_then(|tag| tag.strip_suffix('>'))
+        .unwrap_or(tag)
+        .trim_start();
+    if inner.starts_with('!') || inner.starts_with('?') {
+        return;
+    }
+    let closing = inner.starts_with('/');
+    let name = inner
+        .trim_start_matches('/')
+        .split(|character: char| character.is_ascii_whitespace() || character == '/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if closing {
+        if raw_text_element.as_deref() == Some(name.as_str()) {
+            *raw_text_element = None;
+        }
+    } else if matches!(name.as_str(), "script" | "style") {
+        *raw_text_element = Some(name);
+    }
+}
+
+fn is_print_emoji_grapheme(grapheme: &str) -> bool {
+    // BMP symbols such as the Markdown task markers U+2610/U+2611 have text
+    // presentation by default and should stay in the primary document font.
+    // A variation selector, keycap, or supplementary emoji scalar opts the
+    // complete grapheme into the dedicated emoji outline font.
+    grapheme
+        .chars()
+        .any(|character| matches!(character as u32, 0x20E3 | 0xFE0F | 0x1F000..=0x1FAFF))
+}
+
+fn html_pdf_primary_font() -> Vec<u8> {
+    html_pdf_primary_font_from(
+        std::env::var_os("OFFICECLI_HTML_PDF_PRIMARY_FONT_FILE").map(PathBuf::from),
+    )
+}
+
+fn html_pdf_primary_font_from(configured: Option<PathBuf>) -> Vec<u8> {
+    configured
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_else(|| pdf_handler::font_embedder::bundled_noto_sans_sc().to_vec())
+}
+
+fn html_pdf_fallback_font() -> Option<Vec<u8>> {
+    let configured = std::env::var_os("OFFICECLI_HTML_PDF_FALLBACK_FONT_FILE")
+        .map(PathBuf::from)
+        .into_iter();
+    let platform = [
+        "/Library/Fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\seguisym.ttf",
+    ]
+    .into_iter()
+    .map(PathBuf::from);
+    let user = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Fonts/DejaVuSans.ttf"))
+        .into_iter();
+    configured
+        .chain(user)
+        .chain(platform)
+        .find_map(|path| std::fs::read(path).ok())
+}
+
+fn common_resource_root(current: Option<&Path>, resource: &Path) -> PathBuf {
+    let resource_parent = resource.parent().unwrap_or(resource);
+    let Some(current) = current else {
+        return resource_parent.to_path_buf();
+    };
+    let mut root = current.to_path_buf();
+    while !resource.starts_with(&root) && root.pop() {}
+    if root.as_os_str().is_empty() {
+        resource_parent.to_path_buf()
+    } else {
+        root
+    }
+}
+
+fn export_textual(
+    document: &SemanticHtml,
+    output: &Path,
+    markdown: bool,
+) -> Result<usize, HandlerError> {
+    let content = if markdown {
+        to_markdown_blocks(
+            document.blocks.iter().enumerate(),
+            &document.links,
+            &document.table_links,
+        )
+    } else {
+        let mut text = String::new();
+        for block in &document.blocks {
+            for line in block_lines(block) {
+                text.push_str(&line);
+                text.push('\n');
+            }
+            if !matches!(block, HtmlBlock::SectionBreak) {
+                text.push('\n');
+            }
+        }
+        text
+    };
+    std::fs::write(output, content).map_err(HandlerError::IoError)?;
+    Ok(0)
 }
 
 fn parse_html(source: &str) -> Result<SemanticHtml, HandlerError> {
@@ -576,6 +925,7 @@ impl HtmlParser {
             self.pending = Some(PendingBlock {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
+                links: Vec::new(),
             });
         }
         if let Some(pending) = &mut self.pending {
@@ -655,7 +1005,9 @@ impl HtmlParser {
             "section" | "main" => {
                 self.flush_pending()?;
                 self.flush_pdf_line()?;
-                self.push_section_break()?;
+                if semantic_section_starts_new_page(&tag.attributes) {
+                    self.push_section_break()?;
+                }
             }
             "ul" => self.lists.push(ListState {
                 ordered: false,
@@ -723,7 +1075,11 @@ impl HtmlParser {
                     .filter(|target| safe_link(target))
                     .cloned()
                     .unwrap_or_default();
-                self.links.push(target);
+                self.append_active("", false)?;
+                self.links.push(ActiveLink {
+                    target,
+                    start: self.active_text_len(),
+                });
             }
             "img" => {
                 let source = tag.attributes.get("src").cloned().unwrap_or_default();
@@ -795,9 +1151,26 @@ impl HtmlParser {
                 }
             }
             "a" => {
-                if let Some(target) = self.links.pop() {
-                    if !target.is_empty() {
-                        self.append_active(&format!(" ({target})"), false)?;
+                if let Some(link) = self.links.pop() {
+                    let end = self.active_text_len();
+                    if !link.target.is_empty() && end > link.start {
+                        if let Some(table) = &mut self.table {
+                            if table.cell.is_some() {
+                                table.links.push(TablePendingLink {
+                                    row: table.rows.len(),
+                                    column: table.row.len(),
+                                    start: link.start,
+                                    end,
+                                    target: link.target,
+                                });
+                            }
+                        } else if let Some(pending) = &mut self.pending {
+                            pending.links.push(PendingLink {
+                                start: link.start,
+                                end,
+                                target: link.target,
+                            });
+                        }
                     }
                 }
             }
@@ -817,6 +1190,7 @@ impl HtmlParser {
         let TableBuilder {
             rows,
             cell_count,
+            links,
             fragment,
             ..
         } = table;
@@ -828,7 +1202,18 @@ impl HtmlParser {
                 )));
             }
             if !rows.is_empty() {
+                let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(rows))?;
+                self.document
+                    .table_links
+                    .extend(links.into_iter().map(|link| SemanticTableLink {
+                        block_index,
+                        row: link.row,
+                        column: link.column,
+                        start: link.start,
+                        end: link.end,
+                        target: link.target,
+                    }));
             }
             return Ok(());
         };
@@ -868,6 +1253,7 @@ impl HtmlParser {
                 column_count: fragment.column_count,
                 rows: Vec::new(),
                 cell_count: 0,
+                links: Vec::new(),
             });
         }
 
@@ -902,7 +1288,12 @@ impl HtmlParser {
                 logical.node_id
             )));
         }
+        let row_offset = logical.rows.len();
         logical.rows.extend(rows);
+        logical.links.extend(links.into_iter().map(|mut link| {
+            link.row = link.row.saturating_add(row_offset);
+            link
+        }));
         logical.next_fragment += 1;
         logical.next_row = fragment.row_end.saturating_add(1);
 
@@ -922,7 +1313,18 @@ impl HtmlParser {
                 ));
             }
             if !logical.rows.is_empty() {
+                let block_index = self.document.blocks.len();
                 self.push_block(HtmlBlock::Table(logical.rows))?;
+                self.document
+                    .table_links
+                    .extend(logical.links.into_iter().map(|link| SemanticTableLink {
+                        block_index,
+                        row: link.row,
+                        column: link.column,
+                        start: link.start,
+                        end: link.end,
+                        target: link.target,
+                    }));
             }
         }
         Ok(())
@@ -936,8 +1338,18 @@ impl HtmlParser {
         self.pending = Some(PendingBlock {
             kind,
             text: String::new(),
+            links: Vec::new(),
         });
         Ok(())
+    }
+
+    fn active_text_len(&self) -> usize {
+        self.table
+            .as_ref()
+            .and_then(|table| table.cell.as_ref())
+            .map(String::len)
+            .or_else(|| self.pending.as_ref().map(|pending| pending.text.len()))
+            .unwrap_or(0)
     }
 
     fn append_active(&mut self, value: &str, preserve: bool) -> Result<(), HandlerError> {
@@ -952,6 +1364,7 @@ impl HtmlParser {
             self.pending = Some(PendingBlock {
                 kind: PendingKind::Paragraph,
                 text: String::new(),
+                links: Vec::new(),
             });
         }
         let pending = self.pending.as_mut().expect("created pending block");
@@ -963,11 +1376,14 @@ impl HtmlParser {
         let Some(pending) = self.pending.take() else {
             return Ok(());
         };
-        let text = if matches!(pending.kind, PendingKind::Preformatted) {
-            pending.text.trim_matches('\n').to_string()
+        let trimmed = if matches!(pending.kind, PendingKind::Preformatted) {
+            pending.text.trim_matches('\n')
         } else {
-            pending.text.trim().to_string()
+            pending.text.trim()
         };
+        let trim_start = trimmed.as_ptr() as usize - pending.text.as_ptr() as usize;
+        let trim_end = trim_start + trimmed.len();
+        let text = trimmed.to_string();
         if text.is_empty() {
             return Ok(());
         }
@@ -983,7 +1399,21 @@ impl HtmlParser {
             PendingKind::Preformatted => HtmlBlock::Preformatted(text),
             PendingKind::Quote => HtmlBlock::Quote(text),
         };
-        self.push_block(block)
+        let block_index = self.document.blocks.len();
+        self.push_block(block)?;
+        self.document
+            .links
+            .extend(pending.links.into_iter().filter_map(|link| {
+                let start = link.start.max(trim_start);
+                let end = link.end.min(trim_end);
+                (end > start).then(|| SemanticLink {
+                    block_index,
+                    start: start - trim_start,
+                    end: end - trim_start,
+                    target: link.target,
+                })
+            }));
+        Ok(())
     }
 
     fn push_pdf_line_fragment(
@@ -1104,7 +1534,7 @@ fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
     let _ = handler.remove("/body/p[1]")?;
     let mut pending = Vec::new();
     let mut embedded = 0usize;
-    for block in &document.blocks {
+    for (block_index, block) in document.blocks.iter().enumerate() {
         if let HtmlBlock::Image {
             source,
             alt,
@@ -1112,7 +1542,12 @@ fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
         } = block
         {
             if let Some(asset) = resolved_image(document, source, ImageTarget::Office) {
-                flush_docx_markdown(&handler, &mut pending)?;
+                flush_docx_markdown(
+                    &handler,
+                    &mut pending,
+                    &document.links,
+                    &document.table_links,
+                )?;
                 let mut properties = HashMap::new();
                 properties.insert("src".to_string(), asset.path.to_string_lossy().into_owned());
                 properties.insert("format".to_string(), asset.format.clone());
@@ -1124,22 +1559,38 @@ fn export_docx(document: &SemanticHtml, output: &Path) -> Result<usize, HandlerE
                 continue;
             }
         }
-        pending.push(block.clone());
+        pending.push((block_index, block.clone()));
     }
-    flush_docx_markdown(&handler, &mut pending)?;
+    flush_docx_markdown(
+        &handler,
+        &mut pending,
+        &document.links,
+        &document.table_links,
+    )?;
     handler.save()?;
     Ok(embedded)
 }
 
 fn flush_docx_markdown(
     handler: &WordHandler,
-    pending: &mut Vec<HtmlBlock>,
+    pending: &mut Vec<(usize, HtmlBlock)>,
+    links: &[SemanticLink],
+    table_links: &[SemanticTableLink],
 ) -> Result<(), HandlerError> {
     if pending.is_empty() {
         return Ok(());
     }
     let mut properties = HashMap::new();
-    properties.insert("markdown".to_string(), to_markdown_blocks(pending));
+    properties.insert(
+        "markdown".to_string(),
+        to_markdown_blocks(
+            pending
+                .iter()
+                .map(|(block_index, block)| (*block_index, block)),
+            links,
+            table_links,
+        ),
+    );
     handler.add(
         "/body",
         "markdown",
@@ -1391,37 +1842,46 @@ fn export_pdf(document: &mut SemanticHtml, output: &Path) -> Result<usize, Handl
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let font_selection = semantic_pdf_font_selection(&font_characters);
-    let font_characters = sanitize_semantic_pdf_text(&font_characters, font_selection.as_ref());
-    let font_character_set: HashSet<char> = font_characters.chars().collect();
-    let font_file = font_selection
-        .as_ref()
-        .map(|selection| selection.path.to_string_lossy().into_owned());
-    if let Some(selection) = &font_selection {
-        if !selection.missing.is_empty() {
-            document.warnings.insert(format!(
-                "PDF font fallback replaced {} distinct unsupported extracted characters with {}",
-                selection.missing.len(),
-                selection.replacement
-            ));
-        }
+    let font_plan = semantic_pdf_font_plan(&font_characters)?;
+    if !font_plan.missing.is_empty() {
+        document.warnings.insert(format!(
+            "PDF font fallback replaced {} distinct unsupported extracted characters with {}",
+            font_plan.missing.len(),
+            font_plan.replacement
+        ));
     }
     let mut page = 1usize;
-    let mut line_on_page = 0usize;
+    let mut cursor_y = SEMANTIC_PDF_CONTENT_TOP;
+    let mut page_has_content = false;
     let mut embedded = 0usize;
     let mut page_text = Vec::new();
-    for block in &document.blocks {
-        if matches!(block, HtmlBlock::SectionBreak) && line_on_page > 0 {
-            flush_semantic_pdf_page(
+    for (block_index, block) in document.blocks.iter().enumerate() {
+        if page_has_content {
+            if let Some(required_height) = semantic_pdf_keep_with_next_height(
+                block,
+                document.blocks.get(block_index.saturating_add(1)),
+            ) {
+                if cursor_y - required_height < SEMANTIC_PDF_BOTTOM_MARGIN {
+                    start_next_semantic_pdf_page(
+                        &handler,
+                        &mut page,
+                        &mut page_text,
+                        &mut cursor_y,
+                        &mut page_has_content,
+                        &font_plan,
+                    )?;
+                }
+            }
+        }
+        if matches!(block, HtmlBlock::SectionBreak) && page_has_content {
+            start_next_semantic_pdf_page(
                 &handler,
-                page,
+                &mut page,
                 &mut page_text,
-                &font_character_set,
-                font_file.as_deref(),
+                &mut cursor_y,
+                &mut page_has_content,
+                &font_plan,
             )?;
-            page += 1;
-            line_on_page = 0;
-            handler.add("/", "page", InsertPosition::Append, &HashMap::new(), None)?;
             continue;
         }
         if let HtmlBlock::Image {
@@ -1430,20 +1890,19 @@ fn export_pdf(document: &mut SemanticHtml, output: &Path) -> Result<usize, Handl
         {
             if let Some(asset) = resolved_image(document, source, ImageTarget::Pdf) {
                 let (width, height) = pdf_image_dimensions(*geometry);
-                let image_lines = ((height / 15.0).ceil() as usize + 1).clamp(1, 44);
-                if line_on_page.saturating_add(image_lines) > 48 {
-                    flush_semantic_pdf_page(
+                if page_has_content
+                    && cursor_y - height - SEMANTIC_PDF_IMAGE_GAP < SEMANTIC_PDF_BOTTOM_MARGIN
+                {
+                    start_next_semantic_pdf_page(
                         &handler,
-                        page,
+                        &mut page,
                         &mut page_text,
-                        &font_character_set,
-                        font_file.as_deref(),
+                        &mut cursor_y,
+                        &mut page_has_content,
+                        &font_plan,
                     )?;
-                    page += 1;
-                    line_on_page = 0;
-                    handler.add("/", "page", InsertPosition::Append, &HashMap::new(), None)?;
                 }
-                let y = 790.0 - line_on_page as f32 * 15.0 - height;
+                let y = cursor_y - height;
                 let mut properties = HashMap::new();
                 properties.insert("src".to_string(), asset.path.to_string_lossy().into_owned());
                 properties.insert("x".to_string(), "54".to_string());
@@ -1458,119 +1917,514 @@ fn export_pdf(document: &mut SemanticHtml, output: &Path) -> Result<usize, Handl
                     None,
                 )?;
                 embedded += 1;
-                line_on_page += image_lines;
+                cursor_y = y - SEMANTIC_PDF_IMAGE_GAP;
+                page_has_content = true;
                 continue;
             }
         }
-        for logical in block_lines(block) {
-            for line in wrap_text(&logical, 82) {
-                if line_on_page >= 48 {
-                    flush_semantic_pdf_page(
+        if let HtmlBlock::Table(rows) = block {
+            let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+            if columns == 0 {
+                continue;
+            }
+            let mut row_start = 0usize;
+            while row_start < rows.len() {
+                let available = ((cursor_y - SEMANTIC_PDF_BOTTOM_MARGIN)
+                    / SEMANTIC_PDF_TABLE_ROW_HEIGHT)
+                    .floor()
+                    .max(0.0) as usize;
+                if available == 0 || (page_has_content && available < 2) {
+                    start_next_semantic_pdf_page(
                         &handler,
-                        page,
+                        &mut page,
                         &mut page_text,
-                        &font_character_set,
-                        font_file.as_deref(),
+                        &mut cursor_y,
+                        &mut page_has_content,
+                        &font_plan,
                     )?;
-                    page += 1;
-                    line_on_page = 0;
-                    handler.add("/", "page", InsertPosition::Append, &HashMap::new(), None)?;
+                    continue;
                 }
-                let heading = matches!(block, HtmlBlock::Heading { .. });
-                let size = if heading { 16.0 } else { 11.0 };
-                let y = 790.0 - line_on_page as f32 * 15.0;
-                let line = line.replace('\t', " ");
-                page_text.push(pdf_handler::modifier::ReadyTextBlock {
-                    text: sanitize_semantic_pdf_text(&line, font_selection.as_ref()),
-                    x: 54.0,
+                let row_end = (row_start + available).min(rows.len());
+                let fragment_rows = row_end - row_start;
+                handler.add_table_grid(
+                    page,
+                    54.0,
+                    cursor_y,
+                    SEMANTIC_PDF_CONTENT_WIDTH,
+                    SEMANTIC_PDF_TABLE_ROW_HEIGHT,
+                    fragment_rows,
+                    columns,
+                )?;
+                let column_width = SEMANTIC_PDF_CONTENT_WIDTH / columns as f32;
+                for (target_row, source_row) in rows[row_start..row_end].iter().enumerate() {
+                    let source_row_index = row_start.saturating_add(target_row);
+                    for column in 0..columns {
+                        let text = source_row.get(column).map(String::as_str).unwrap_or("");
+                        let text = truncate_semantic_pdf_cell(text, column_width);
+                        let x = 58.0 + column_width * column as f32;
+                        let y = cursor_y - SEMANTIC_PDF_TABLE_ROW_HEIGHT * target_row as f32 - 15.0;
+                        page_text.push(pdf_handler::modifier::ReadyTextBlock {
+                            text: sanitize_semantic_pdf_text(&text, &font_plan),
+                            x,
+                            y,
+                            size: 10.0,
+                        });
+                        for link in document.table_links.iter().filter(|link| {
+                            link.block_index == block_index
+                                && link.row == source_row_index
+                                && link.column == column
+                        }) {
+                            if link.end <= text.len()
+                                && text.is_char_boundary(link.start)
+                                && text.is_char_boundary(link.end)
+                                && text[link.start..link.end] != link.target
+                            {
+                                add_semantic_pdf_link(
+                                    &handler,
+                                    page,
+                                    &text,
+                                    link.start,
+                                    link.end,
+                                    x,
+                                    y,
+                                    10.0,
+                                    &link.target,
+                                )?;
+                            }
+                        }
+                    }
+                }
+                cursor_y -=
+                    SEMANTIC_PDF_TABLE_ROW_HEIGHT * fragment_rows as f32 + SEMANTIC_PDF_IMAGE_GAP;
+                page_has_content = true;
+                row_start = row_end;
+                if row_start < rows.len() {
+                    start_next_semantic_pdf_page(
+                        &handler,
+                        &mut page,
+                        &mut page_text,
+                        &mut cursor_y,
+                        &mut page_has_content,
+                        &font_plan,
+                    )?;
+                }
+            }
+            continue;
+        }
+        let (pdf_text, link_offset) = semantic_pdf_block_text(block);
+        for wrapped in wrap_text_spans(&pdf_text, 82) {
+            let (size, line_height) = semantic_pdf_line_metrics(block);
+            if page_has_content && cursor_y - line_height < SEMANTIC_PDF_BOTTOM_MARGIN {
+                start_next_semantic_pdf_page(
+                    &handler,
+                    &mut page,
+                    &mut page_text,
+                    &mut cursor_y,
+                    &mut page_has_content,
+                    &font_plan,
+                )?;
+            }
+            let y = cursor_y - size;
+            let line = wrapped.text.replace('\t', " ");
+            let x = if matches!(block, HtmlBlock::Preformatted(_)) {
+                handler.add_code_panel(
+                    page,
+                    50.0,
+                    cursor_y + 2.0,
+                    SEMANTIC_PDF_CONTENT_WIDTH + 8.0,
+                    line_height,
+                )?;
+                58.0
+            } else {
+                54.0
+            };
+            page_text.push(pdf_handler::modifier::ReadyTextBlock {
+                text: sanitize_semantic_pdf_text(&line, &font_plan),
+                x,
+                y,
+                size,
+            });
+            for link in document
+                .links
+                .iter()
+                .filter(|link| link.block_index == block_index)
+            {
+                let link_start = link.start.saturating_add(link_offset);
+                let link_end = link.end.saturating_add(link_offset);
+                if link_end <= pdf_text.len()
+                    && pdf_text.is_char_boundary(link_start)
+                    && pdf_text.is_char_boundary(link_end)
+                    && pdf_text[link_start..link_end] == link.target
+                {
+                    // The page flush pass recognizes visible raw URLs. Avoid a
+                    // second annotation when an explicit anchor uses that same
+                    // URL as its complete visible label.
+                    continue;
+                }
+                let start = link_start.max(wrapped.start);
+                let end = link_end.min(wrapped.end);
+                if end <= start
+                    || !pdf_text.is_char_boundary(start)
+                    || !pdf_text.is_char_boundary(end)
+                {
+                    continue;
+                }
+                add_semantic_pdf_link(
+                    &handler,
+                    page,
+                    &line,
+                    start - wrapped.start,
+                    end - wrapped.start,
+                    x,
                     y,
                     size,
-                });
-                line_on_page += 1;
+                    &link.target,
+                )?;
             }
+            cursor_y -= line_height;
+            page_has_content = true;
         }
     }
-    flush_semantic_pdf_page(
-        &handler,
-        page,
-        &mut page_text,
-        &font_character_set,
-        font_file.as_deref(),
-    )?;
+    flush_semantic_pdf_page(&handler, page, &mut page_text, &font_plan)?;
     handler.save()?;
     Ok(embedded)
+}
+
+fn semantic_pdf_line_metrics(block: &HtmlBlock) -> (f32, f32) {
+    let size = match block {
+        HtmlBlock::Heading { level: 1, .. } => 18.0,
+        HtmlBlock::Heading { level: 2, .. } => 16.0,
+        HtmlBlock::Heading { .. } => 14.0,
+        HtmlBlock::Preformatted(_) => 10.0,
+        _ => 11.0,
+    };
+    let line_height = (size * 1.4_f32).max(15.5_f32);
+    (size, line_height)
+}
+
+fn semantic_pdf_keep_with_next_height(block: &HtmlBlock, next: Option<&HtmlBlock>) -> Option<f32> {
+    if !matches!(block, HtmlBlock::Heading { .. }) {
+        return None;
+    }
+    let heading_height = semantic_pdf_line_metrics(block).1;
+    let next_height = match next? {
+        HtmlBlock::Table(rows) => {
+            SEMANTIC_PDF_TABLE_ROW_HEIGHT * rows.len().clamp(1, 2) as f32 + SEMANTIC_PDF_IMAGE_GAP
+        }
+        HtmlBlock::Image { geometry, .. } => {
+            let (_, height) = pdf_image_dimensions(*geometry);
+            height.min(96.0) + SEMANTIC_PDF_IMAGE_GAP
+        }
+        HtmlBlock::SectionBreak => return None,
+        next => semantic_pdf_line_metrics(next).1,
+    };
+    Some(heading_height + next_height)
+}
+
+fn semantic_pdf_block_text(block: &HtmlBlock) -> (String, usize) {
+    match block {
+        HtmlBlock::ListItem {
+            ordered,
+            ordinal,
+            text,
+        } => {
+            let prefix = if *ordered {
+                format!("{ordinal}. ")
+            } else {
+                "• ".to_string()
+            };
+            let offset = prefix.len();
+            (format!("{prefix}{text}"), offset)
+        }
+        _ => (block_lines(block).join("\n"), 0),
+    }
+}
+
+fn truncate_semantic_pdf_cell(text: &str, column_width: f32) -> String {
+    let maximum_units = ((column_width - 8.0).max(8.0) / 5.5).floor() as usize;
+    let mut output = String::new();
+    let mut units = 0usize;
+    for character in text.chars() {
+        let width = semantic_pdf_character_width(character);
+        if units.saturating_add(width) > maximum_units {
+            break;
+        }
+        output.push(character);
+        units += width;
+    }
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_next_semantic_pdf_page(
+    handler: &PdfHandler,
+    page: &mut usize,
+    blocks: &mut Vec<pdf_handler::modifier::ReadyTextBlock>,
+    cursor_y: &mut f32,
+    page_has_content: &mut bool,
+    font_plan: &SemanticPdfFontPlan,
+) -> Result<(), HandlerError> {
+    flush_semantic_pdf_page(handler, *page, blocks, font_plan)?;
+    *page += 1;
+    handler.add("/", "page", InsertPosition::Append, &HashMap::new(), None)?;
+    *cursor_y = SEMANTIC_PDF_CONTENT_TOP;
+    *page_has_content = false;
+    Ok(())
 }
 
 fn flush_semantic_pdf_page(
     handler: &PdfHandler,
     page: usize,
     blocks: &mut Vec<pdf_handler::modifier::ReadyTextBlock>,
-    font_characters: &HashSet<char>,
-    font_file: Option<&str>,
+    font_plan: &SemanticPdfFontPlan,
 ) -> Result<(), HandlerError> {
     if blocks.is_empty() {
         return Ok(());
     }
-    let font_name =
-        handler.ensure_font_for_chars(page, font_characters, "HCDSemantic", font_file)?;
+    let font_name = ensure_semantic_pdf_fonts(handler, page, font_plan)?;
     handler.add_ready_text_blocks(page, blocks, &font_name)?;
+    for block in blocks.iter() {
+        for (start, end, target) in semantic_pdf_links(&block.text) {
+            add_semantic_pdf_link(
+                handler,
+                page,
+                &block.text,
+                start,
+                end,
+                block.x,
+                block.y,
+                block.size,
+                target,
+            )?;
+        }
+    }
     blocks.clear();
     Ok(())
 }
 
-struct SemanticPdfFontSelection {
-    path: PathBuf,
+fn ensure_semantic_pdf_fonts(
+    handler: &PdfHandler,
+    page: usize,
+    font_plan: &SemanticPdfFontPlan,
+) -> Result<String, HandlerError> {
+    let mut primary = None;
+    for (index, source) in font_plan.sources.iter().enumerate() {
+        if source.characters.is_empty() {
+            continue;
+        }
+        let preferred = if index == 0 {
+            "HCDSemantic".to_string()
+        } else {
+            format!("HCDSemanticFallback{index}")
+        };
+        let path = source
+            .path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let name =
+            handler.ensure_font_for_chars(page, &source.characters, &preferred, path.as_deref())?;
+        if primary.is_none() {
+            primary = Some(name);
+        }
+    }
+    primary.ok_or_else(|| {
+        HandlerError::OperationFailed(
+            "semantic PDF has text but no font covers any requested character".to_string(),
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_semantic_pdf_link(
+    handler: &PdfHandler,
+    page: usize,
+    text: &str,
+    start: usize,
+    end: usize,
+    x: f32,
+    y: f32,
+    size: f32,
+    target: &str,
+) -> Result<(), HandlerError> {
+    if end <= start || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return Ok(());
+    }
+    if !semantic_pdf_uri_target(target) {
+        // The pure-Rust PDF writer currently emits URI annotations. Local
+        // anchors remain semantic in HCD/HTML and visible in PDF, but are not
+        // misrepresented as external URI actions.
+        return Ok(());
+    }
+    let prefix_units = text[..start]
+        .chars()
+        .map(semantic_pdf_character_width)
+        .sum::<usize>() as f32;
+    let link_units = text[start..end]
+        .chars()
+        .map(semantic_pdf_character_width)
+        .sum::<usize>() as f32;
+    let unit_width = size * 0.5;
+    handler.add_link_annotation(
+        page,
+        &pdf_handler::content_stream::BBox {
+            x: x + prefix_units * unit_width,
+            y: y - size * 0.18,
+            width: (link_units * unit_width).max(1.0),
+            height: size * 1.2,
+        },
+        target,
+    )
+}
+
+fn semantic_pdf_uri_target(target: &str) -> bool {
+    let normalized = target.trim().to_ascii_lowercase();
+    normalized.starts_with("https://")
+        || normalized.starts_with("http://")
+        || normalized.starts_with("mailto:")
+}
+
+fn semantic_pdf_links(text: &str) -> Vec<(usize, usize, &str)> {
+    let mut links = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let tail = &text[cursor..];
+        let start = ["https://", "http://", "mailto:"]
+            .iter()
+            .filter_map(|prefix| tail.find(prefix))
+            .min()
+            .map(|relative| cursor + relative);
+        let Some(start) = start else {
+            break;
+        };
+        let mut end = text.len();
+        for (relative, character) in text[start..].char_indices() {
+            if character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\'') {
+                end = start + relative;
+                break;
+            }
+        }
+        while end > start
+            && text[..end]
+                .chars()
+                .next_back()
+                .is_some_and(|character| matches!(character, ')' | ']' | '}' | ',' | '.' | ';'))
+        {
+            end -= text[..end].chars().next_back().unwrap().len_utf8();
+        }
+        if end > start {
+            links.push((start, end, &text[start..end]));
+        }
+        cursor = end.max(start + 1);
+    }
+    links
+}
+
+struct SemanticPdfFontSource {
+    path: Option<PathBuf>,
+    characters: HashSet<char>,
+}
+
+struct SemanticPdfFontPlan {
+    sources: Vec<SemanticPdfFontSource>,
     missing: HashSet<char>,
     replacement: char,
 }
 
-fn semantic_pdf_font_selection(characters: &str) -> Option<SemanticPdfFontSelection> {
+fn semantic_pdf_font_plan(characters: &str) -> Result<SemanticPdfFontPlan, HandlerError> {
     let required: HashSet<char> = characters.chars().collect();
-    let configured = std::env::var_os("OFFICECLI_SEMANTIC_PDF_FONT_FILE").map(PathBuf::from);
-    let candidates = configured.into_iter().chain(
+    let mut remaining = required.clone();
+    remaining.insert('?');
+    let mut candidate_paths = Vec::new();
+    for variable in [
+        "OFFICECLI_SEMANTIC_PDF_FONT_FILE",
+        "OFFICECLI_SEMANTIC_PDF_EMOJI_FONT_FILE",
+    ] {
+        if let Some(path) = std::env::var_os(variable) {
+            candidate_paths.push(PathBuf::from(path));
+        }
+    }
+    if let Some(paths) = std::env::var_os("OFFICECLI_SEMANTIC_PDF_FALLBACK_FONT_FILES") {
+        candidate_paths.extend(std::env::split_paths(&paths));
+    }
+    candidate_paths.extend(
         [
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "/Library/Fonts/Arial Unicode.ttf",
+            "/Library/Fonts/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoEmoji-VariableFont_wght.ttf",
             "C:\\Windows\\Fonts\\arialuni.ttf",
+            "C:\\Windows\\Fonts\\seguisym.ttf",
         ]
         .into_iter()
         .map(PathBuf::from),
     );
-    candidates
-        .into_iter()
-        .filter(|candidate| candidate.is_file())
-        .filter_map(|path| {
-            pdf_handler::font_embedder::font_file_missing_chars(&path, &required)
-                .ok()
-                .map(|missing| (path, missing))
-        })
-        .min_by_key(|(_, missing)| missing.len())
-        .map(|(path, missing)| {
-            let replacement_chars = HashSet::from(['\u{fffd}']);
-            let replacement =
-                if pdf_handler::font_embedder::font_file_covers_chars(&path, &replacement_chars)
-                    .unwrap_or(false)
-                {
-                    '\u{fffd}'
-                } else {
-                    '?'
-                };
-            SemanticPdfFontSelection {
-                path,
-                missing,
-                replacement,
-            }
-        })
+    if let Some(home) = std::env::var_os("HOME") {
+        candidate_paths.push(PathBuf::from(home).join("Library/Fonts/DejaVuSans.ttf"));
+    }
+    let mut seen = HashSet::new();
+    candidate_paths.retain(|path| path.is_file() && seen.insert(path.clone()));
+
+    let mut sources = Vec::new();
+    while !remaining.is_empty() && !candidate_paths.is_empty() {
+        let best = candidate_paths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| {
+                pdf_handler::font_embedder::font_file_missing_chars(path, &remaining)
+                    .ok()
+                    .map(|missing| {
+                        (
+                            index,
+                            remaining.len().saturating_sub(missing.len()),
+                            missing,
+                        )
+                    })
+            })
+            .max_by_key(|(_, covered, _)| *covered);
+        let Some((index, covered, missing)) = best else {
+            break;
+        };
+        if covered == 0 {
+            break;
+        }
+        let path = candidate_paths.remove(index);
+        let characters = remaining.difference(&missing).copied().collect();
+        sources.push(SemanticPdfFontSource {
+            path: Some(path),
+            characters,
+        });
+        remaining = missing;
+    }
+
+    if !remaining.is_empty() {
+        let missing = pdf_handler::font_embedder::bundled_font_missing_chars(&remaining)?;
+        let characters = remaining
+            .difference(&missing)
+            .copied()
+            .collect::<HashSet<_>>();
+        if !characters.is_empty() {
+            sources.push(SemanticPdfFontSource {
+                path: None,
+                characters,
+            });
+        }
+        remaining = missing;
+    }
+
+    Ok(SemanticPdfFontPlan {
+        sources,
+        missing: remaining.intersection(&required).copied().collect(),
+        replacement: '?',
+    })
 }
 
-fn sanitize_semantic_pdf_text(text: &str, selection: Option<&SemanticPdfFontSelection>) -> String {
-    let Some(selection) = selection else {
-        return text.to_string();
-    };
+fn sanitize_semantic_pdf_text(text: &str, plan: &SemanticPdfFontPlan) -> String {
     text.chars()
         .map(|character| {
-            if selection.missing.contains(&character) {
-                selection.replacement
+            if plan.missing.contains(&character) {
+                plan.replacement
             } else {
                 character
             }
@@ -1604,35 +2458,47 @@ fn validate_output(path: &Path, format: &str) -> Result<(), HandlerError> {
     Ok(())
 }
 
-fn to_markdown_blocks(blocks: &[HtmlBlock]) -> String {
+fn to_markdown_blocks<'a>(
+    blocks: impl IntoIterator<Item = (usize, &'a HtmlBlock)>,
+    links: &[SemanticLink],
+    table_links: &[SemanticTableLink],
+) -> String {
     let mut output = String::new();
-    for block in blocks {
+    for (block_index, block) in blocks {
         match block {
             HtmlBlock::Heading { level, text } => {
                 output.push_str(&"#".repeat(*level as usize));
                 output.push(' ');
-                output.push_str(text);
+                output.push_str(&markdown_linked_text(text, block_index, links));
             }
-            HtmlBlock::Paragraph(text) => output.push_str(text),
+            HtmlBlock::Paragraph(text) => {
+                output.push_str(&markdown_linked_text(text, block_index, links));
+            }
             HtmlBlock::ListItem {
                 ordered,
                 ordinal,
                 text,
             } => {
                 if *ordered {
-                    output.push_str(&format!("{ordinal}. {text}"));
+                    output.push_str(&format!("{ordinal}. "));
                 } else {
-                    output.push_str(&format!("- {text}"));
+                    output.push_str("- ");
                 }
+                output.push_str(&markdown_linked_text(text, block_index, links));
             }
             HtmlBlock::Preformatted(text) => {
                 output.push_str("```\n");
                 output.push_str(text);
                 output.push_str("\n```");
             }
-            HtmlBlock::Quote(text) => output.push_str(&format!("> {text}")),
+            HtmlBlock::Quote(text) => {
+                output.push_str("> ");
+                output.push_str(&markdown_linked_text(text, block_index, links));
+            }
             HtmlBlock::Rule => output.push_str("---"),
-            HtmlBlock::Table(rows) => append_markdown_table(&mut output, rows),
+            HtmlBlock::Table(rows) => {
+                append_markdown_table(&mut output, rows, block_index, table_links)
+            }
             HtmlBlock::Image { source, alt, .. } => {
                 output.push_str(&format!("[Image: {alt}]"));
                 if !source.is_empty() {
@@ -1650,7 +2516,42 @@ fn to_markdown_blocks(blocks: &[HtmlBlock]) -> String {
     }
 }
 
-fn append_markdown_table(output: &mut String, rows: &[Vec<String>]) {
+fn markdown_linked_text(text: &str, block_index: usize, links: &[SemanticLink]) -> String {
+    let mut block_links = links
+        .iter()
+        .filter(|link| {
+            link.block_index == block_index
+                && link.end > link.start
+                && link.end <= text.len()
+                && text.is_char_boundary(link.start)
+                && text.is_char_boundary(link.end)
+        })
+        .collect::<Vec<_>>();
+    block_links.sort_by_key(|link| (link.start, link.end));
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for link in block_links {
+        if link.start < cursor {
+            continue;
+        }
+        output.push_str(&text[cursor..link.start]);
+        output.push('[');
+        output.push_str(&text[link.start..link.end]);
+        output.push_str("](");
+        output.push_str(&link.target);
+        output.push(')');
+        cursor = link.end;
+    }
+    output.push_str(&text[cursor..]);
+    output
+}
+
+fn append_markdown_table(
+    output: &mut String,
+    rows: &[Vec<String>],
+    block_index: usize,
+    links: &[SemanticTableLink],
+) {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     if columns == 0 {
         return;
@@ -1659,30 +2560,77 @@ fn append_markdown_table(output: &mut String, rows: &[Vec<String>]) {
         output,
         rows.first().map(Vec::as_slice).unwrap_or(&[]),
         columns,
+        block_index,
+        0,
+        links,
     );
     output.push('\n');
     output.push('|');
     for _ in 0..columns {
         output.push_str(" --- |");
     }
-    for row in rows.iter().skip(1) {
+    for (row_index, row) in rows.iter().enumerate().skip(1) {
         output.push('\n');
-        append_markdown_row(output, row, columns);
+        append_markdown_row(output, row, columns, block_index, row_index, links);
     }
 }
 
-fn append_markdown_row(output: &mut String, row: &[String], columns: usize) {
+fn append_markdown_row(
+    output: &mut String,
+    row: &[String],
+    columns: usize,
+    block_index: usize,
+    row_index: usize,
+    links: &[SemanticTableLink],
+) {
     output.push('|');
     for column in 0..columns {
         output.push(' ');
+        let text = row.get(column).map(String::as_str).unwrap_or("");
         output.push_str(
-            &row.get(column)
-                .map(String::as_str)
-                .unwrap_or("")
+            &markdown_table_linked_text(text, block_index, row_index, column, links)
                 .replace('|', "\\|"),
         );
         output.push_str(" |");
     }
+}
+
+fn markdown_table_linked_text(
+    text: &str,
+    block_index: usize,
+    row: usize,
+    column: usize,
+    links: &[SemanticTableLink],
+) -> String {
+    let mut cell_links = links
+        .iter()
+        .filter(|link| {
+            link.block_index == block_index
+                && link.row == row
+                && link.column == column
+                && link.end > link.start
+                && link.end <= text.len()
+                && text.is_char_boundary(link.start)
+                && text.is_char_boundary(link.end)
+        })
+        .collect::<Vec<_>>();
+    cell_links.sort_by_key(|link| (link.start, link.end));
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for link in cell_links {
+        if link.start < cursor {
+            continue;
+        }
+        output.push_str(&text[cursor..link.start]);
+        output.push('[');
+        output.push_str(&text[link.start..link.end]);
+        output.push_str("](");
+        output.push_str(&link.target);
+        output.push(')');
+        cursor = link.end;
+    }
+    output.push_str(&text[cursor..]);
+    output
 }
 
 fn semantic_slides(document: &SemanticHtml) -> Vec<SemanticSlide> {
@@ -1815,29 +2763,57 @@ fn block_lines(block: &HtmlBlock) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    wrap_text_spans(text, width)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WrappedText {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+fn wrap_text_spans(text: &str, width: usize) -> Vec<WrappedText> {
     if text.is_empty() {
-        return vec![String::new()];
+        return vec![WrappedText {
+            text: String::new(),
+            start: 0,
+            end: 0,
+        }];
     }
     let mut lines = Vec::new();
-    let mut current = String::new();
+    let mut start = 0usize;
     let mut current_width = 0usize;
-    for character in text.chars() {
+    for (index, character) in text.char_indices() {
         let character_width = semantic_pdf_character_width(character);
         if character == '\n'
-            || (!current.is_empty() && current_width.saturating_add(character_width) > width)
+            || (index > start && current_width.saturating_add(character_width) > width)
         {
-            lines.push(std::mem::take(&mut current));
+            lines.push(WrappedText {
+                text: text[start..index].to_string(),
+                start,
+                end: index,
+            });
             current_width = 0;
             if character == '\n' {
+                start = index + character.len_utf8();
                 continue;
             }
+            start = index;
         }
-        current.push(character);
         current_width = current_width.saturating_add(character_width);
     }
-    if !current.is_empty() {
-        lines.push(current);
+    if start < text.len() {
+        lines.push(WrappedText {
+            text: text[start..].to_string(),
+            start,
+            end: text.len(),
+        });
     }
     lines
 }
@@ -2119,6 +3095,15 @@ fn safe_link(target: &str) -> bool {
         || (!normalized.contains(':') && !normalized.starts_with("//"))
 }
 
+fn semantic_section_starts_new_page(attributes: &HashMap<String, String>) -> bool {
+    attributes.get("class").is_some_and(|classes| {
+        classes
+            .split_ascii_whitespace()
+            .any(|class| matches!(class, "hcd-pdf-page" | "hcd-slide" | "hcd-page" | "page"))
+    }) || attributes.contains_key("data-hcd-page")
+        || attributes.contains_key("data-hcd-slide")
+}
+
 fn is_void_element(name: &str) -> bool {
     matches!(
         name,
@@ -2191,6 +3176,87 @@ mod tests {
     }
 
     #[test]
+    fn semantic_pdf_emits_only_uri_annotations() {
+        assert!(semantic_pdf_uri_target("https://example.com"));
+        assert!(semantic_pdf_uri_target("mailto:test@example.com"));
+        assert!(!semantic_pdf_uri_target("#hcd-footnote-note"));
+        assert!(!semantic_pdf_uri_target("../relative.md"));
+    }
+
+    #[test]
+    fn semantic_flow_sections_do_not_force_physical_page_breaks() {
+        let html = r#"<section class="hcd-source"><p>Before</p><section class="hcd-markdown-footnotes"><p>Footnote</p></section><p>After</p></section>"#;
+        let document = parse_html(html).unwrap();
+        assert!(!document
+            .blocks
+            .iter()
+            .any(|block| matches!(block, HtmlBlock::SectionBreak)));
+
+        let paged = parse_html(
+            r#"<section class="hcd-pdf-page" data-hcd-page="1"><p>Page one</p></section><section class="hcd-pdf-page" data-hcd-page="2"><p>Page two</p></section>"#,
+        )
+        .unwrap();
+        assert!(paged
+            .blocks
+            .iter()
+            .any(|block| matches!(block, HtmlBlock::SectionBreak)));
+    }
+
+    #[test]
+    fn print_html_resets_screen_page_shell_without_changing_content() {
+        let source = "<!doctype html><html><head></head><body><p>正文</p></body></html>";
+        let (printed, root) =
+            print_html_with_assets(source, Path::new("source.html"), &HashMap::new()).unwrap();
+        assert!(printed.contains("id=\"officecli-hcd-print\""));
+        assert!(printed.contains("width:auto!important"));
+        assert!(printed.contains("font-size:12pt!important"));
+        assert!(printed.contains("<p>正文</p>"));
+        assert!(root.is_none());
+    }
+
+    #[test]
+    fn print_html_marks_complete_emoji_graphemes_without_changing_hcd_ownership() {
+        let source = r#"<!doctype html><html><head><style>.x::after{content:"😀"}</style></head><body><p data-hcd-id="n_1">A 👨‍👩‍👧‍👦 B</p></body></html>"#;
+        let (printed, _) =
+            print_html_with_assets(source, Path::new("source.html"), &HashMap::new()).unwrap();
+        assert!(printed.contains(r#"<style>.x::after{content:"😀"}</style>"#));
+        assert!(printed
+            .contains(r#"<p data-hcd-id="n_1">A <span class="hcd-print-emoji">👨‍👩‍👧‍👦</span> B</p>"#));
+        assert_eq!(printed.matches("data-hcd-id=\"n_1\"").count(), 1);
+    }
+
+    #[test]
+    fn print_emoji_marker_preserves_comments_and_attributes() {
+        let source = r#"<!-- 😀 > --><p title="😀 >">☐ 正文 😀</p>"#;
+        assert_eq!(
+            mark_print_emoji(source),
+            r#"<!-- 😀 > --><p title="😀 >">☐ 正文 <span class="hcd-print-emoji">😀</span></p>"#
+        );
+    }
+
+    #[test]
+    fn print_html_uses_shrink_wrapped_image_and_non_overlapping_task_markers() {
+        let source = r#"<p class="hcd-markdown-paragraph">安全行内 HTML：<mark>高亮</mark>、<kbd>Ctrl</kbd>、H<sub>2</sub>O。</p><p><span class="hcd-markdown-image">远程示意图</span></p><ul><li><span class="hcd-markdown-task"><span class="hcd-markdown-task-marker">☐</span></span>待办</li><li><span class="hcd-markdown-task hcd-markdown-task-checked"><span class="hcd-markdown-task-marker">☑</span></span>完成</li></ul>"#;
+        let (printed, _) =
+            print_html_with_assets(source, Path::new("source.html"), &HashMap::new()).unwrap();
+        assert!(printed.contains(".hcd-markdown-image{display:inline-block!important"));
+        assert!(printed.contains("<li class=\"hcd-markdown-task-item\">"));
+        assert!(printed.contains("<span class=\"hcd-markdown-task-marker\">□</span>"));
+        assert!(printed.contains("<span class=\"hcd-print-emoji\">☑</span>"));
+        assert!(printed.contains(".hcd-print-kbd{display:inline!important"));
+        assert!(printed.contains("<span class=\"hcd-print-kbd\">Ctrl</span>、H<sub>2</sub>O"));
+        assert!(!printed.contains("<kbd>"));
+    }
+
+    #[test]
+    fn configured_html_pdf_primary_font_overrides_the_bundled_face() {
+        let temp = tempfile::tempdir().unwrap();
+        let font = temp.path().join("brand.ttf");
+        std::fs::write(&font, b"brand-font").unwrap();
+        assert_eq!(html_pdf_primary_font_from(Some(font)), b"brand-font");
+    }
+
+    #[test]
     fn hcd_pdf_fragments_on_the_same_visual_line_are_coalesced() {
         let html = r#"<section class="hcd-pdf-page" data-hcd-page="1"><p class="hcd-pdf-text" data-hcd-x="90" data-hcd-y="700" data-hcd-width="12" data-hcd-height="12"><span>整</span></p><p class="hcd-pdf-text" data-hcd-x="150" data-hcd-y="700" data-hcd-width="12" data-hcd-height="12"><span>改</span></p><p class="hcd-pdf-text" data-hcd-x="90" data-hcd-y="680" data-hcd-width="30" data-hcd-height="12"><span>Hello</span></p><p class="hcd-pdf-text" data-hcd-x="140" data-hcd-y="680" data-hcd-width="30" data-hcd-height="12"><span>world</span></p></section>"#;
         let document = parse_html(html).unwrap();
@@ -2205,33 +3271,305 @@ mod tests {
 
     #[test]
     fn semantic_pdf_font_replaces_only_missing_characters() {
-        let selection = SemanticPdfFontSelection {
-            path: PathBuf::from("unused.ttf"),
+        let plan = SemanticPdfFontPlan {
+            sources: Vec::new(),
             missing: HashSet::from(['ə', 'ʊ']),
             replacement: '?',
         };
         assert_eq!(
-            sanitize_semantic_pdf_text("中文 əʊ text", Some(&selection)),
+            sanitize_semantic_pdf_text("中文 əʊ text", &plan),
             "中文 ?? text"
         );
     }
 
     #[test]
+    fn semantic_pdf_variable_line_height_keeps_text_bboxes_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("layout.pdf");
+        let mut document = SemanticHtml {
+            blocks: vec![
+                HtmlBlock::Heading {
+                    level: 1,
+                    text: "Heading one".to_string(),
+                },
+                HtmlBlock::Heading {
+                    level: 2,
+                    text: "Heading two".to_string(),
+                },
+                HtmlBlock::Paragraph("Body line one".to_string()),
+                HtmlBlock::Paragraph("Body line two".to_string()),
+            ],
+            ..SemanticHtml::default()
+        };
+        export_pdf(&mut document, &output).unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let parsed = reader.parse_page_text_blocks(1).unwrap();
+        let blocks = parsed
+            .text_blocks
+            .iter()
+            .filter(|block| !block.text.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(blocks.len(), 4);
+        for pair in blocks.windows(2) {
+            let upper = pair[0];
+            let lower = pair[1];
+            assert!(
+                lower.bbox.y + lower.bbox.height <= upper.bbox.y + 0.5,
+                "overlapping PDF text bboxes: {:?} then {:?}",
+                upper.bbox,
+                lower.bbox
+            );
+        }
+        assert!(blocks[0].bbox.y < SEMANTIC_PDF_CONTENT_TOP);
+    }
+
+    #[test]
+    fn semantic_pdf_table_draws_grid_and_extractable_cells() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("table.pdf");
+        let mut document = SemanticHtml {
+            blocks: vec![HtmlBlock::Table(vec![
+                vec!["Name".to_string(), "Value".to_string()],
+                vec!["Alice".to_string(), "123".to_string()],
+            ])],
+            table_links: vec![SemanticTableLink {
+                block_index: 0,
+                row: 1,
+                column: 0,
+                start: 0,
+                end: 5,
+                target: "https://example.com/alice".to_string(),
+            }],
+            ..SemanticHtml::default()
+        };
+        export_pdf(&mut document, &output).unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let page_id = *reader.document().get_pages().get(&1).unwrap();
+        let content = reader.document().get_page_content(page_id).unwrap();
+        let operators = String::from_utf8_lossy(&content);
+        assert!(operators.contains(" re S"));
+        assert!(operators.contains(" m ") && operators.contains(" l S"));
+        let text = reader
+            .parse_page_text_blocks(1)
+            .unwrap()
+            .text_blocks
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("Name"));
+        assert!(text.contains("Value"));
+        assert!(text.contains("Alice"));
+        assert!(text.contains("123"));
+        let parsed = reader.parse_page_text_blocks(1).unwrap();
+        assert!(parsed.vector_rects.len() >= 2);
+        assert!(!parsed.vector_lines.is_empty());
+        let page = reader.document().get_dictionary(page_id).unwrap();
+        let annotations = page
+            .get(b"Annots")
+            .ok()
+            .and_then(|value| {
+                reader
+                    .document()
+                    .dereference(value)
+                    .ok()
+                    .map(|(_, value)| value)
+            })
+            .and_then(|value| value.as_array().ok().cloned())
+            .unwrap();
+        assert_eq!(annotations.len(), 1);
+        let preview = pdf_handler::html_preview::view_as_html(
+            &reader,
+            handler_common::ViewOptions::default(),
+        )
+        .unwrap();
+        assert!(preview.contains("class=\"page-raster\""));
+        assert!(preview.contains("data-source-raster=\"true\""));
+        assert!(preview.contains("color: transparent !important"));
+        assert!(preview.contains("pdf-vector-rect"));
+        assert!(preview.contains("pdf-vector-line"));
+    }
+
+    #[test]
+    fn semantic_pdf_keeps_heading_with_following_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("heading-table.pdf");
+        let mut blocks = (0..45)
+            .map(|index| HtmlBlock::Paragraph(format!("Filler line {index}")))
+            .collect::<Vec<_>>();
+        blocks.push(HtmlBlock::Heading {
+            level: 2,
+            text: "Table heading".to_string(),
+        });
+        blocks.push(HtmlBlock::Table(vec![
+            vec!["Name".to_string(), "Value".to_string()],
+            vec!["Alice".to_string(), "123".to_string()],
+        ]));
+        let mut document = SemanticHtml {
+            blocks,
+            ..SemanticHtml::default()
+        };
+        export_pdf(&mut document, &output).unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let page_one = reader
+            .parse_page_text_blocks(1)
+            .unwrap()
+            .text_blocks
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let page_two = reader
+            .parse_page_text_blocks(2)
+            .unwrap()
+            .text_blocks
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!page_one.contains("Table heading"));
+        assert!(page_two.contains("Table heading"));
+        assert!(page_two.contains("Name"));
+        assert!(page_two.contains("Alice"));
+    }
+
+    #[test]
+    fn semantic_pdf_preserves_code_panel_and_safe_link_annotation() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("features.pdf");
+        let mut document = parse_html(
+            r#"<pre>let answer = 42;</pre><p>Read <a href="https://example.com/docs">documentation</a> now.</p>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            document.blocks,
+            vec![
+                HtmlBlock::Preformatted("let answer = 42;".to_string()),
+                HtmlBlock::Paragraph("Read documentation now.".to_string()),
+            ]
+        );
+        assert_eq!(
+            document.links,
+            vec![SemanticLink {
+                block_index: 1,
+                start: 5,
+                end: 18,
+                target: "https://example.com/docs".to_string(),
+            }]
+        );
+        export_pdf(&mut document, &output).unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let page_id = *reader.document().get_pages().get(&1).unwrap();
+        let page = reader.document().get_dictionary(page_id).unwrap();
+        let annotations = page
+            .get(b"Annots")
+            .ok()
+            .and_then(|value| {
+                reader
+                    .document()
+                    .dereference(value)
+                    .ok()
+                    .map(|(_, value)| value)
+            })
+            .and_then(|value| value.as_array().ok().cloned())
+            .unwrap();
+        assert_eq!(annotations.len(), 1);
+        let preview = pdf_handler::html_preview::view_as_html(
+            &reader,
+            handler_common::ViewOptions::default(),
+        )
+        .unwrap();
+        assert!(preview.contains("pdf-vector-rect"));
+        assert!(preview.contains("class=\"link-annot\""));
+        assert!(preview.contains("href=\"https://example.com/docs\""));
+        let page_text = reader
+            .parse_page_text_blocks(1)
+            .unwrap()
+            .text_blocks
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(page_text.contains("Read documentation now."));
+        assert!(!page_text.contains("example.com"));
+    }
+
+    #[test]
+    fn semantic_pdf_does_not_duplicate_url_label_annotations() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("url-label.pdf");
+        let mut document = parse_html(
+            r#"<p>Open <a href="https://example.org/guide">https://example.org/guide</a>.</p>"#,
+        )
+        .unwrap();
+        export_pdf(&mut document, &output).unwrap();
+        let reader =
+            pdf_handler::reader::PdfReader::open(output.to_string_lossy().as_ref()).unwrap();
+        let page_id = *reader.document().get_pages().get(&1).unwrap();
+        let page = reader.document().get_dictionary(page_id).unwrap();
+        let annotations = page
+            .get(b"Annots")
+            .ok()
+            .and_then(|value| {
+                reader
+                    .document()
+                    .dereference(value)
+                    .ok()
+                    .map(|(_, value)| value)
+            })
+            .and_then(|value| value.as_array().ok().cloned())
+            .unwrap();
+        assert_eq!(annotations.len(), 1);
+    }
+
+    #[test]
     fn parses_semantic_blocks_tables_entities_and_safe_links() {
-        let html = r#"<!doctype html><html><head><title>Demo &amp; Test</title><style>bad</style></head><body><section><h1>标题 😀</h1><p>Hello <b>World</b> &lt;ok&gt; <a href="https://example.com">site</a></p><ul><li>One</li><li>Two</li></ul><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>123</td></tr></table><script>alert(1)</script></section></body></html>"#;
+        let html = r#"<!doctype html><html><head><title>Demo &amp; Test</title><style>bad</style></head><body><section><h1>标题 😀</h1><p>Hello <b>World</b> &lt;ok&gt; <a href="https://example.com">site</a></p><ul><li>One</li><li>Two</li></ul><table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td><a href="https://example.com/value">123</a></td></tr></table><script>alert(1)</script></section></body></html>"#;
         let document = parse_html(html).unwrap();
         assert_eq!(document.title, "Demo & Test");
         assert!(document.blocks.contains(&HtmlBlock::Heading {
             level: 1,
             text: "标题 😀".to_string()
         }));
-        assert!(document.blocks.contains(&HtmlBlock::Paragraph(
-            "Hello World <ok> site (https://example.com)".to_string()
-        )));
+        assert!(document
+            .blocks
+            .contains(&HtmlBlock::Paragraph("Hello World <ok> site".to_string())));
+        assert_eq!(
+            document.links,
+            vec![SemanticLink {
+                block_index: 1,
+                start: 17,
+                end: 21,
+                target: "https://example.com".to_string(),
+            }]
+        );
+        let markdown = to_markdown_blocks(
+            document.blocks.iter().enumerate(),
+            &document.links,
+            &document.table_links,
+        );
+        assert!(markdown.contains("[site](https://example.com)"));
+        assert!(markdown.contains("[123](https://example.com/value)"));
+        assert!(!markdown.contains("site (https://example.com)"));
         assert!(document.blocks.contains(&HtmlBlock::Table(vec![
             vec!["Name".to_string(), "Value".to_string()],
             vec!["A".to_string(), "123".to_string()]
         ])));
+        assert_eq!(
+            document.table_links,
+            vec![SemanticTableLink {
+                block_index: 4,
+                row: 1,
+                column: 1,
+                start: 0,
+                end: 3,
+                target: "https://example.com/value".to_string(),
+            }]
+        );
         assert!(document
             .warnings
             .iter()

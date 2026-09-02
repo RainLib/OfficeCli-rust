@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand, ValueEnum};
 use handler_common::{HandlerError, OutputFormat};
 use hcd_core::{
-    hash_file, manifest_at_revision, render_standalone_html, Bundle, FidelityLevel, FidelityReport,
-    FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions, PatchBatch,
+    hash_file, manifest_at_revision, render_standalone_html_with_transform, Bundle, FidelityLevel,
+    FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions, PatchBatch,
     HCD_SCHEMA_VERSION,
 };
 use hcd_formats::{ExportOptions, ImportOptions};
@@ -21,7 +21,7 @@ pub struct HdocCommand {
 
 #[derive(Subcommand)]
 pub enum HdocSubcommand {
-    /// Stream a DOCX/XLSX/PPTX/PDF/HTML/TXT into an immutable, chunked HCD directory
+    /// Stream a DOCX/XLSX/PPTX/PDF/HTML/Markdown/TXT into an immutable, chunked HCD directory
     Import(HdocImportCommand),
     /// Validate an HCD bundle and all content hashes
     Validate(HdocValidateCommand),
@@ -39,7 +39,7 @@ pub enum HdocSubcommand {
 
 #[derive(Args)]
 pub struct HdocImportCommand {
-    /// Immutable source DOCX, XLSX, PPTX, PDF, HTML, or UTF-8 TXT
+    /// Immutable source DOCX, XLSX, PPTX, PDF, HTML, UTF-8 Markdown, or UTF-8 TXT
     pub source: String,
     /// New HCD directory; must not already exist
     #[arg(short, long)]
@@ -121,7 +121,7 @@ pub struct HdocExportCommand {
     #[arg(short, long)]
     pub output: String,
     /// Semantic target format; inferred from --output when omitted
-    #[arg(long, value_name = "docx|xlsx|pptx|pdf")]
+    #[arg(long, value_name = "docx|xlsx|pptx|pdf|html|md|txt")]
     pub to: Option<String>,
     #[arg(long)]
     pub revision: Option<u64>,
@@ -265,7 +265,7 @@ fn render_html(
         .prefix(".officecli-hcd-preview-")
         .suffix(".html")
         .tempfile_in(parent)?;
-    let report = render_standalone_html(
+    let report = render_standalone_html_with_transform(
         &bundle,
         &HtmlPresentationOptions {
             revision: command.revision,
@@ -275,6 +275,7 @@ fn render_html(
             ..HtmlPresentationOptions::default()
         },
         temporary.as_file_mut(),
+        hcd_formats::enhance_presentation_fragment,
     )
     .map_err(handler_error)?;
     temporary.as_file_mut().flush()?;
@@ -449,10 +450,10 @@ fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, Hand
     let target = requested.unwrap_or(extension);
     if !matches!(
         target.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "txt"
+        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
     ) {
         return Err(HandlerError::UnsupportedMode(format!(
-            "HCD export supports .docx, .xlsx, .pptx, .pdf, .html, or .txt; found .{target}"
+            "HCD export supports .docx, .xlsx, .pptx, .pdf, .html, .md/.markdown, or .txt; found .{target}"
         )));
     }
     Ok(target)
@@ -466,6 +467,7 @@ fn normalize_format(value: &str) -> String {
         .as_str()
     {
         "htm" => "html".to_string(),
+        "markdown" => "md".to_string(),
         format => format.to_string(),
     }
 }
@@ -478,9 +480,9 @@ fn semantic_export(
     requested_revision: Option<u64>,
     fidelity_report: Option<&Path>,
 ) -> Result<FidelityReport, HandlerError> {
-    if !matches!(target, "docx" | "xlsx" | "pptx" | "pdf") {
+    if !matches!(target, "docx" | "xlsx" | "pptx" | "pdf" | "md" | "txt") {
         return Err(HandlerError::UnsupportedMode(format!(
-            "source-free semantic export supports .docx, .xlsx, .pptx, or .pdf; .{target} requires its immutable source"
+            "source-free semantic export supports .docx, .xlsx, .pptx, .pdf, .md, or .txt; .{target} requires its immutable source"
         )));
     }
     let validation = hcd_core::validate_bundle(bundle).map_err(handler_error)?;
@@ -502,13 +504,20 @@ fn semantic_export(
         .prefix(".officecli-hcd-semantic-")
         .suffix(".html")
         .tempfile_in(parent)?;
-    let presentation = render_standalone_html(
+    let presentation = render_standalone_html_with_transform(
         bundle,
         &HtmlPresentationOptions {
             revision: Some(revision),
             ..HtmlPresentationOptions::default()
         },
         materialized.as_file_mut(),
+        |html| {
+            if target == "pdf" {
+                hcd_formats::enhance_presentation_fragment(html)
+            } else {
+                Ok(html.to_string())
+            }
+        },
     )
     .map_err(handler_error)?;
     let chunk_count = presentation.chunk_count;
@@ -522,11 +531,12 @@ fn semantic_export(
     )?;
     let image_count = summary.image_count;
     let embedded_image_count = summary.embedded_image_count;
+    let conversion_engine = summary.engine;
 
     let mut warnings = vec![FidelityWarning {
         code: "HCD_CROSS_FORMAT_SEMANTIC_EXPORT".to_string(),
         message: format!(
-            "revision {revision} was rebuilt as .{target} by OfficeCLI's in-process Rust semantic HTML handlers; source-backed opaque parts and exact {profile} layout were not applied",
+            "revision {revision} was rebuilt as .{target} by OfficeCLI's in-process Rust {conversion_engine} handler; source-backed opaque parts and exact {profile} source layout were not applied",
             profile = manifest.profile
         ),
         node_id: None,
@@ -545,6 +555,12 @@ fn semantic_export(
         ),
         "in-process Rust output generation and target structure validation".to_string(),
     ];
+    if conversion_engine == "rust-html-css-pdf" {
+        preserved.push(
+            "canonical HCD HTML structure, stylesheet cascade, inline formatting, links, tables and paginated print layout rendered directly to PDF"
+                .to_string(),
+        );
+    }
     if embedded_image_count > 0 {
         preserved.push(format!(
             "{embedded_image_count} of {image_count} content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
@@ -552,15 +568,29 @@ fn semantic_export(
     }
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
-        level: FidelityLevel::Semantic,
+        level: if conversion_engine == "rust-html-css-pdf" {
+            FidelityLevel::High
+        } else {
+            FidelityLevel::Semantic
+        },
         preserved,
-        flattened: vec![
-            format!(
-                "{} profile-specific geometry, styles and pagination are reduced to semantic document defaults",
-                manifest.profile
-            ),
-            "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact".to_string(),
-        ],
+        flattened: if conversion_engine == "rust-html-css-pdf" {
+            vec![
+                format!(
+                    "{} source-format physical geometry outside canonical HCD HTML remains distinct from CSS print pagination",
+                    manifest.profile
+                ),
+                "source-format opaque parts, annotations, JavaScript and unsupported browser-only CSS are not embedded in the PDF".to_string(),
+            ]
+        } else {
+            vec![
+                format!(
+                    "{} profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+                    manifest.profile
+                ),
+                "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact".to_string(),
+            ]
+        },
         dropped: Vec::new(),
         warnings,
     };

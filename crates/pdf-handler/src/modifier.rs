@@ -968,15 +968,90 @@ pub fn add_text_blocks_with_ready_font(
     );
     new_content.extend_from_slice(&content);
     for block in blocks {
-        let encoded = encode_pdf_text_with_font(doc, page_id, Some(font_name), &block.text)?;
+        let mut missing = Vec::new();
+        let segments =
+            pick_fonts_for_text(doc, page_id, Some(font_name), &block.text, &mut missing)?;
+        if !missing.is_empty() {
+            return Err(HandlerError::OperationFailed(format!(
+                "characters not encodable in any page font: {}",
+                missing.iter().collect::<String>()
+            )));
+        }
+        let text_tokens = build_segment_tokens(&segments, Some(font_name), block.size).join(" ");
         new_content.extend_from_slice(
             format!(
-                "\nBT\n/{font_name} {} Tf\n{:.2} {:.2} Td\n{encoded} Tj\nET\n",
+                "\nBT\n/{font_name} {} Tf\n{:.2} {:.2} Td\n{text_tokens}\nET\n",
                 block.size, block.x, block.y
             )
             .as_bytes(),
         );
     }
+    write_content_to_page(doc, page_id, &new_content)
+}
+
+/// Draw a bounded table grid below `top_y`. Text is added separately so one
+/// embedded font can be reused for the complete semantic page.
+#[allow(clippy::too_many_arguments)]
+pub fn add_table_grid(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    x: f32,
+    top_y: f32,
+    width: f32,
+    row_height: f32,
+    rows: usize,
+    columns: usize,
+) -> Result<(), HandlerError> {
+    if rows == 0
+        || columns == 0
+        || rows > 10_000
+        || columns > 1_000
+        || !x.is_finite()
+        || !top_y.is_finite()
+        || !width.is_finite()
+        || !row_height.is_finite()
+        || width <= 0.0
+        || row_height <= 0.0
+    {
+        return Err(HandlerError::InvalidArgument(
+            "PDF table grid dimensions are invalid or exceed bounds".to_string(),
+        ));
+    }
+    let pages = doc.get_pages();
+    let page_id = *pages
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+    let height = row_height * rows as f32;
+    let bottom = top_y - height;
+    let column_width = width / columns as f32;
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|error| HandlerError::OperationFailed(format!("page content read: {error}")))?;
+    let mut drawing = String::with_capacity((rows + columns).saturating_mul(48) + 160);
+    drawing.push_str("\nq\n0.95 0.97 0.99 rg\n");
+    drawing.push_str(&format!(
+        "{x:.2} {:.2} {width:.2} {row_height:.2} re f\n",
+        top_y - row_height
+    ));
+    drawing.push_str("0.72 G\n0.65 w\n");
+    drawing.push_str(&format!("{x:.2} {bottom:.2} {width:.2} {height:.2} re S\n"));
+    for column in 1..columns {
+        let line_x = x + column_width * column as f32;
+        drawing.push_str(&format!(
+            "{line_x:.2} {bottom:.2} m {line_x:.2} {top_y:.2} l S\n"
+        ));
+    }
+    for row in 1..rows {
+        let line_y = top_y - row_height * row as f32;
+        drawing.push_str(&format!(
+            "{x:.2} {line_y:.2} m {:.2} {line_y:.2} l S\n",
+            x + width
+        ));
+    }
+    drawing.push_str("Q\n");
+    let mut new_content = Vec::with_capacity(content.len() + drawing.len());
+    new_content.extend_from_slice(&content);
+    new_content.extend_from_slice(drawing.as_bytes());
     write_content_to_page(doc, page_id, &new_content)
 }
 
@@ -1036,6 +1111,143 @@ fn add_text_block_internal(
         write_content_to_page_uncompressed(doc, *page_id, new_content.as_bytes())?;
     } else {
         write_content_to_page(doc, *page_id, new_content.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Draw a native shaded panel for a semantic code block.
+pub fn add_code_panel(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    x: f32,
+    top_y: f32,
+    width: f32,
+    height: f32,
+) -> Result<(), HandlerError> {
+    if [x, top_y, width, height]
+        .iter()
+        .any(|value| !value.is_finite())
+        || width <= 0.0
+        || height <= 0.0
+        || width > 10_000.0
+        || height > 10_000.0
+    {
+        return Err(HandlerError::InvalidArgument(
+            "PDF code panel dimensions are invalid or exceed bounds".to_string(),
+        ));
+    }
+    let pages = doc.get_pages();
+    let page_id = *pages
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|error| HandlerError::OperationFailed(format!("page content read: {error}")))?;
+    let bottom = top_y - height;
+    let drawing = format!(
+        "\nq\n0.965 0.973 0.984 rg\n0.82 G\n0.65 w\n{x:.2} {bottom:.2} {width:.2} {height:.2} re B\nQ\n"
+    );
+    let mut new_content = Vec::with_capacity(content.len() + drawing.len());
+    new_content.extend_from_slice(&content);
+    new_content.extend_from_slice(drawing.as_bytes());
+    write_content_to_page(doc, page_id, &new_content)
+}
+
+/// Add a safe URI link annotation and a visible underline to the page.
+pub fn add_link_annotation(
+    doc: &mut LopdfDocument,
+    page_num: usize,
+    rect: &crate::content_stream::BBox,
+    target: &str,
+) -> Result<(), HandlerError> {
+    let normalized = target.trim().to_ascii_lowercase();
+    if target.len() > 2048
+        || !(normalized.starts_with("https://")
+            || normalized.starts_with("http://")
+            || normalized.starts_with("mailto:"))
+        || [rect.x, rect.y, rect.width, rect.height]
+            .iter()
+            .any(|value| !value.is_finite())
+        || rect.width <= 0.0
+        || rect.height <= 0.0
+    {
+        return Err(HandlerError::InvalidArgument(
+            "PDF link annotation target or rectangle is invalid".to_string(),
+        ));
+    }
+    let pages = doc.get_pages();
+    let page_id = *pages
+        .get(&(page_num as u32))
+        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|error| HandlerError::OperationFailed(format!("page content read: {error}")))?;
+    let underline_y = rect.y + 0.6;
+    let drawing = format!(
+        "\nq\n0 0.357 0.733 RG\n0.7 w\n{:.2} {underline_y:.2} m {:.2} {underline_y:.2} l S\nQ\n",
+        rect.x,
+        rect.x + rect.width
+    );
+    let mut new_content = Vec::with_capacity(content.len() + drawing.len());
+    new_content.extend_from_slice(&content);
+    new_content.extend_from_slice(drawing.as_bytes());
+    write_content_to_page(doc, page_id, &new_content)?;
+
+    let action = lopdf::dictionary! {
+        "S" => lopdf::Object::Name(b"URI".to_vec()),
+        "URI" => lopdf::Object::String(target.as_bytes().to_vec(), lopdf::StringFormat::Literal),
+    };
+    let annotation = lopdf::dictionary! {
+        "Type" => lopdf::Object::Name(b"Annot".to_vec()),
+        "Subtype" => lopdf::Object::Name(b"Link".to_vec()),
+        "Rect" => lopdf::Object::Array(vec![
+            lopdf::Object::Real(rect.x),
+            lopdf::Object::Real(rect.y),
+            lopdf::Object::Real(rect.x + rect.width),
+            lopdf::Object::Real(rect.y + rect.height),
+        ]),
+        "Border" => lopdf::Object::Array(vec![0.into(), 0.into(), 0.into()]),
+        "A" => lopdf::Object::Dictionary(action),
+    };
+    let annotation_id = doc.add_object(lopdf::Object::Dictionary(annotation));
+    let existing = doc
+        .get_dictionary(page_id)
+        .ok()
+        .and_then(|page| page.get(b"Annots").ok().cloned());
+    match existing {
+        Some(lopdf::Object::Reference(reference)) => {
+            let array = doc
+                .get_object_mut(reference)
+                .and_then(lopdf::Object::as_array_mut)
+                .map_err(|_| {
+                    HandlerError::OperationFailed(
+                        "PDF page Annots reference is not an array".to_string(),
+                    )
+                })?;
+            array.push(lopdf::Object::Reference(annotation_id));
+        }
+        Some(lopdf::Object::Array(mut array)) => {
+            array.push(lopdf::Object::Reference(annotation_id));
+            doc.get_object_mut(page_id)
+                .and_then(lopdf::Object::as_dict_mut)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+                .set("Annots", lopdf::Object::Array(array));
+        }
+        None => {
+            doc.get_object_mut(page_id)
+                .and_then(lopdf::Object::as_dict_mut)
+                .map_err(|error| HandlerError::OperationFailed(error.to_string()))?
+                .set(
+                    "Annots",
+                    lopdf::Object::Array(vec![lopdf::Object::Reference(annotation_id)]),
+                );
+        }
+        Some(_) => {
+            return Err(HandlerError::OperationFailed(
+                "PDF page Annots entry is neither an array nor an array reference".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2105,5 +2317,76 @@ mod image_tests {
         png[20..24].copy_from_slice(&10_000u32.to_be_bytes());
         let error = decode_png_rgb(&png).unwrap_err();
         assert!(error.to_string().contains("pixels; maximum"));
+    }
+}
+
+#[cfg(test)]
+mod ready_text_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn ready_text_blocks_switch_between_registered_subset_fonts() {
+        let mut document = LopdfDocument::with_version("1.7");
+        let pages_id = document.new_object_id();
+        document.objects.insert(
+            pages_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => Vec::<lopdf::Object>::new(),
+                "Count" => 0,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        add_page_with_size(&mut document, 612.0, 792.0).unwrap();
+        let latin = crate::font_embedder::ensure_cjk_font_for_chars(
+            &mut document,
+            1,
+            &HashSet::from(['A']),
+            Some("Primary"),
+            None,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        crate::font_embedder::ensure_cjk_font_for_chars(
+            &mut document,
+            1,
+            &HashSet::from(['中']),
+            Some("Fallback"),
+            None,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        add_text_blocks_with_ready_font(
+            &mut document,
+            1,
+            &[ReadyTextBlock {
+                text: "A中".to_string(),
+                x: 54.0,
+                y: 700.0,
+                size: 12.0,
+            }],
+            &latin,
+        )
+        .unwrap();
+
+        let page_id = *document.get_pages().get(&1).unwrap();
+        let content = document.get_page_content(page_id).unwrap();
+        let parsed =
+            crate::content_stream::parse_page_content_stream(&content, page_id, &document).unwrap();
+        assert_eq!(
+            parsed
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<String>(),
+            "A中"
+        );
     }
 }

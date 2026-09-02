@@ -1,6 +1,6 @@
 use crate::common::{
     base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
-    escape_text, finish_import, source_identity, source_identity_with_extensions,
+    escape_attribute, escape_text, finish_import, source_identity, source_identity_with_extensions,
     write_fidelity_report, ExportOptions, ImportOptions,
 };
 use hcd_core::{
@@ -8,9 +8,15 @@ use hcd_core::{
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
     SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
+use pulldown_cmark::{
+    Alignment, BlockQuoteKind, CodeBlockKind, Event as MarkdownEvent, HeadingLevel,
+    MetadataBlockKind, Options as MarkdownOptions, Parser as MarkdownParser, Tag as MarkdownTag,
+    TagEnd as MarkdownTagEnd,
+};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::Path;
 
 const HTML_SOURCE_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -20,8 +26,11 @@ const HTML_TABLE_MAX_ROWS: usize = 1_048_576;
 const HTML_TABLE_MAX_COLUMNS: usize = 16_384;
 const HTML_TABLE_MAX_CELLS: usize = 1_000_000;
 const HTML_TABLE_ROWS_PER_FRAGMENT: usize = 128;
+const MARKDOWN_TABLE_ROWS_PER_FRAGMENT: usize = 128;
+const MARKDOWN_SOURCE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const SOURCE_RANGE_PREFIX: &str = "bytes:";
 const HTML_PART: &str = "html/document";
+const MARKDOWN_PART: &str = "markdown/document";
 const TEXT_PART: &str = "text/document";
 
 struct FlatChunkWriter<'a, F>
@@ -315,6 +324,1812 @@ where
     result
 }
 
+pub(crate) fn import_markdown<F>(
+    source: &Path,
+    output: &Path,
+    options: &ImportOptions,
+    mut emit: F,
+) -> Result<HcdManifest, HcdError>
+where
+    F: FnMut(&ImportEvent) -> Result<(), HcdError>,
+{
+    let (source_hash, source_size) = source_identity_with_extensions(source, &["md", "markdown"])?;
+    emit_started(&mut emit, options, &source_hash)?;
+    let result =
+        import_markdown_inner(source, output, options, source_hash, source_size, &mut emit);
+    if let Err(error) = &result {
+        emit_failed(&mut emit, options, error);
+    }
+    result
+}
+
+fn import_markdown_inner<F>(
+    source: &Path,
+    output: &Path,
+    options: &ImportOptions,
+    source_hash: String,
+    source_size: u64,
+    emit: &mut F,
+) -> Result<HcdManifest, HcdError>
+where
+    F: FnMut(&ImportEvent) -> Result<(), HcdError>,
+{
+    if source_size > MARKDOWN_SOURCE_MAX_BYTES {
+        return Err(HcdError::ResourceLimit(format!(
+            "Markdown source is {source_size} bytes; maximum is {MARKDOWN_SOURCE_MAX_BYTES}"
+        )));
+    }
+    let bytes = std::fs::read(source)?;
+    let source_text = std::str::from_utf8(&bytes).map_err(|error| {
+        HcdError::Unsupported(format!(
+            "Markdown HCD import currently requires UTF-8 input: {error}"
+        ))
+    })?;
+    let source_text = source_text.strip_prefix('\u{feff}').unwrap_or(source_text);
+    let source_base = bytes.len().saturating_sub(source_text.len());
+
+    let mut writer = BundleWriter::create(output)?;
+    writer.write_styles(&format!(
+        "{MARKDOWN_STYLES}{MARKDOWN_PRINT_FIDELITY_STYLES}"
+    ))?;
+    let mut chunks = FlatChunkWriter {
+        document_id: &options.document_id,
+        source_part: MARKDOWN_PART,
+        region: "body",
+        writer: &mut writer,
+        emit,
+        soft_bytes: options.chunk_soft_bytes.clamp(1, MAX_CHUNK_BYTES),
+        max_blocks: options.chunk_blocks.clamp(1, DEFAULT_CHUNK_BLOCKS),
+        chunk_ordinal: 0,
+        blocks: 0,
+        html: String::new(),
+        entries: Vec::new(),
+    };
+
+    let mut markdown_options = MarkdownOptions::empty();
+    markdown_options.insert(MarkdownOptions::ENABLE_TABLES);
+    markdown_options.insert(MarkdownOptions::ENABLE_FOOTNOTES);
+    markdown_options.insert(MarkdownOptions::ENABLE_STRIKETHROUGH);
+    markdown_options.insert(MarkdownOptions::ENABLE_TASKLISTS);
+    markdown_options.insert(MarkdownOptions::ENABLE_SMART_PUNCTUATION);
+    markdown_options.insert(MarkdownOptions::ENABLE_HEADING_ATTRIBUTES);
+    markdown_options.insert(MarkdownOptions::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+    markdown_options.insert(MarkdownOptions::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS);
+    markdown_options.insert(MarkdownOptions::ENABLE_MATH);
+    markdown_options.insert(MarkdownOptions::ENABLE_GFM);
+    markdown_options.insert(MarkdownOptions::ENABLE_DEFINITION_LIST);
+    markdown_options.insert(MarkdownOptions::ENABLE_SUPERSCRIPT);
+    markdown_options.insert(MarkdownOptions::ENABLE_SUBSCRIPT);
+    markdown_options.insert(MarkdownOptions::ENABLE_WIKILINKS);
+
+    let line_starts = markdown_line_starts(source_text);
+    let mut renderer =
+        MarkdownHcdRenderer::new(&options.document_id, source_text, source_base, &line_starts);
+    let (parser_source, admonitions) = mask_markdown_admonitions(source_text);
+    let mut next_admonition = 0usize;
+    for (event, range) in
+        MarkdownParser::new_ext(&parser_source, markdown_options).into_offset_iter()
+    {
+        while renderer.depth == 0
+            && admonitions
+                .get(next_admonition)
+                .is_some_and(|admonition| admonition.range.start < range.start)
+        {
+            let block =
+                renderer.render_admonition(&admonitions[next_admonition], markdown_options)?;
+            chunks.push_rendered(block, false)?;
+            next_admonition += 1;
+        }
+        if let Some(block) = renderer.event(event, range)? {
+            chunks.push_rendered(block, false)?;
+        }
+    }
+    while let Some(admonition) = admonitions.get(next_admonition) {
+        let block = renderer.render_admonition(admonition, markdown_options)?;
+        chunks.push_rendered(block, false)?;
+        next_admonition += 1;
+    }
+    if let Some(block) = renderer.finish()? {
+        chunks.push_rendered(block, false)?;
+    }
+    if chunks.blocks == 0 {
+        chunks.push(TextNode {
+            text: "",
+            text_ordinal: 1,
+            source_start: source_base as u64,
+            source_end: source_base as u64,
+            node_kind: "markdown-paragraph",
+            paragraph_id: Some("line-1".to_string()),
+            wrapper: "p",
+        })?;
+    }
+    chunks.flush()?;
+
+    let mut manifest = base_manifest(options, "md", "semantic-flow", source_hash, source_size);
+    manifest.warnings.push(FidelityWarning {
+        code: "MARKDOWN_SANITIZED_HTML".to_string(),
+        message: "CommonMark, GFM and the enabled safe extensions are rendered semantically; active raw HTML and unsafe URL schemes are escaped or flattened at the HCD security boundary".to_string(),
+        node_id: None,
+        source_part: Some(MARKDOWN_PART.to_string()),
+    });
+    manifest.fidelity = Some(FidelityReport {
+        schema_version: HCD_SCHEMA_VERSION.to_string(),
+        level: FidelityLevel::Semantic,
+        preserved: vec![
+            "complete CommonMark block and inline structure, including Setext headings, nested containers, reference links and indented code".to_string(),
+            "GFM tables, task lists, strikethrough, autolinks, alert blockquotes and footnotes".to_string(),
+            "safe extensions for math, superscript, subscript, definition lists, wikilinks, heading attributes and metadata blocks".to_string(),
+            "stable text/image node IDs with source byte ranges and source-backed editing".to_string(),
+        ],
+        flattened: vec![
+            "raw HTML outside the safe inline allowlist is displayed as escaped source instead of executing".to_string(),
+            "remote Markdown images are addressable semantic image nodes and are not fetched during import".to_string(),
+            "editing a Markdown text node rewrites only its mapped source range as escaped Markdown text".to_string(),
+        ],
+        dropped: Vec::new(),
+        warnings: manifest.warnings.clone(),
+    });
+    finish_import(writer, manifest, emit)
+}
+
+const MARKDOWN_STYLES: &str = ".hcd-source{display:block;line-height:1.6;color:#1f2328}.hcd-source-block{margin:.6em 0}.hcd-markdown-heading{font-weight:700;line-height:1.25;margin:1em 0 .45em}.hcd-markdown-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f6f8fa;border:1px solid #d8dee4;border-radius:.35em;padding:.75em;overflow:auto;white-space:pre-wrap}.hcd-markdown-inline-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#eff1f3;border-radius:.25em;padding:.1em .3em}.hcd-markdown-quote{border-left:3px solid #b8c0cc;padding:.1em 0 .1em .85em;color:#57606a;margin:.65em 0}.hcd-markdown-alert{border:1px solid #b8c0cc;border-left-width:4px;border-radius:.35em;padding:.55em .8em}.hcd-markdown-alert[data-hcd-alert=note]{border-left-color:#0969da}.hcd-markdown-alert[data-hcd-alert=tip]{border-left-color:#1a7f37}.hcd-markdown-alert[data-hcd-alert=important]{border-left-color:#8250df}.hcd-markdown-alert[data-hcd-alert=warning]{border-left-color:#9a6700}.hcd-markdown-alert[data-hcd-alert=caution]{border-left-color:#cf222e}.hcd-markdown-list{margin:.35em 0;padding-left:1.8em}.hcd-markdown-task{list-style:none;margin-left:-1.3em}.hcd-markdown-task-marker{display:inline-flex;align-items:center;margin-right:.45em}.hcd-markdown-task-marker input{margin:0}.hcd-markdown-image{display:inline-flex;align-items:center;gap:.3em;border:1px dashed #8c959f;padding:.08em .4em;border-radius:.25em;color:#57606a}.hcd-markdown-image::before{content:'image';font-size:.72em;text-transform:uppercase;color:#6e7781}.hcd-markdown-table{border-collapse:collapse;margin:.7em 0;min-width:20em;max-width:100%}.hcd-markdown-table th,.hcd-markdown-table td{border:1px solid #b8c0cc;padding:.38em .65em}.hcd-markdown-table th{background:#eef2f7;font-weight:700}.hcd-markdown-footnotes{border-top:1px solid #d0d7de;margin-top:1.3em;padding-top:.5em}.hcd-markdown-footnote-ref{font-size:.75em;vertical-align:super}.hcd-markdown-definition-list dt{font-weight:700}.hcd-markdown-definition-list dd{margin:0 0 .5em 1.5em}.hcd-markdown-math{font-family:STIX Two Math,Cambria Math,serif;background:#f6f8fa;padding:.08em .25em}.hcd-markdown-display-math{display:block;text-align:center;margin:.7em 0;padding:.5em}.hcd-markdown-metadata,.hcd-markdown-raw-html{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f6f8fa;color:#57606a}.hcd-markdown-admonition{border:1px solid #d0d7de;border-left:4px solid #9a6700;border-radius:.35em;padding:.6em .8em;margin:.7em 0}.hcd-markdown-rule{border:0;border-top:1px solid #d0d7de;margin:1em 0}.hcd-markdown-wikilink{text-decoration:underline;text-decoration-style:dotted}.hcd-mermaid{margin:1em 0}.hcd-mermaid-preview{overflow:hidden;border:1px solid #d0d7de;border-radius:.45em;padding:.75em;background:#fff;text-align:center}.hcd-mermaid-preview svg{display:block;max-width:100%;height:auto;margin:0 auto}.hcd-mermaid-source{margin-top:.4em;color:#57606a}.hcd-mermaid-source>summary{cursor:pointer;font-size:.85em}.hcd-mermaid-error{border-left:4px solid #cf222e;padding:.45em .7em;color:#82071e;background:#ffebe9}@media print{.hcd-mermaid-source{display:none}}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-markdown-image[data-hcd-id]:hover,body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-mermaid[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95)}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}";
+
+// Keep semantic-flow screen previews and A4 PDF export on the same 16 CSS px
+// (12 pt) typography. Print-only fragmentation hints reduce avoidable splits;
+// the print engine may still split an oversized block rather than overflow it.
+const MARKDOWN_PRINT_FIDELITY_STYLES: &str = ".hcd-source{font-family:HCDSans,HCDEmoji,HCDFallback,\"Noto Sans SC\",\"PingFang SC\",\"Microsoft YaHei\",Arial,sans-serif;font-size:16px}.hcd-markdown-heading{break-after:avoid}.hcd-markdown-table,.hcd-mermaid{break-inside:avoid}@media print{.hcd-markdown-code,.hcd-markdown-quote,.hcd-markdown-alert,.hcd-markdown-admonition{break-inside:avoid}}";
+
+struct RenderedMarkdownTag {
+    close: String,
+    node_kind: Option<&'static str>,
+    is_link: bool,
+    is_image: bool,
+    content_range: Option<Range<usize>>,
+}
+
+struct MarkdownHcdRenderer<'a> {
+    document_id: &'a str,
+    source: &'a str,
+    source_base: usize,
+    line_starts: &'a [usize],
+    html: String,
+    entries: Vec<NodeMapEntry>,
+    tags: Vec<RenderedMarkdownTag>,
+    depth: usize,
+    node_ordinal: u64,
+    table_alignments: Vec<Alignment>,
+    table_cell: usize,
+    table_head: bool,
+    table_rows: usize,
+    table_fragment: usize,
+}
+
+impl<'a> MarkdownHcdRenderer<'a> {
+    fn new(
+        document_id: &'a str,
+        source: &'a str,
+        source_base: usize,
+        line_starts: &'a [usize],
+    ) -> Self {
+        Self {
+            document_id,
+            source,
+            source_base,
+            line_starts,
+            html: String::new(),
+            entries: Vec::new(),
+            tags: Vec::new(),
+            depth: 0,
+            node_ordinal: 0,
+            table_alignments: Vec::new(),
+            table_cell: 0,
+            table_head: false,
+            table_rows: 0,
+            table_fragment: 0,
+        }
+    }
+
+    fn event<'event>(
+        &mut self,
+        event: MarkdownEvent<'event>,
+        range: Range<usize>,
+    ) -> Result<Option<RenderedSourceBlock>, HcdError> {
+        if self.event_outside_admonition_content(&range) {
+            return Ok(None);
+        }
+        let mut completed = None;
+        match event {
+            MarkdownEvent::Start(tag) => {
+                if matches!(&tag, MarkdownTag::TableRow)
+                    && !self.table_head
+                    && self.table_rows > 0
+                    && self
+                        .table_rows
+                        .is_multiple_of(MARKDOWN_TABLE_ROWS_PER_FRAGMENT)
+                {
+                    self.html.push_str("</tbody></table>");
+                    completed = Some(self.take_block());
+                    self.table_fragment = self.table_fragment.saturating_add(1);
+                    self.html.push_str(&format!(
+                        "<table class=\"hcd-markdown-table\" data-hcd-markdown-table-fragment=\"{}\" data-hcd-markdown-table-continuation=\"true\"><tbody>",
+                        self.table_fragment
+                    ));
+                }
+                self.start(tag, range)?;
+            }
+            MarkdownEvent::End(end) => self.end(end)?,
+            MarkdownEvent::Text(text) => {
+                let auto_link = !self.in_code() && !self.in_link() && !self.in_image();
+                let inline_html = if auto_link {
+                    markdown_text_with_autolinks(&text)
+                } else {
+                    escape_text(&text)
+                };
+                self.text_node(&text, &inline_html, range, self.context_node_kind(), false)?;
+            }
+            MarkdownEvent::Code(code) => {
+                let html = format!(
+                    "<code class=\"hcd-markdown-inline-code\">{}</code>",
+                    escape_text(&code)
+                );
+                self.text_node(&code, &html, range, "markdown-inline-code", true)?;
+            }
+            MarkdownEvent::InlineMath(math) => {
+                let html = format!(
+                    "<span class=\"hcd-markdown-math\" data-hcd-math=\"inline\">{}</span>",
+                    escape_text(&math)
+                );
+                self.text_node(&math, &html, range, "markdown-inline-math", true)?;
+            }
+            MarkdownEvent::DisplayMath(math) => {
+                let html = format!(
+                    "<span class=\"hcd-markdown-math hcd-markdown-display-math\" data-hcd-math=\"display\">{}</span>",
+                    escape_text(&math)
+                );
+                self.text_node(&math, &html, range, "markdown-display-math", true)?;
+            }
+            MarkdownEvent::Html(html) => {
+                let rendered = format!(
+                    "<code class=\"hcd-markdown-raw-html\">{}</code>",
+                    escape_text(&html)
+                );
+                self.text_node(&html, &rendered, range, "markdown-html", false)?;
+            }
+            MarkdownEvent::InlineHtml(html) => {
+                if let Some(safe) = safe_markdown_inline_html(&html) {
+                    self.html.push_str(safe);
+                } else {
+                    let rendered = format!(
+                        "<code class=\"hcd-markdown-raw-html\">{}</code>",
+                        escape_text(&html)
+                    );
+                    self.text_node(&html, &rendered, range, "markdown-inline-html", false)?;
+                }
+            }
+            MarkdownEvent::FootnoteReference(label) => {
+                let id = markdown_fragment_id(&label);
+                let visible = format!("[{label}]");
+                let html = format!(
+                    "<sup class=\"hcd-markdown-footnote-ref\"><a href=\"#hcd-footnote-{id}\">{}</a></sup>",
+                    escape_text(&visible)
+                );
+                self.text_node(&visible, &html, range, "markdown-footnote-reference", false)?;
+            }
+            MarkdownEvent::SoftBreak => self.html.push('\n'),
+            MarkdownEvent::HardBreak => self.html.push_str("<br/>"),
+            MarkdownEvent::Rule => self
+                .html
+                .push_str("<hr class=\"hcd-source-block hcd-markdown-rule\"/>"),
+            MarkdownEvent::TaskListMarker(checked) => {
+                let classes = if checked {
+                    "hcd-markdown-task hcd-markdown-task-checked"
+                } else {
+                    "hcd-markdown-task"
+                };
+                let marker = if checked { "☑" } else { "☐" };
+                self.html.push_str(&format!(
+                    "<span class=\"{classes}\"><span class=\"hcd-markdown-task-marker\">{marker}</span></span>"
+                ));
+            }
+        }
+        if completed.is_some() {
+            return Ok(completed);
+        }
+        if self.depth == 0 && !self.html.is_empty() {
+            return Ok(Some(self.take_block()));
+        }
+        Ok(None)
+    }
+
+    fn start<'event>(
+        &mut self,
+        tag: MarkdownTag<'event>,
+        range: Range<usize>,
+    ) -> Result<(), HcdError> {
+        let mut state = RenderedMarkdownTag {
+            close: String::new(),
+            node_kind: None,
+            is_link: false,
+            is_image: false,
+            content_range: None,
+        };
+        match tag {
+            MarkdownTag::Paragraph => {
+                if let Some((kind, content_range)) = markdown_admonition(self.source, &range) {
+                    self.html.push_str(&format!(
+                        "<aside class=\"hcd-source-block hcd-markdown-admonition\" data-hcd-admonition=\"{}\"><strong class=\"hcd-markdown-admonition-title\">{}</strong>",
+                        escape_attribute(kind),
+                        escape_text(kind)
+                    ));
+                    state.close = "</aside>".to_string();
+                    state.node_kind = Some("markdown-admonition");
+                    state.content_range = Some(content_range);
+                } else {
+                    self.html
+                        .push_str("<p class=\"hcd-source-block hcd-markdown-paragraph\">");
+                    state.close = "</p>".to_string();
+                    state.node_kind = Some("markdown-paragraph");
+                }
+            }
+            MarkdownTag::Heading {
+                level, id, classes, ..
+            } => {
+                let tag = heading_tag(level);
+                let id = id
+                    .map(|id| format!(" id=\"{}\"", escape_attribute(&id)))
+                    .unwrap_or_default();
+                let classes = if classes.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " data-hcd-markdown-classes=\"{}\"",
+                        escape_attribute(&classes.join(" "))
+                    )
+                };
+                self.html.push_str(&format!(
+                    "<{tag} class=\"hcd-source-block hcd-markdown-heading\"{id}{classes}>"
+                ));
+                state.close = format!("</{tag}>");
+                state.node_kind = Some("markdown-heading");
+            }
+            MarkdownTag::BlockQuote(kind) => {
+                if let Some(kind) = kind {
+                    let alert = blockquote_kind(kind);
+                    self.html.push_str(&format!(
+                        "<blockquote class=\"hcd-source-block hcd-markdown-quote hcd-markdown-alert\" data-hcd-alert=\"{alert}\">"
+                    ));
+                } else {
+                    self.html
+                        .push_str("<blockquote class=\"hcd-source-block hcd-markdown-quote\">");
+                }
+                state.close = "</blockquote>".to_string();
+                state.node_kind = Some("markdown-quote");
+            }
+            MarkdownTag::CodeBlock(kind) => {
+                let (language, fenced) = match kind {
+                    CodeBlockKind::Indented => (String::new(), false),
+                    CodeBlockKind::Fenced(info) => {
+                        let language = info.split_whitespace().next().unwrap_or_default();
+                        (markdown_css_token(language), true)
+                    }
+                };
+                let class = if language.is_empty() {
+                    String::new()
+                } else {
+                    format!(" class=\"language-{language}\"")
+                };
+                self.html.push_str(&format!(
+                    "<pre class=\"hcd-source-block hcd-markdown-code\" data-hcd-fenced=\"{fenced}\"><code{class}>"
+                ));
+                state.close = "</code></pre>".to_string();
+                state.node_kind = Some("markdown-code");
+            }
+            MarkdownTag::HtmlBlock => {
+                self.html
+                    .push_str("<pre class=\"hcd-source-block hcd-markdown-raw-html\">");
+                state.close = "</pre>".to_string();
+                state.node_kind = Some("markdown-html");
+            }
+            MarkdownTag::List(start) => {
+                if let Some(start) = start {
+                    let start = if start != 1 {
+                        format!(" start=\"{start}\"")
+                    } else {
+                        String::new()
+                    };
+                    self.html
+                        .push_str(&format!("<ol class=\"hcd-markdown-list\"{start}>"));
+                    state.close = "</ol>".to_string();
+                } else {
+                    self.html.push_str("<ul class=\"hcd-markdown-list\">");
+                    state.close = "</ul>".to_string();
+                }
+                state.node_kind = Some("markdown-list-item");
+            }
+            MarkdownTag::Item => {
+                self.html.push_str("<li>");
+                state.close = "</li>".to_string();
+                state.node_kind = Some("markdown-list-item");
+            }
+            MarkdownTag::FootnoteDefinition(label) => {
+                let id = markdown_fragment_id(&label);
+                self.html.push_str(&format!(
+                    "<section class=\"hcd-source-block hcd-markdown-footnotes\" id=\"hcd-footnote-{id}\" data-hcd-footnote=\"{}\"><sup>{}</sup>",
+                    escape_attribute(&label),
+                    escape_text(&label)
+                ));
+                state.close = "</section>".to_string();
+                state.node_kind = Some("markdown-footnote-definition");
+            }
+            MarkdownTag::DefinitionList => {
+                self.html
+                    .push_str("<dl class=\"hcd-source-block hcd-markdown-definition-list\">");
+                state.close = "</dl>".to_string();
+            }
+            MarkdownTag::DefinitionListTitle => {
+                self.html.push_str("<dt>");
+                state.close = "</dt>".to_string();
+                state.node_kind = Some("markdown-definition-title");
+            }
+            MarkdownTag::DefinitionListDefinition => {
+                self.html.push_str("<dd>");
+                state.close = "</dd>".to_string();
+                state.node_kind = Some("markdown-definition");
+            }
+            MarkdownTag::Table(alignments) => {
+                self.table_alignments = alignments;
+                self.table_rows = 0;
+                self.table_fragment = 0;
+                self.html.push_str(
+                    "<table class=\"hcd-markdown-table\" data-hcd-markdown-table-fragment=\"0\">",
+                );
+                state.close = "</tbody></table>".to_string();
+            }
+            MarkdownTag::TableHead => {
+                self.table_head = true;
+                self.table_cell = 0;
+                self.html.push_str("<thead><tr>");
+                state.close = "</tr></thead><tbody>".to_string();
+            }
+            MarkdownTag::TableRow => {
+                self.table_cell = 0;
+                self.html.push_str("<tr>");
+                state.close = "</tr>".to_string();
+            }
+            MarkdownTag::TableCell => {
+                let tag = if self.table_head { "th" } else { "td" };
+                let align = self
+                    .table_alignments
+                    .get(self.table_cell)
+                    .copied()
+                    .unwrap_or(Alignment::None);
+                self.table_cell = self.table_cell.saturating_add(1);
+                let align = match align {
+                    Alignment::None => "",
+                    Alignment::Left => " style=\"text-align:left\"",
+                    Alignment::Center => " style=\"text-align:center\"",
+                    Alignment::Right => " style=\"text-align:right\"",
+                };
+                self.html.push_str(&format!("<{tag}{align}>"));
+                state.close = format!("</{tag}>");
+                state.node_kind = Some(if self.table_head {
+                    "markdown-table-header"
+                } else {
+                    "markdown-table-cell"
+                });
+            }
+            MarkdownTag::Emphasis => self.simple_tag("<em>", "</em>", &mut state),
+            MarkdownTag::Strong => self.simple_tag("<strong>", "</strong>", &mut state),
+            MarkdownTag::Strikethrough => self.simple_tag("<del>", "</del>", &mut state),
+            MarkdownTag::Superscript => self.simple_tag("<sup>", "</sup>", &mut state),
+            MarkdownTag::Subscript => self.simple_tag("<sub>", "</sub>", &mut state),
+            MarkdownTag::Link {
+                link_type,
+                dest_url,
+                title,
+                ..
+            } => {
+                state.is_link = true;
+                let destination = match link_type {
+                    pulldown_cmark::LinkType::WikiLink { .. } => {
+                        format!("#hcd-wiki-{}", markdown_fragment_id(&dest_url))
+                    }
+                    pulldown_cmark::LinkType::Email => format!("mailto:{dest_url}"),
+                    _ => dest_url.to_string(),
+                };
+                if safe_markdown_destination(&destination) {
+                    let title = if title.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" title=\"{}\"", escape_attribute(&title))
+                    };
+                    let class = matches!(link_type, pulldown_cmark::LinkType::WikiLink { .. })
+                        .then_some(" class=\"hcd-markdown-wikilink\"")
+                        .unwrap_or_default();
+                    self.html.push_str(&format!(
+                        "<a{class} href=\"{}\"{title}>",
+                        escape_attribute(&destination)
+                    ));
+                    state.close = "</a>".to_string();
+                } else {
+                    self.html
+                        .push_str("<span class=\"hcd-markdown-unsafe-link\">");
+                    state.close = "</span>".to_string();
+                }
+            }
+            MarkdownTag::Image {
+                dest_url, title, ..
+            } => {
+                state.is_image = true;
+                let safe = safe_markdown_destination(&dest_url);
+                let identity = format!(
+                    "{}:{}:{}",
+                    self.source_base.saturating_add(range.start),
+                    self.source_base.saturating_add(range.end),
+                    dest_url
+                );
+                let node_id =
+                    stable_node_id(&[self.document_id, MARKDOWN_PART, "markdown-image", &identity]);
+                let source = if safe {
+                    format!(
+                        " data-hcd-markdown-image-src=\"{}\"",
+                        escape_attribute(&dest_url)
+                    )
+                } else {
+                    String::new()
+                };
+                let title = if title.is_empty() {
+                    String::new()
+                } else {
+                    format!(" title=\"{}\"", escape_attribute(&title))
+                };
+                self.html.push_str(&format!(
+                    "<span class=\"hcd-markdown-image\" data-hcd-id=\"{node_id}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"false\"{source}{title}>"
+                ));
+                state.close = "</span>".to_string();
+                state.node_kind = Some("markdown-image-alt");
+            }
+            MarkdownTag::MetadataBlock(kind) => {
+                let kind = match kind {
+                    MetadataBlockKind::YamlStyle => "yaml",
+                    MetadataBlockKind::PlusesStyle => "toml",
+                };
+                self.html.push_str(&format!(
+                    "<pre class=\"hcd-source-block hcd-markdown-metadata\" data-hcd-metadata=\"{kind}\"><code>"
+                ));
+                state.close = "</code></pre>".to_string();
+                state.node_kind = Some("markdown-metadata");
+            }
+        }
+        self.tags.push(state);
+        self.depth = self.depth.saturating_add(1);
+        Ok(())
+    }
+
+    fn end(&mut self, end: MarkdownTagEnd) -> Result<(), HcdError> {
+        let state = self.tags.pop().ok_or_else(|| {
+            HcdError::InvalidBundle(format!("Markdown parser emitted unmatched end tag {end:?}"))
+        })?;
+        self.html.push_str(&state.close);
+        self.depth = self.depth.saturating_sub(1);
+        if matches!(end, MarkdownTagEnd::TableHead) {
+            self.table_head = false;
+        }
+        if matches!(end, MarkdownTagEnd::TableRow) && !self.table_head {
+            self.table_rows = self.table_rows.saturating_add(1);
+        }
+        if matches!(end, MarkdownTagEnd::Table) {
+            self.table_alignments.clear();
+            self.table_cell = 0;
+            self.table_head = false;
+            self.table_rows = 0;
+            self.table_fragment = 0;
+        }
+        Ok(())
+    }
+
+    fn simple_tag(&mut self, open: &str, close: &str, state: &mut RenderedMarkdownTag) {
+        self.html.push_str(open);
+        state.close = close.to_string();
+    }
+
+    fn text_node(
+        &mut self,
+        visible: &str,
+        inline_html: &str,
+        range: Range<usize>,
+        node_kind: &str,
+        prefer_inner_range: bool,
+    ) -> Result<(), HcdError> {
+        if visible.is_empty() {
+            return Ok(());
+        }
+        let range = markdown_editable_range(self.source, range, visible, prefer_inner_range);
+        let (span, entry) = self.render_node(visible, inline_html, range, node_kind, true)?;
+        self.html.push_str(&span);
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    fn render_node(
+        &mut self,
+        visible: &str,
+        inline_html: &str,
+        range: Range<usize>,
+        node_kind: &str,
+        editable: bool,
+    ) -> Result<(String, NodeMapEntry), HcdError> {
+        if visible.len() > MAX_CHUNK_BYTES || inline_html.len() > MAX_CHUNK_BYTES {
+            return Err(HcdError::ResourceLimit(format!(
+                "NODE_TOO_LARGE: Markdown {node_kind} node exceeds {MAX_CHUNK_BYTES} bytes"
+            )));
+        }
+        self.node_ordinal = self.node_ordinal.saturating_add(1);
+        let ordinal = self.node_ordinal.to_string();
+        let node_id = stable_node_id(&[self.document_id, MARKDOWN_PART, node_kind, &ordinal]);
+        let node_hash = hash_bytes(visible.as_bytes());
+        let line = self.line_for_offset(range.start);
+        let source_start = self.source_base.saturating_add(range.start) as u64;
+        let source_end = self.source_base.saturating_add(range.end) as u64;
+        let span = format!(
+            "<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{inline_html}</span>"
+        );
+        Ok((
+            span,
+            NodeMapEntry {
+                node_id,
+                node_hash,
+                source: SourceAnchor {
+                    part: MARKDOWN_PART.to_string(),
+                    text_ordinal: self.node_ordinal,
+                    paragraph_id: Some(format!("line-{line}")),
+                    text_id: Some(format!("{SOURCE_RANGE_PREFIX}{source_start}:{source_end}")),
+                    node_kind: node_kind.to_string(),
+                    editable,
+                },
+            },
+        ))
+    }
+
+    fn context_node_kind(&self) -> &'static str {
+        self.tags
+            .iter()
+            .rev()
+            .find_map(|tag| tag.node_kind)
+            .unwrap_or("markdown-text")
+    }
+
+    fn in_code(&self) -> bool {
+        self.tags
+            .iter()
+            .any(|tag| tag.node_kind == Some("markdown-code"))
+    }
+
+    fn in_link(&self) -> bool {
+        self.tags.iter().any(|tag| tag.is_link)
+    }
+
+    fn in_image(&self) -> bool {
+        self.tags.iter().any(|tag| tag.is_image)
+    }
+
+    fn event_outside_admonition_content(&self, range: &Range<usize>) -> bool {
+        self.tags
+            .iter()
+            .rev()
+            .find_map(|tag| tag.content_range.as_ref())
+            .is_some_and(|content| range.end <= content.start || range.start >= content.end)
+    }
+
+    fn line_for_offset(&self, offset: usize) -> usize {
+        self.line_starts
+            .partition_point(|start| *start <= offset)
+            .max(1)
+    }
+
+    fn take_block(&mut self) -> RenderedSourceBlock {
+        RenderedSourceBlock {
+            html: std::mem::take(&mut self.html),
+            entries: std::mem::take(&mut self.entries),
+        }
+    }
+
+    fn render_admonition(
+        &mut self,
+        admonition: &MarkdownAdmonition,
+        options: MarkdownOptions,
+    ) -> Result<RenderedSourceBlock, HcdError> {
+        if self.depth != 0 || !self.html.is_empty() {
+            return Err(HcdError::InvalidBundle(
+                "Markdown admonition cannot be inserted inside another open block".to_string(),
+            ));
+        }
+        self.html.push_str(&format!(
+            "<aside class=\"hcd-source-block hcd-markdown-admonition\" data-hcd-admonition=\"{}\"><strong class=\"hcd-markdown-admonition-title\">{}</strong>",
+            escape_attribute(&admonition.kind),
+            escape_text(&admonition.kind)
+        ));
+        self.tags.push(RenderedMarkdownTag {
+            close: "</aside>".to_string(),
+            node_kind: Some("markdown-admonition"),
+            is_link: false,
+            is_image: false,
+            content_range: None,
+        });
+        self.depth = 1;
+        let content = &self.source[admonition.content.clone()];
+        for (event, range) in MarkdownParser::new_ext(content, options).into_offset_iter() {
+            let range =
+                admonition.content.start + range.start..admonition.content.start + range.end;
+            if self.event(event, range)?.is_some() {
+                return Err(HcdError::InvalidBundle(
+                    "Markdown admonition content escaped its container".to_string(),
+                ));
+            }
+        }
+        let state = self.tags.pop().ok_or_else(|| {
+            HcdError::InvalidBundle("Markdown admonition container was not closed".to_string())
+        })?;
+        self.html.push_str(&state.close);
+        self.depth = 0;
+        Ok(self.take_block())
+    }
+
+    fn finish(&mut self) -> Result<Option<RenderedSourceBlock>, HcdError> {
+        if self.depth != 0 || !self.tags.is_empty() {
+            return Err(HcdError::InvalidBundle(
+                "Markdown parser ended with unclosed semantic containers".to_string(),
+            ));
+        }
+        Ok((!self.html.is_empty()).then(|| self.take_block()))
+    }
+}
+
+struct MarkdownAdmonition {
+    kind: String,
+    range: Range<usize>,
+    content: Range<usize>,
+}
+
+fn mask_markdown_admonitions(source: &str) -> (String, Vec<MarkdownAdmonition>) {
+    let mut lines = Vec::new();
+    let mut offset = 0usize;
+    for line in source.split_inclusive('\n') {
+        let end = offset + line.len();
+        lines.push((offset, end, line.trim_end_matches(['\r', '\n'])));
+        offset = end;
+    }
+    if offset < source.len() || source.is_empty() {
+        lines.push((offset, source.len(), &source[offset..]));
+    }
+
+    let mut admonitions = Vec::new();
+    let mut line_index = 0usize;
+    while line_index < lines.len() {
+        let (start, opener_end, opener) = lines[line_index];
+        let Some(kind) = opener.trim().strip_prefix(":::").map(str::trim) else {
+            line_index += 1;
+            continue;
+        };
+        if kind.is_empty()
+            || !kind
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            line_index += 1;
+            continue;
+        }
+        let mut close_index = line_index + 1;
+        while close_index < lines.len() && lines[close_index].2.trim() != ":::" {
+            close_index += 1;
+        }
+        if close_index == lines.len() {
+            line_index += 1;
+            continue;
+        }
+        let (close_start, end, _) = lines[close_index];
+        admonitions.push(MarkdownAdmonition {
+            kind: kind.to_ascii_lowercase(),
+            range: start..end,
+            content: opener_end..close_start,
+        });
+        line_index = close_index + 1;
+    }
+
+    let mut masked = source.as_bytes().to_vec();
+    for admonition in &admonitions {
+        for byte in &mut masked[admonition.range.clone()] {
+            if !matches!(*byte, b'\r' | b'\n') {
+                *byte = b' ';
+            }
+        }
+    }
+    (
+        String::from_utf8(masked).expect("masking UTF-8 with ASCII spaces remains UTF-8"),
+        admonitions,
+    )
+}
+
+fn markdown_line_starts(source: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(source.len() / 40 + 1);
+    starts.push(0);
+    starts.extend(
+        source
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+    );
+    starts
+}
+
+fn markdown_editable_range(
+    source: &str,
+    range: Range<usize>,
+    visible: &str,
+    prefer_inner: bool,
+) -> Range<usize> {
+    if range.start > range.end || range.end > source.len() {
+        return range;
+    }
+    let raw = &source[range.clone()];
+    if raw == visible {
+        return range;
+    }
+    if prefer_inner {
+        if let Some(offset) = raw.find(visible) {
+            return range.start + offset..range.start + offset + visible.len();
+        }
+    }
+    range
+}
+
+fn markdown_admonition<'a>(
+    source: &'a str,
+    range: &Range<usize>,
+) -> Option<(&'a str, Range<usize>)> {
+    let raw = source.get(range.clone())?;
+    let first_end = raw.find('\n')?;
+    let first = raw[..first_end].trim();
+    let kind = first.strip_prefix(":::")?.trim();
+    if kind.is_empty()
+        || !kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let trimmed = raw.trim_end();
+    let close_start = trimmed.rfind('\n')? + 1;
+    (trimmed[close_start..].trim() == ":::")
+        .then_some((kind, range.start + first_end + 1..range.start + close_start))
+}
+
+fn heading_tag(level: HeadingLevel) -> &'static str {
+    match level {
+        HeadingLevel::H1 => "h1",
+        HeadingLevel::H2 => "h2",
+        HeadingLevel::H3 => "h3",
+        HeadingLevel::H4 => "h4",
+        HeadingLevel::H5 => "h5",
+        HeadingLevel::H6 => "h6",
+    }
+}
+
+fn blockquote_kind(kind: BlockQuoteKind) -> &'static str {
+    match kind {
+        BlockQuoteKind::Note => "note",
+        BlockQuoteKind::Tip => "tip",
+        BlockQuoteKind::Important => "important",
+        BlockQuoteKind::Warning => "warning",
+        BlockQuoteKind::Caution => "caution",
+    }
+}
+
+fn markdown_css_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(64)
+        .collect()
+}
+
+fn markdown_fragment_id(value: &str) -> String {
+    let token = markdown_css_token(value.trim());
+    if token.is_empty() {
+        hash_bytes(value.as_bytes())[..16].to_string()
+    } else {
+        token
+    }
+}
+
+fn safe_markdown_destination(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with("//") {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+        || lower.starts_with('#')
+        || lower.starts_with('/')
+        || lower.starts_with("./")
+        || lower.starts_with("../")
+    {
+        return true;
+    }
+    !value
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .contains(':')
+}
+
+fn safe_markdown_inline_html(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "<mark>"
+            | "</mark>"
+            | "<kbd>"
+            | "</kbd>"
+            | "<u>"
+            | "</u>"
+            | "<s>"
+            | "</s>"
+            | "<sub>"
+            | "</sub>"
+            | "<sup>"
+            | "</sup>"
+            | "<small>"
+            | "</small>"
+            | "<br>"
+            | "<br/>"
+            | "<br />"
+    )
+    .then_some(trimmed)
+}
+
+fn markdown_text_with_autolinks(value: &str) -> String {
+    let mut html = String::new();
+    let mut cursor = 0usize;
+    while cursor < value.len() {
+        let rest = &value[cursor..];
+        let next = ["https://", "http://", "mailto:", "www."]
+            .into_iter()
+            .filter_map(|prefix| rest.find(prefix).map(|offset| (offset, prefix)))
+            .min_by_key(|(offset, _)| *offset);
+        let Some((offset, prefix)) = next else {
+            html.push_str(&escape_text(rest));
+            break;
+        };
+        html.push_str(&escape_text(&rest[..offset]));
+        let candidate = &rest[offset..];
+        let mut end = candidate
+            .char_indices()
+            .find_map(|(index, character)| {
+                (index >= prefix.len()
+                    && (character.is_whitespace() || matches!(character, '<' | '>' | '"')))
+                .then_some(index)
+            })
+            .unwrap_or(candidate.len());
+        while end > prefix.len()
+            && candidate[..end]
+                .chars()
+                .next_back()
+                .is_some_and(|character| matches!(character, ')' | ']' | '}' | ',' | '.' | ';'))
+        {
+            end -= candidate[..end].chars().next_back().unwrap().len_utf8();
+        }
+        if end == prefix.len() {
+            html.push_str(&escape_text(prefix));
+            cursor += offset + prefix.len();
+            continue;
+        }
+        let label = &candidate[..end];
+        let target = if prefix == "www." {
+            format!("https://{label}")
+        } else {
+            label.to_string()
+        };
+        if safe_markdown_destination(&target) {
+            html.push_str(&format!(
+                "<a href=\"{}\">{}</a>",
+                escape_attribute(&target),
+                escape_text(label)
+            ));
+        } else {
+            html.push_str(&escape_text(label));
+        }
+        cursor += offset + end;
+    }
+    html
+}
+
+#[allow(dead_code)]
+fn import_markdown_inner_legacy<F>(
+    source: &Path,
+    output: &Path,
+    options: &ImportOptions,
+    source_hash: String,
+    source_size: u64,
+    emit: &mut F,
+) -> Result<HcdManifest, HcdError>
+where
+    F: FnMut(&ImportEvent) -> Result<(), HcdError>,
+{
+    let mut writer = BundleWriter::create(output)?;
+    writer.write_styles(
+        ".hcd-source{display:block}.hcd-source-block{white-space:pre-wrap;margin:.35em 0}.hcd-markdown-heading{font-weight:700}.hcd-markdown-code{font-family:monospace;background:#f6f8fa;padding:.35em}.hcd-markdown-quote{border-left:3px solid #bbb;padding-left:.75em;color:#555}.hcd-markdown-list{margin:.2em 0;padding-left:1.5em}.hcd-markdown-task{list-style:none}.hcd-markdown-task-marker{display:inline-block;margin-right:.4em}.hcd-markdown-image{border:1px dashed #9aa4b2;padding:.1em .35em;border-radius:.25em}.hcd-markdown-table{border-collapse:collapse;margin:.6em 0;min-width:20em}.hcd-markdown-table th,.hcd-markdown-table td{border:1px solid #b8c0cc;padding:.35em .6em;text-align:left}.hcd-markdown-table th{background:#eef2f7;font-weight:700}",
+    )?;
+    let mut chunks = FlatChunkWriter {
+        document_id: &options.document_id,
+        source_part: MARKDOWN_PART,
+        region: "body",
+        writer: &mut writer,
+        emit,
+        soft_bytes: options.chunk_soft_bytes.clamp(1, MAX_CHUNK_BYTES),
+        max_blocks: options.chunk_blocks.clamp(1, DEFAULT_CHUNK_BLOCKS),
+        chunk_ordinal: 0,
+        blocks: 0,
+        html: String::new(),
+        entries: Vec::new(),
+    };
+    let file = File::open(source)?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut source_offset = 0u64;
+    let mut line_ordinal = 0u64;
+    let mut node_ordinal = 0u64;
+    let mut rendered_blocks = 0u64;
+    let mut fenced = false;
+    let mut table = None;
+    while let Some(line) = read_bounded_line(&mut reader, source_offset)? {
+        source_offset = line.next_offset;
+        line_ordinal = line_ordinal.saturating_add(1);
+        let mut text_start = line.content_start;
+        let mut content = line.content;
+        if line_ordinal == 1 && content.starts_with(&[0xef, 0xbb, 0xbf]) {
+            content.drain(..3);
+            text_start = text_start.saturating_add(3);
+        }
+        let raw = std::str::from_utf8(&content).map_err(|error| {
+            HcdError::Unsupported(format!(
+                "Markdown HCD import currently requires UTF-8 input at line {line_ordinal}: {error}"
+            ))
+        })?;
+        let trimmed = raw.trim_start();
+        let indentation = raw.len() - trimmed.len();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            flush_markdown_table(&mut table, &mut chunks)?;
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced {
+            if let Some(cells) = markdown_table_cells(trimmed) {
+                if markdown_table_separator(&cells) {
+                    continue;
+                }
+                let header = table
+                    .as_ref()
+                    .is_none_or(|table: &MarkdownTableBuilder| table.rows == 0);
+                let mut row_html = String::from("<tr>");
+                let mut row_entries = Vec::with_capacity(cells.len());
+                for cell in cells {
+                    node_ordinal = node_ordinal.saturating_add(1);
+                    let (visible, inline_html) = markdown_inline(cell.text);
+                    let source_start = text_start
+                        .saturating_add(indentation as u64)
+                        .saturating_add(cell.start as u64);
+                    let source_end = text_start
+                        .saturating_add(indentation as u64)
+                        .saturating_add(cell.end as u64);
+                    let node_kind = if header {
+                        "markdown-table-header"
+                    } else {
+                        "markdown-table-cell"
+                    };
+                    let (span, entry) = render_markdown_text_node(
+                        &options.document_id,
+                        &visible,
+                        &inline_html,
+                        node_ordinal,
+                        line_ordinal,
+                        source_start,
+                        source_end,
+                        node_kind,
+                    )?;
+                    let tag = if header { "th" } else { "td" };
+                    row_html.push_str(&format!("<{tag}>{span}</{tag}>"));
+                    row_entries.push(entry);
+                }
+                row_html.push_str("</tr>");
+                let must_flush = table.as_ref().is_some_and(|table| {
+                    table.rows >= MARKDOWN_TABLE_ROWS_PER_FRAGMENT
+                        || table
+                            .html
+                            .len()
+                            .saturating_add(row_html.len())
+                            .saturating_add(32)
+                            > MAX_CHUNK_BYTES
+                });
+                if must_flush {
+                    flush_markdown_table(&mut table, &mut chunks)?;
+                }
+                table
+                    .get_or_insert_with(MarkdownTableBuilder::new)
+                    .push_row(row_html, row_entries);
+                rendered_blocks = rendered_blocks.saturating_add(1);
+                continue;
+            }
+        }
+        flush_markdown_table(&mut table, &mut chunks)?;
+        let block = markdown_block(trimmed, fenced);
+        if matches!(block.kind, MarkdownBlockKind::Rule) {
+            chunks.push_rendered(
+                RenderedSourceBlock {
+                    html: "<hr class=\"hcd-source-block hcd-markdown-rule\"/>".to_string(),
+                    entries: Vec::new(),
+                },
+                false,
+            )?;
+            rendered_blocks = rendered_blocks.saturating_add(1);
+            continue;
+        }
+        let source_start = text_start
+            .saturating_add(indentation as u64)
+            .saturating_add(block.prefix_bytes as u64);
+        let mut source_end = line.content_end;
+        let source_text = &trimmed[block.prefix_bytes.min(trimmed.len())..];
+        let (source_text, hard_break) = source_text
+            .strip_suffix("  ")
+            .map_or((source_text, false), |text| (text, true));
+        if hard_break {
+            source_end = source_end.saturating_sub(2);
+        }
+        let (visible, mut inline_html) = markdown_inline(source_text);
+        if hard_break {
+            inline_html.push_str("<br/>");
+        }
+        node_ordinal = node_ordinal.saturating_add(1);
+        let (span, entry) = render_markdown_text_node(
+            &options.document_id,
+            &visible,
+            &inline_html,
+            node_ordinal,
+            line_ordinal,
+            source_start,
+            source_end,
+            block.node_kind,
+        )?;
+        let html = match block.kind {
+            MarkdownBlockKind::ListItem {
+                ordered,
+                start,
+                task,
+            } => {
+                let list = if ordered { "ol" } else { "ul" };
+                let start = start
+                    .filter(|start| ordered && *start != 1)
+                    .map(|start| format!(" start=\"{start}\""))
+                    .unwrap_or_default();
+                let (item_class, marker) = match task {
+                    Some(true) => (
+                        " class=\"hcd-markdown-task hcd-markdown-task-checked\"",
+                        "<span class=\"hcd-markdown-task-marker\">☑</span>",
+                    ),
+                    Some(false) => (
+                        " class=\"hcd-markdown-task\"",
+                        "<span class=\"hcd-markdown-task-marker\">☐</span>",
+                    ),
+                    None => ("", ""),
+                };
+                format!(
+                    "<{list} class=\"hcd-markdown-list\"{start}><li{item_class}>{marker}{span}</li></{list}>"
+                )
+            }
+            MarkdownBlockKind::Rule => unreachable!("rules are emitted before text mapping"),
+            MarkdownBlockKind::Normal => format!(
+                "<{wrapper} class=\"hcd-source-block hcd-{kind}\">{span}</{wrapper}>",
+                wrapper = block.wrapper,
+                kind = block.node_kind,
+            ),
+        };
+        chunks.push_rendered(
+            RenderedSourceBlock {
+                html,
+                entries: vec![entry],
+            },
+            false,
+        )?;
+        rendered_blocks = rendered_blocks.saturating_add(1);
+    }
+    flush_markdown_table(&mut table, &mut chunks)?;
+    if rendered_blocks == 0 {
+        chunks.push(TextNode {
+            text: "",
+            text_ordinal: 1,
+            source_start: 0,
+            source_end: 0,
+            node_kind: "markdown-paragraph",
+            paragraph_id: Some("line-1".to_string()),
+            wrapper: "p",
+        })?;
+    }
+    chunks.flush()?;
+
+    let mut manifest = base_manifest(options, "md", "semantic-flow", source_hash, source_size);
+    manifest.warnings.push(FidelityWarning {
+        code: "MARKDOWN_CANONICAL_SUBSET".to_string(),
+        message: "HCD preview recognizes ATX headings, blockquotes, ordered/unordered/task list items, fenced code, hard breaks, pipe-delimited GFM tables, emphasis, links, autolinks and safe image placeholders; unsupported Markdown constructs remain editable text and the immutable source remains authoritative".to_string(),
+        node_id: None,
+        source_part: Some(MARKDOWN_PART.to_string()),
+    });
+    manifest.fidelity = Some(FidelityReport {
+        schema_version: HCD_SCHEMA_VERSION.to_string(),
+        level: FidelityLevel::Semantic,
+        preserved: vec![
+            "UTF-8 Markdown text, empty lines, source order, BOM and original line terminators".to_string(),
+            "ATX headings, blockquotes, ordered/unordered/task list items, fenced code, hard breaks, pipe-delimited GFM tables, emphasis, links, autolinks and safe image placeholders".to_string(),
+            "stable node IDs and source byte ranges for source-backed editing".to_string(),
+        ],
+        flattened: vec![
+            "nested and extension-specific Markdown layout is represented by a bounded canonical HTML subset".to_string(),
+            "editing a Markdown node rewrites that node as escaped plain Markdown text while preserving all other source bytes".to_string(),
+        ],
+        dropped: Vec::new(),
+        warnings: manifest.warnings.clone(),
+    });
+    finish_import(writer, manifest, emit)
+}
+
+#[derive(Clone, Copy)]
+enum MarkdownBlockKind {
+    Normal,
+    ListItem {
+        ordered: bool,
+        start: Option<usize>,
+        task: Option<bool>,
+    },
+    Rule,
+}
+
+struct MarkdownBlock {
+    kind: MarkdownBlockKind,
+    prefix_bytes: usize,
+    wrapper: &'static str,
+    node_kind: &'static str,
+}
+
+struct MarkdownTableBuilder {
+    html: String,
+    entries: Vec<NodeMapEntry>,
+    rows: usize,
+}
+
+impl MarkdownTableBuilder {
+    fn new() -> Self {
+        Self {
+            html: "<table class=\"hcd-markdown-table\"><tbody>".to_string(),
+            entries: Vec::new(),
+            rows: 0,
+        }
+    }
+
+    fn push_row(&mut self, row_html: String, entries: Vec<NodeMapEntry>) {
+        self.html.push_str(&row_html);
+        self.entries.extend(entries);
+        self.rows += 1;
+    }
+
+    fn finish(mut self) -> RenderedSourceBlock {
+        self.html.push_str("</tbody></table>");
+        RenderedSourceBlock {
+            html: self.html,
+            entries: self.entries,
+        }
+    }
+}
+
+fn flush_markdown_table<F>(
+    table: &mut Option<MarkdownTableBuilder>,
+    chunks: &mut FlatChunkWriter<'_, F>,
+) -> Result<(), HcdError>
+where
+    F: FnMut(&ImportEvent) -> Result<(), HcdError>,
+{
+    if let Some(table) = table.take() {
+        chunks.push_rendered(table.finish(), false)?;
+    }
+    Ok(())
+}
+
+struct MarkdownTableCell<'a> {
+    start: usize,
+    end: usize,
+    text: &'a str,
+}
+
+fn markdown_table_cells(line: &str) -> Option<Vec<MarkdownTableCell<'_>>> {
+    if !line.starts_with('|') || !line.ends_with('|') || line.len() < 3 {
+        return None;
+    }
+    let mut separators = Vec::new();
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if character == '|' && !escaped {
+            separators.push(index);
+        }
+        if character == '\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+    }
+    if separators.first() != Some(&0)
+        || separators.last() != Some(&line.len().saturating_sub(1))
+        || separators.len() < 3
+    {
+        return None;
+    }
+    let mut cells = Vec::with_capacity(separators.len() - 1);
+    for pair in separators.windows(2) {
+        let raw_start = pair[0] + 1;
+        let raw_end = pair[1];
+        let raw = &line[raw_start..raw_end];
+        let text = raw.trim();
+        let leading = raw.len() - raw.trim_start().len();
+        let start = raw_start + leading;
+        let end = start + text.len();
+        cells.push(MarkdownTableCell { start, end, text });
+    }
+    Some(cells)
+}
+
+fn markdown_table_separator(cells: &[MarkdownTableCell<'_>]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let marker = cell.text.trim_matches(':');
+            marker.len() >= 3 && marker.bytes().all(|byte| byte == b'-')
+        })
+}
+
+fn markdown_block(line: &str, fenced: bool) -> MarkdownBlock {
+    if fenced {
+        return MarkdownBlock {
+            kind: MarkdownBlockKind::Normal,
+            prefix_bytes: 0,
+            wrapper: "pre",
+            node_kind: "markdown-code",
+        };
+    }
+    let heading_marks = line.bytes().take_while(|byte| *byte == b'#').count();
+    if (1..=6).contains(&heading_marks) && line.as_bytes().get(heading_marks) == Some(&b' ') {
+        return MarkdownBlock {
+            kind: MarkdownBlockKind::Normal,
+            prefix_bytes: heading_marks + 1,
+            wrapper: match heading_marks {
+                1 => "h1",
+                2 => "h2",
+                3 => "h3",
+                4 => "h4",
+                5 => "h5",
+                _ => "h6",
+            },
+            node_kind: "markdown-heading",
+        };
+    }
+    if let Some(rest) = line.strip_prefix("> ") {
+        return MarkdownBlock {
+            kind: MarkdownBlockKind::Normal,
+            prefix_bytes: line.len() - rest.len(),
+            wrapper: "blockquote",
+            node_kind: "markdown-quote",
+        };
+    }
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+        let item = &line[2..];
+        let task = markdown_task_prefix(item);
+        return MarkdownBlock {
+            kind: MarkdownBlockKind::ListItem {
+                ordered: false,
+                start: None,
+                task: task.map(|(_, checked)| checked),
+            },
+            prefix_bytes: 2 + task.map(|(bytes, _)| bytes).unwrap_or(0),
+            wrapper: "li",
+            node_kind: if task.is_some() {
+                "markdown-task-item"
+            } else {
+                "markdown-list-item"
+            },
+        };
+    }
+    if let Some(prefix) = ordered_list_prefix(line) {
+        let start = line[..prefix.saturating_sub(2)].parse().ok();
+        let item = &line[prefix..];
+        let task = markdown_task_prefix(item);
+        return MarkdownBlock {
+            kind: MarkdownBlockKind::ListItem {
+                ordered: true,
+                start,
+                task: task.map(|(_, checked)| checked),
+            },
+            prefix_bytes: prefix + task.map(|(bytes, _)| bytes).unwrap_or(0),
+            wrapper: "li",
+            node_kind: if task.is_some() {
+                "markdown-task-item"
+            } else {
+                "markdown-list-item"
+            },
+        };
+    }
+    if matches!(line.trim(), "---" | "***" | "___") {
+        return MarkdownBlock {
+            kind: MarkdownBlockKind::Rule,
+            prefix_bytes: 0,
+            wrapper: "hr",
+            node_kind: "markdown-rule",
+        };
+    }
+    MarkdownBlock {
+        kind: MarkdownBlockKind::Normal,
+        prefix_bytes: 0,
+        wrapper: "p",
+        node_kind: "markdown-paragraph",
+    }
+}
+
+fn markdown_task_prefix(item: &str) -> Option<(usize, bool)> {
+    let marker = item.get(..4)?;
+    match marker.as_bytes() {
+        [b'[', b' ', b']', b' '] => Some((4, false)),
+        [b'[', b'x' | b'X', b']', b' '] => Some((4, true)),
+        _ => None,
+    }
+}
+
+fn ordered_list_prefix(line: &str) -> Option<usize> {
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    (digits > 0
+        && line.as_bytes().get(digits) == Some(&b'.')
+        && line.as_bytes().get(digits + 1) == Some(&b' '))
+    .then_some(digits + 2)
+}
+
+fn markdown_inline(source: &str) -> (String, String) {
+    markdown_inline_inner(source, 0)
+}
+
+fn markdown_inline_inner(source: &str, depth: usize) -> (String, String) {
+    if depth > 16 {
+        return (source.to_string(), escape_text(source));
+    }
+    let mut visible = String::new();
+    let mut html = String::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        let rest = &source[cursor..];
+        let mut matched = false;
+        if let Some(escaped) = rest.strip_prefix('\\') {
+            if let Some(character) = escaped.chars().next() {
+                visible.push(character);
+                html.push_str(&escape_text(&character.to_string()));
+                cursor += 1 + character.len_utf8();
+                continue;
+            }
+        }
+        for delimiter in ["***", "___"] {
+            if let Some(after) = rest.strip_prefix(delimiter) {
+                if let Some(end) = after.find(delimiter) {
+                    let inner = &after[..end];
+                    let (inner_text, inner_html) = markdown_inline_inner(inner, depth + 1);
+                    visible.push_str(&inner_text);
+                    html.push_str(&format!("<strong><em>{inner_html}</em></strong>"));
+                    cursor += delimiter.len() + end + delimiter.len();
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if matched {
+            continue;
+        }
+        for (delimiter, tag) in [("**", "strong"), ("__", "strong"), ("~~", "del")] {
+            if let Some(after) = rest.strip_prefix(delimiter) {
+                if let Some(end) = after.find(delimiter) {
+                    let inner = &after[..end];
+                    let (inner_text, inner_html) = markdown_inline_inner(inner, depth + 1);
+                    visible.push_str(&inner_text);
+                    html.push_str(&format!("<{tag}>{inner_html}</{tag}>"));
+                    cursor += delimiter.len() + end + delimiter.len();
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if matched {
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('`') {
+            if let Some(end) = after.find('`') {
+                let inner = &after[..end];
+                visible.push_str(inner);
+                html.push_str("<code>");
+                html.push_str(&escape_text(inner));
+                html.push_str("</code>");
+                cursor += end + 2;
+                continue;
+            }
+        }
+        if rest.starts_with("![") {
+            if let Some(label_end) = rest.find("](") {
+                let target_start = label_end + 2;
+                if let Some(target_end) = markdown_destination_end(&rest[target_start..]) {
+                    let label = &rest[2..label_end];
+                    let raw_target = &rest[target_start..target_start + target_end];
+                    let (label_text, label_html) = markdown_inline_inner(label, depth + 1);
+                    visible.push_str(&label_text);
+                    if let Some((target, title)) = markdown_link_target(raw_target) {
+                        if safe_markdown_href(target) {
+                            html.push_str(&format!(
+                                "<span class=\"hcd-markdown-image\" data-hcd-markdown-image-src=\"{}\"{}>{label_html}</span>",
+                                escape_attribute(target),
+                                title
+                                    .map(|title| format!(" title=\"{}\"", escape_attribute(title)))
+                                    .unwrap_or_default()
+                            ));
+                        } else {
+                            html.push_str(&label_html);
+                        }
+                    } else {
+                        html.push_str(&label_html);
+                    }
+                    cursor += target_start + target_end + 1;
+                    continue;
+                }
+            }
+        }
+        if rest.starts_with('[') {
+            if let Some(label_end) = rest.find("](") {
+                let target_start = label_end + 2;
+                if let Some(target_end) = markdown_destination_end(&rest[target_start..]) {
+                    let label = &rest[1..label_end];
+                    let raw_target = &rest[target_start..target_start + target_end];
+                    let (label_text, label_html) = markdown_inline_inner(label, depth + 1);
+                    visible.push_str(&label_text);
+                    if let Some((target, title)) = markdown_link_target(raw_target) {
+                        if safe_markdown_href(target) {
+                            html.push_str(&format!(
+                                "<a href=\"{}\"{}>{label_html}</a>",
+                                escape_attribute(target),
+                                title
+                                    .map(|title| format!(" title=\"{}\"", escape_attribute(title)))
+                                    .unwrap_or_default()
+                            ));
+                        } else {
+                            html.push_str(&label_html);
+                        }
+                    } else {
+                        html.push_str(&label_html);
+                    }
+                    cursor += target_start + target_end + 1;
+                    continue;
+                }
+            }
+        }
+        if let Some(after) = rest.strip_prefix('<') {
+            if let Some(end) = after.find('>') {
+                let candidate = &after[..end];
+                let (target, label) = if safe_markdown_href(candidate) {
+                    (candidate.to_string(), candidate)
+                } else if markdown_email(candidate) {
+                    (format!("mailto:{candidate}"), candidate)
+                } else {
+                    (String::new(), candidate)
+                };
+                if !target.is_empty() {
+                    visible.push_str(label);
+                    html.push_str(&format!(
+                        "<a href=\"{}\">{}</a>",
+                        escape_attribute(&target),
+                        escape_text(label)
+                    ));
+                    cursor += end + 2;
+                    continue;
+                }
+            }
+        }
+        if let Some(prefix) = ["https://", "http://", "mailto:"]
+            .into_iter()
+            .find(|prefix| rest.starts_with(prefix))
+        {
+            let mut end = rest
+                .char_indices()
+                .find_map(|(index, character)| {
+                    (index >= prefix.len()
+                        && (character.is_whitespace() || matches!(character, '<' | '>' | '"')))
+                    .then_some(index)
+                })
+                .unwrap_or(rest.len());
+            while end > prefix.len()
+                && rest[..end]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|character| matches!(character, ')' | ']' | '}' | ',' | '.' | ';'))
+            {
+                end -= rest[..end].chars().next_back().unwrap().len_utf8();
+            }
+            let target = &rest[..end];
+            if safe_markdown_href(target) {
+                visible.push_str(target);
+                html.push_str(&format!(
+                    "<a href=\"{}\">{}</a>",
+                    escape_attribute(target),
+                    escape_text(target)
+                ));
+                cursor += end;
+                continue;
+            }
+        }
+        for (delimiter, tag) in [("*", "em"), ("_", "em")] {
+            if let Some(after) = rest.strip_prefix(delimiter) {
+                if let Some(end) = after.find(delimiter) {
+                    let inner = &after[..end];
+                    let (inner_text, inner_html) = markdown_inline_inner(inner, depth + 1);
+                    visible.push_str(&inner_text);
+                    html.push_str(&format!("<{tag}>{inner_html}</{tag}>"));
+                    cursor += delimiter.len() + end + delimiter.len();
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if matched {
+            continue;
+        }
+        let character = rest.chars().next().expect("cursor is within source");
+        visible.push(character);
+        html.push_str(&escape_text(&character.to_string()));
+        cursor += character.len_utf8();
+    }
+    (visible, html)
+}
+
+fn markdown_link_target(value: &str) -> Option<(&str, Option<&str>)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let (target, remainder) = if let Some(after) = value.strip_prefix('<') {
+        let end = after.find('>')?;
+        (&after[..end], after[end + 1..].trim())
+    } else {
+        let split = value.find(char::is_whitespace).unwrap_or(value.len());
+        (&value[..split], value[split..].trim())
+    };
+    let title = (!remainder.is_empty())
+        .then(|| {
+            remainder
+                .strip_prefix('"')
+                .and_then(|title| title.strip_suffix('"'))
+                .or_else(|| {
+                    remainder
+                        .strip_prefix('\'')
+                        .and_then(|title| title.strip_suffix('\''))
+                })
+        })
+        .flatten();
+    (remainder.is_empty() || title.is_some()).then_some((target, title))
+}
+
+fn markdown_destination_end(value: &str) -> Option<usize> {
+    let mut nested_parentheses = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            continue;
+        }
+        match character {
+            '(' => nested_parentheses = nested_parentheses.saturating_add(1),
+            ')' if nested_parentheses == 0 => return Some(index),
+            ')' => nested_parentheses = nested_parentheses.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn markdown_email(value: &str) -> bool {
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-' | b'@')
+        })
+}
+
+fn safe_markdown_href(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with('#')
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_markdown_text_node(
+    document_id: &str,
+    visible: &str,
+    inline_html: &str,
+    text_ordinal: u64,
+    line_ordinal: u64,
+    source_start: u64,
+    source_end: u64,
+    node_kind: &str,
+) -> Result<(String, NodeMapEntry), HcdError> {
+    if visible.len() > MAX_CHUNK_BYTES || inline_html.len() > MAX_CHUNK_BYTES {
+        return Err(HcdError::ResourceLimit(format!(
+            "NODE_TOO_LARGE: Markdown node {text_ordinal} exceeds {MAX_CHUNK_BYTES} bytes"
+        )));
+    }
+    if visible
+        .chars()
+        .any(|character| character < '\u{20}' && !matches!(character, '\t' | '\n' | '\r'))
+    {
+        return Err(HcdError::InvalidBundle(format!(
+            "Markdown text node {text_ordinal} contains a control character forbidden by HCD"
+        )));
+    }
+    let ordinal = text_ordinal.to_string();
+    let node_id = stable_node_id(&[document_id, MARKDOWN_PART, node_kind, &ordinal]);
+    let node_hash = hash_bytes(visible.as_bytes());
+    let html = format!(
+        "<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{inline_html}</span>"
+    );
+    Ok((
+        html,
+        NodeMapEntry {
+            node_id,
+            node_hash,
+            source: SourceAnchor {
+                part: MARKDOWN_PART.to_string(),
+                text_ordinal,
+                paragraph_id: Some(format!("line-{line_ordinal}")),
+                text_id: Some(format!("{SOURCE_RANGE_PREFIX}{source_start}:{source_end}")),
+                node_kind: node_kind.to_string(),
+                editable: true,
+            },
+        },
+    ))
+}
+
 fn import_text_inner<F>(
     source: &Path,
     output: &Path,
@@ -328,7 +2143,7 @@ where
 {
     let mut writer = BundleWriter::create(output)?;
     writer.write_styles(
-        ".hcd-source{display:block}.hcd-source-block{white-space:pre-wrap;margin:0;min-height:1em}",
+        ".hcd-source{display:block;font-family:HCDSans,HCDEmoji,HCDFallback,\"Noto Sans SC\",\"PingFang SC\",\"Microsoft YaHei\",Arial,sans-serif;font-size:16px;line-height:1.6}.hcd-source-block{white-space:pre-wrap;margin:0;min-height:1.6em}",
     )?;
     let mut chunks = FlatChunkWriter {
         document_id: &options.document_id,
@@ -424,6 +2239,37 @@ pub(crate) fn export_text(
     })
 }
 
+pub(crate) fn export_markdown(
+    bundle: &Bundle,
+    source: &Path,
+    target: &Path,
+    options: &ExportOptions,
+) -> Result<FidelityReport, HcdError> {
+    export_textual(
+        bundle,
+        source,
+        target,
+        options,
+        "md",
+        MARKDOWN_PART,
+        |text| escape_markdown_text(text).into_bytes(),
+    )
+}
+
+fn escape_markdown_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(
+            character,
+            '\\' | '*' | '_' | '~' | '`' | '[' | ']' | '<' | '>'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 fn export_textual(
     bundle: &Bundle,
     source: &Path,
@@ -512,10 +2358,18 @@ fn export_textual(
         ],
         flattened: if replacements.is_empty() {
             Vec::new()
-        } else if format == "html" {
-            vec!["edited HTML text ranges are serialized with safe entity escaping".to_string()]
         } else {
-            Vec::new()
+            match format {
+                "html" => vec![
+                    "edited HTML text ranges are serialized with safe entity escaping"
+                        .to_string(),
+                ],
+                "md" => vec![
+                    "edited Markdown nodes are serialized as escaped plain Markdown text; original inline delimiters inside that dirty range are not retained"
+                        .to_string(),
+                ],
+                _ => Vec::new(),
+            }
         },
         dropped: Vec::new(),
         warnings,
@@ -533,10 +2387,10 @@ fn validate_target_extension(target: &Path, format: &str) -> Result<(), HcdError
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let valid = if format == "html" {
-        matches!(extension.as_str(), "html" | "htm")
-    } else {
-        extension == format
+    let valid = match format {
+        "html" => matches!(extension.as_str(), "html" | "htm"),
+        "md" => matches!(extension.as_str(), "md" | "markdown"),
+        _ => extension == format,
     };
     if valid {
         Ok(())
@@ -1892,6 +3746,225 @@ mod tests {
             std::fs::read(target).unwrap(),
             b"\xef\xbb\xbfSecret ***\r\nSecond\n"
         );
+    }
+
+    #[test]
+    fn markdown_hcd_renders_semantics_and_source_backed_patch_preserves_other_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.markdown");
+        let bundle_path = temp.path().join("bundle");
+        let exact_target = temp.path().join("exact.md");
+        let patched_target = temp.path().join("patched.md");
+        let original = b"\xef\xbb\xbf# Secret **123**\r\n\r\n- First item\n- [ ] Pending task\n- [x] Completed task\n3. Ordered from three\n> [Safe link](https://example.com \"Docs\")\n\n***Bold italic*** and <https://example.org> and <test@example.org>  \n![Diagram](https://example.com/diagram.png \"Diagram title\")\n[Unsafe](javascript:alert(1))\n| Name | Value |\n| --- | --- |\n| User | Zhang |\n```text\ncode <value>\n```\n";
+        std::fs::write(&source, original).unwrap();
+        import_markdown(&source, &bundle_path, &options("markdown-doc"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let html = chunk_html(&bundle).join("");
+        assert!(html.contains("<h1 class=\"hcd-source-block hcd-markdown-heading\">"));
+        assert!(html.contains("<strong><span"));
+        assert!(html.contains(">123</span></strong>"));
+        assert!(html.contains("<ul class=\"hcd-markdown-list\">"));
+        assert!(html.contains("class=\"hcd-markdown-task\""));
+        assert!(html.contains("class=\"hcd-markdown-task hcd-markdown-task-checked\""));
+        assert!(html.contains("<ol class=\"hcd-markdown-list\" start=\"3\">"));
+        assert!(html.contains("<blockquote class=\"hcd-source-block hcd-markdown-quote\">"));
+        assert!(html.contains("href=\"https://example.com\""));
+        assert!(html.contains("title=\"Docs\""));
+        assert!(html.contains("<strong>"));
+        assert!(html.contains("<em>"));
+        assert!(html.contains(">Bold italic</span>"));
+        assert!(html.contains("href=\"https://example.org\""));
+        assert!(html.contains("href=\"mailto:test@example.org\""));
+        assert!(html.contains("<br/>"));
+        assert!(html.contains("class=\"hcd-markdown-image\""));
+        assert!(html.contains("data-hcd-node-kind=\"image\""));
+        assert!(html.contains("data-hcd-markdown-image-src=\"https://example.com/diagram.png\""));
+        assert!(!html.contains("href=\"javascript:"));
+        assert!(html.contains(">Unsafe</span>"));
+        assert!(
+            html.contains("<table class=\"hcd-markdown-table\""),
+            "{html}"
+        );
+        assert!(html.contains("<th>"));
+        assert!(html.contains("<td>"));
+        assert!(!html.contains("| --- | --- |"));
+        assert!(html.contains("<pre class=\"hcd-source-block hcd-markdown-code\""));
+
+        let exact = export_markdown(
+            &bundle,
+            &source,
+            &exact_target,
+            &ExportOptions {
+                revision: Some(0),
+                fidelity_report: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(exact.level, FidelityLevel::Exact);
+        assert_eq!(std::fs::read(&exact_target).unwrap(), original);
+
+        let page = extract_text_page(&bundle, None, 100).unwrap();
+        assert!(page.entries.iter().any(|entry| entry.text == "Name"));
+        assert!(page.entries.iter().any(|entry| entry.text == "Zhang"));
+        let entry = page
+            .entries
+            .iter()
+            .find(|entry| entry.text == "123")
+            .unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+                document_id: "markdown-doc".to_string(),
+                patch_id: "patch-md-1".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: entry.node_id.clone(),
+                    start: 0,
+                    delete_count: 3,
+                    insert_text: "[MASKED]".to_string(),
+                    precondition: NodePrecondition {
+                        node_hash: entry.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        let patched = export_markdown(
+            &bundle,
+            &source,
+            &patched_target,
+            &ExportOptions {
+                revision: Some(1),
+                fidelity_report: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(patched.level, FidelityLevel::High);
+        let output = std::fs::read(&patched_target).unwrap();
+        assert!(output.starts_with(b"\xef\xbb\xbf# Secret **\\[MASKED\\]**\r\n"));
+        assert!(output.ends_with(b"```text\ncode <value>\n```\n"));
+    }
+
+    #[test]
+    fn markdown_hcd_covers_commonmark_gfm_and_safe_extensions() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("all.md");
+        let bundle_path = temp.path().join("bundle");
+        let markdown = r#"---
+title: Full syntax
+---
+
+Setext heading {#setext .hero}
+=============================
+
+[reference link][docs] and footnote[^note], H ~2~ O, x ^2^, $a+b$, [[Wiki Page|wiki label]].
+
+[docs]: https://example.com/reference "Reference"
+
+> [!WARNING]
+> Alert with **strong** text.
+>
+> - nested item
+>   1. nested ordered item
+
+Term
+  : Definition value
+
+| Left | Center | Right |
+| :--- | :----: | ----: |
+| A | B | C |
+
+    indented code
+
+```mermaid
+graph TD; A-->B
+```
+
+$$E=mc^2$$
+
+Inline <mark>safe HTML</mark> and <script>unsafe HTML</script>.
+
+::: warning
+Colon admonition.
+:::
+
+[^note]: Footnote **definition**.
+"#;
+        std::fs::write(&source, markdown).unwrap();
+        import_markdown(&source, &bundle_path, &options("markdown-all"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let html = chunk_html(&bundle).join("");
+
+        for marker in [
+            "data-hcd-metadata=\"yaml\"",
+            "id=\"setext\"",
+            "data-hcd-markdown-classes=\"hero\"",
+            "href=\"https://example.com/reference\"",
+            "hcd-markdown-footnote-ref",
+            "id=\"hcd-footnote-note\"",
+            "<sub>",
+            "<sup>",
+            "data-hcd-math=\"inline\"",
+            "data-hcd-math=\"display\"",
+            "hcd-markdown-wikilink",
+            "data-hcd-alert=\"warning\"",
+            "data-hcd-admonition=\"warning\"",
+            "hcd-markdown-definition-list",
+            "style=\"text-align:center\"",
+            "style=\"text-align:right\"",
+            "data-hcd-fenced=\"false\"",
+            "class=\"language-mermaid\"",
+            "<mark>",
+            "hcd-markdown-raw-html",
+        ] {
+            assert!(html.contains(marker), "missing {marker} in {html}");
+        }
+        assert!(!html.contains("<script>unsafe"));
+    }
+
+    #[test]
+    fn large_markdown_table_is_stably_split_into_row_groups() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("large.md");
+        let first_bundle_path = temp.path().join("first-bundle");
+        let second_bundle_path = temp.path().join("second-bundle");
+        let mut markdown = String::from("| Row | Value |\n| ---: | :--- |\n");
+        for row in 1..=300 {
+            markdown.push_str(&format!("| {row} | Value {row} |\n"));
+        }
+        std::fs::write(&source, markdown).unwrap();
+        let mut import_options = ImportOptions::new("large-markdown-table");
+        import_options.chunk_soft_bytes = 512 * 1024;
+        import_options.chunk_blocks = 256;
+        import_markdown(&source, &first_bundle_path, &import_options, |_| Ok(())).unwrap();
+        import_markdown(&source, &second_bundle_path, &import_options, |_| Ok(())).unwrap();
+
+        let first = Bundle::open(&first_bundle_path).unwrap();
+        let second = Bundle::open(&second_bundle_path).unwrap();
+        let validation = validate_bundle(&first).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let html = chunk_html(&first).join("");
+        assert_eq!(
+            html.matches("<table class=\"hcd-markdown-table\"").count(),
+            3
+        );
+        assert!(html.contains("data-hcd-markdown-table-fragment=\"0\""));
+        assert!(html.contains("data-hcd-markdown-table-fragment=\"1\""));
+        assert!(html.contains("data-hcd-markdown-table-fragment=\"2\""));
+        assert_eq!(
+            html.matches("data-hcd-markdown-table-continuation=\"true\"")
+                .count(),
+            2
+        );
+        assert_eq!(chunk_html(&first), chunk_html(&second));
     }
 
     #[test]

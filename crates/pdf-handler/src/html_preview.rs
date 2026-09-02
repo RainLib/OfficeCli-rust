@@ -1,6 +1,9 @@
-use crate::content_stream::{ParsedContentStream, PdfColor, PdfTextBlock};
+use crate::content_stream::{base64_encode, ParsedContentStream, PdfColor, PdfTextBlock};
 use crate::reader::PdfReader;
+use crate::render::PdfRasterizer;
 use handler_common::{HandlerError, ViewOptions};
+
+const MAX_STANDALONE_RASTER_BYTES: usize = 64 * 1024 * 1024;
 
 /// Map a PDF BaseFont name (like "TimesNewRomanPS-BoldItalicMT" or "Helvetica-Bold")
 /// to standard web CSS font family, weight, and style properties.
@@ -36,7 +39,12 @@ fn map_pdf_font_to_css(base_font_name: &str) -> (String, String, String) {
     };
 
     // Determine Font Family
-    let family = if name_lower.contains("song") || name_lower.contains("simsun") {
+    let family = if name_lower.contains("notosanssc")
+        || name_lower.contains("notosanscjk")
+        || name_lower.contains("sourcehansans")
+    {
+        "'Noto Sans SC', 'Noto Sans CJK SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif"
+    } else if name_lower.contains("song") || name_lower.contains("simsun") {
         "SimSun, 'Songti SC', Georgia, 'Times New Roman', Times, serif"
     } else if name_lower.contains("hei")
         || name_lower.contains("simhei")
@@ -160,8 +168,8 @@ pub fn text_block_inline_style(
     let top = page_height - (bbox.y - lly) - bbox.height;
     let left = bbox.x - llx;
     format!(
-        "position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{:.1}pt;height:{:.1}pt;font-family:{family};font-size:{size:.1}pt;font-weight:{weight};font-style:{font_style};color:{color};{background}line-height:1",
-        bbox.width, bbox.height
+        "position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{:.1}pt;height:{:.1}pt;font-family:{family};font-size:{size:.1}pt;font-weight:{weight};font-style:{font_style};color:{color};{background}line-height:{:.1}pt",
+        bbox.width, bbox.height, bbox.height
     )
 }
 
@@ -186,8 +194,27 @@ fn pdf_color_to_css(color: &PdfColor) -> String {
 }
 
 pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, HandlerError> {
+    let rasterizer = PdfRasterizer::open(reader.file_path()).ok();
+    let raster = rasterizer
+        .as_ref()
+        .and_then(|renderer| renderer.render_page(page_num).ok());
+    view_page_as_html_with_raster(reader, page_num, raster.as_deref())
+}
+
+fn view_page_as_html_with_raster(
+    reader: &PdfReader,
+    page_num: usize,
+    page_raster: Option<&[u8]>,
+) -> Result<String, HandlerError> {
     let (_width, height, llx, lly) = page_dimensions(reader, page_num);
     let mut page_html = String::new();
+
+    if let Some(png) = page_raster {
+        page_html.push_str(&format!(
+            "  <img class=\"page-raster\" src=\"data:image/png;base64,{}\" alt=\"\" />\n",
+            base64_encode(png)
+        ));
+    }
 
     page_html.push_str(&format!(
         "  <div class=\"page-number-label\">Page {}</div>\n",
@@ -196,7 +223,48 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
 
     let pages = reader.document().get_pages();
     if let Some(parsed) = reader.parse_page_text_blocks(page_num) {
-        // 1. Render XObject Images (so text renders on top of them)
+        // 1. Render vector fills and strokes behind text. Tables and code
+        // panels are native PDF graphics, not text decorations.
+        for rect in &parsed.vector_rects {
+            let bbox = &rect.bbox;
+            let top = height - (bbox.y - lly) - bbox.height;
+            let left = bbox.x - llx;
+            let fill = rect
+                .fill_color
+                .as_ref()
+                .map(pdf_color_to_css)
+                .unwrap_or_else(|| "transparent".to_string());
+            let border = rect
+                .stroke_color
+                .as_ref()
+                .map(|color| {
+                    format!(
+                        "border:{:.1}pt solid {};",
+                        rect.stroke_width,
+                        pdf_color_to_css(color)
+                    )
+                })
+                .unwrap_or_default();
+            page_html.push_str(&format!(
+                "  <div class=\"pdf-vector-rect\" style=\"position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{:.1}pt;height:{:.1}pt;background:{fill};{border}box-sizing:border-box;pointer-events:none\"></div>\n",
+                bbox.width, bbox.height
+            ));
+        }
+        for line in &parsed.vector_lines {
+            let left = line.x1 - llx;
+            let top = height - (line.y1 - lly);
+            let dx = line.x2 - line.x1;
+            let dy = line.y2 - line.y1;
+            let length = dx.hypot(dy);
+            let angle = -dy.atan2(dx).to_degrees();
+            page_html.push_str(&format!(
+                "  <div class=\"pdf-vector-line\" style=\"position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{length:.1}pt;border-top:{:.1}pt solid {};transform:rotate({angle:.3}deg);transform-origin:0 0;pointer-events:none\"></div>\n",
+                line.width,
+                pdf_color_to_css(&line.color)
+            ));
+        }
+
+        // 2. Render XObject Images (so text renders on top of them)
         for img in &parsed.image_blocks {
             if let Some(data_uri) = parsed.image_map.get(&img.xobject_name) {
                 let bbox = &img.bbox;
@@ -209,7 +277,7 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
             }
         }
 
-        // 2. Render Text Blocks
+        // 3. Render Text Blocks
         for block in &parsed.text_blocks {
             let escaped = html_escape(&block.text);
             let bbox = &block.bbox;
@@ -227,7 +295,7 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
         page_html.push_str("  <div class=\"no-text\" style=\"position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#999; font-style:italic;\">(no extractable text)</div>\n");
     }
 
-    // 3. Render Native PDF Highlight Annotations
+    // 4. Render native PDF annotations.
     if let Some(&page_id) = pages.get(&(page_num as u32)) {
         if let Ok(page_dict) = reader.document().get_dictionary(page_id) {
             if let Ok(annots_obj) = page_dict.get(b"Annots") {
@@ -241,7 +309,16 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
                             if let Ok(subtype) =
                                 annot_dict.get(b"Subtype").and_then(|v| v.as_name_str())
                             {
-                                if subtype == "Highlight" {
+                                if subtype == "Link" {
+                                    render_link_annotation(
+                                        reader,
+                                        annot_dict,
+                                        height,
+                                        llx,
+                                        lly,
+                                        &mut page_html,
+                                    );
+                                } else if subtype == "Highlight" {
                                     // Extract color /C
                                     let mut r = 255;
                                     let mut g = 255;
@@ -391,6 +468,82 @@ pub fn view_page_as_html(reader: &PdfReader, page_num: usize) -> Result<String, 
     Ok(page_html)
 }
 
+fn render_link_annotation(
+    reader: &PdfReader,
+    annot_dict: &lopdf::Dictionary,
+    page_height: f32,
+    llx: f32,
+    lly: f32,
+    output: &mut String,
+) {
+    let Some(target) = annot_dict
+        .get(b"A")
+        .ok()
+        .and_then(|action| {
+            reader
+                .document()
+                .dereference(action)
+                .ok()
+                .map(|(_, value)| value)
+        })
+        .and_then(|action| action.as_dict().ok().cloned())
+        .filter(|action| action.get(b"S").and_then(|value| value.as_name_str()).ok() == Some("URI"))
+        .and_then(|action| action.get(b"URI").ok().cloned())
+        .and_then(|value| {
+            value
+                .as_str()
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        })
+        .filter(|target| safe_pdf_link_target(target))
+    else {
+        return;
+    };
+    let Some(rect) = annot_dict
+        .get(b"Rect")
+        .ok()
+        .and_then(|value| {
+            reader
+                .document()
+                .dereference(value)
+                .ok()
+                .map(|(_, value)| value)
+        })
+        .and_then(|value| value.as_array().ok().cloned())
+        .filter(|rect| rect.len() == 4)
+    else {
+        return;
+    };
+    let number = |value: &lopdf::Object| {
+        value
+            .as_float()
+            .or_else(|_| value.as_i64().map(|value| value as f32))
+            .ok()
+    };
+    let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
+        number(&rect[0]),
+        number(&rect[1]),
+        number(&rect[2]),
+        number(&rect[3]),
+    ) else {
+        return;
+    };
+    let left = x0.min(x1) - llx;
+    let bottom = y0.min(y1);
+    let width = (x1 - x0).abs().max(1.0);
+    let height = (y1 - y0).abs().max(1.0);
+    let top = page_height - (bottom - lly) - height;
+    output.push_str(&format!(
+        "  <a class=\"link-annot\" href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\" aria-label=\"Open link\" style=\"position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{width:.1}pt;height:{height:.1}pt\"></a>\n",
+        html_escape(&target)
+    ));
+}
+
+fn safe_pdf_link_target(target: &str) -> bool {
+    let target = target.trim().to_ascii_lowercase();
+    target.starts_with("https://") || target.starts_with("http://") || target.starts_with("mailto:")
+}
+
 /// Render the PDF document as HTML for browser preview.
 /// Each page is rendered as a relative container with a physical size in points,
 /// and each text block is absolutely positioned within it using inverted PDF coordinates.
@@ -400,6 +553,7 @@ pub fn view_as_html(reader: &PdfReader, opts: ViewOptions) -> Result<String, Han
         .and_then(|n| n.to_str())
         .unwrap_or("Document.pdf");
     let total_pages = reader.page_count();
+    let rasterizer = PdfRasterizer::open(reader.file_path()).ok();
 
     if let Some(page_filter) = &opts.page {
         // Parse page filter: "1", "2-5", "1,3,5"
@@ -412,15 +566,23 @@ pub fn view_as_html(reader: &PdfReader, opts: ViewOptions) -> Result<String, Han
                 )));
             }
             let (width, height, _, _) = page_dimensions(reader, page_num);
-            let inner_html = view_page_as_html(reader, page_num)?;
+            let raster = rasterizer
+                .as_ref()
+                .and_then(|renderer| renderer.render_page(page_num).ok());
+            let inner_html = view_page_as_html_with_raster(reader, page_num, raster.as_deref())?;
             return Ok(format!(
-                "<div class=\"page\" data-path=\"/page[{}]\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden;\">\n{}\n</div>\n",
-                page_num, width, height, inner_html
+                "<div class=\"page\" data-path=\"/page[{}]\" data-source-raster=\"{}\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden;\">\n{}\n</div>\n",
+                page_num,
+                raster.is_some(),
+                width,
+                height,
+                inner_html
             ));
         }
     }
 
     let mut pages_html = String::new();
+    let mut raster_bytes = 0usize;
     for i in 1..=total_pages {
         let (width, height, _, _) = page_dimensions(reader, i);
         if opts.lazy_load {
@@ -435,10 +597,30 @@ pub fn view_as_html(reader: &PdfReader, opts: ViewOptions) -> Result<String, Han
                 i, width, height, i, i
             ));
         } else {
-            let inner_html = view_page_as_html(reader, i)?;
+            let raster = if raster_bytes < MAX_STANDALONE_RASTER_BYTES {
+                rasterizer
+                    .as_ref()
+                    .and_then(|renderer| renderer.render_page(i).ok())
+                    .filter(|png| {
+                        let next = raster_bytes.saturating_add(png.len());
+                        if next > MAX_STANDALONE_RASTER_BYTES {
+                            false
+                        } else {
+                            raster_bytes = next;
+                            true
+                        }
+                    })
+            } else {
+                None
+            };
+            let inner_html = view_page_as_html_with_raster(reader, i, raster.as_deref())?;
             pages_html.push_str(&format!(
-                "<div class=\"page\" data-path=\"/page[{}]\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden;\">\n{}\n</div>\n",
-                i, width, height, inner_html
+                "<div class=\"page\" data-path=\"/page[{}]\" data-source-raster=\"{}\" style=\"position:relative; width:{:.1}pt; height:{:.1}pt; background:white; border-radius:4px; overflow:hidden;\">\n{}\n</div>\n",
+                i,
+                raster.is_some(),
+                width,
+                height,
+                inner_html
             ));
         }
     }
@@ -543,6 +725,23 @@ h1 {{
     transform: translateY(-2px);
     box-shadow: 0 8px 24px rgba(0,0,0,0.2) !important;
 }}
+.page-raster {{
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    z-index: 0;
+    pointer-events: none;
+    user-select: none;
+}}
+.page[data-source-raster="true"] .pdf-vector-rect,
+.page[data-source-raster="true"] .pdf-vector-line {{
+    display: none;
+}}
+.page[data-source-raster="true"] .page-image {{
+    opacity: 0;
+}}
 .page-number-label {{
     position: absolute;
     bottom: 10px;
@@ -560,15 +759,36 @@ h1 {{
 }}
 .text-block {{
     display: inline-block;
+    min-width: max-content;
+    z-index: 2;
     cursor: pointer;
-    line-height: 1;
+    white-space: pre;
+    overflow: visible;
     transform-origin: left top;
     transition: background-color 0.1s, outline 0.1s;
+}}
+.page[data-source-raster="true"] .text-block {{
+    color: transparent !important;
+    background: transparent !important;
+    text-shadow: none !important;
 }}
 .text-block:hover {{
     background-color: rgba(76, 175, 80, 0.1);
     outline: 1px dashed #4CAF50;
     z-index: 100;
+}}
+.link-annot {{
+    display: block;
+    cursor: pointer;
+    z-index: 90;
+    border-bottom: 1px solid rgba(0, 91, 187, 0.8);
+}}
+.page[data-source-raster="true"] .link-annot {{
+    border-bottom: 0;
+}}
+.link-annot:hover {{
+    background: rgba(0, 91, 187, 0.10);
+    outline: 1px dashed #005bbb;
 }}
 @keyframes shimmer {{
     0% {{ background-position: 200% 0; }}
@@ -618,7 +838,7 @@ fn html_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::view_as_html;
+    use super::{map_pdf_font_to_css, view_as_html};
     use crate::reader::PdfReader;
     use handler_common::ViewOptions;
 
@@ -631,6 +851,7 @@ mod tests {
         assert!(html.contains("data-path=\"/page[2]\""));
         assert!(!html.contains("fetch("));
         assert!(!html.contains("page placeholder"));
+        assert!(html.contains("min-width: max-content"));
     }
 
     #[test]
@@ -647,5 +868,15 @@ mod tests {
 
         assert!(html.contains("fetch("));
         assert!(html.contains("page placeholder"));
+    }
+
+    #[test]
+    fn noto_sans_sc_uses_a_cjk_aware_web_font_stack() {
+        let (family, weight, style) = map_pdf_font_to_css("ABCDEF+NotoSansSC");
+
+        assert!(family.contains("Noto Sans SC"));
+        assert!(family.contains("PingFang SC"));
+        assert_eq!(weight, "normal");
+        assert_eq!(style, "normal");
     }
 }

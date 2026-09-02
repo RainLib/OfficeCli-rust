@@ -836,13 +836,13 @@ impl PdfReader {
     pub fn extract_page_text(&self, page_num: usize) -> Option<String> {
         let parsed = self.parse_page_text_blocks(page_num)?;
         let mut text = String::new();
+        let mut previous = None;
         for block in &parsed.text_blocks {
-            if !text.is_empty() {
-                // Check if this block is on a new line relative to the previous one
-                // (different y coordinate indicates a new line)
-                text.push('\n');
+            if let Some(previous) = previous {
+                text.push_str(text_block_separator(previous, block));
             }
             text.push_str(&block.text);
+            previous = Some(block);
         }
         Some(text)
     }
@@ -901,6 +901,42 @@ impl PdfReader {
             max_aux_stream_bytes,
             max_image_payload_bytes,
         )
+    }
+}
+
+/// Reconstruct the separator between two visual text runs. PDF producers often
+/// split a single line whenever the font, weight, script, or link style changes.
+/// Treating every run as a line break corrupts mixed Chinese/Latin text and rich
+/// Markdown. Geometry is the only portable signal available in a PDF text layer.
+pub(crate) fn text_block_separator(
+    previous: &crate::content_stream::PdfTextBlock,
+    current: &crate::content_stream::PdfTextBlock,
+) -> &'static str {
+    let previous_height = previous.bbox.height.abs().max(1.0);
+    let current_height = current.bbox.height.abs().max(1.0);
+    let previous_center = previous.bbox.y + previous.bbox.height / 2.0;
+    let current_center = current.bbox.y + current.bbox.height / 2.0;
+    let same_visual_line =
+        (previous_center - current_center).abs() <= previous_height.max(current_height) * 0.55;
+
+    if !same_visual_line {
+        return "\n";
+    }
+    if previous
+        .text
+        .chars()
+        .last()
+        .is_some_and(char::is_whitespace)
+        || current.text.chars().next().is_some_and(char::is_whitespace)
+    {
+        return "";
+    }
+
+    let gap = current.bbox.x - (previous.bbox.x + previous.bbox.width);
+    if gap > previous_height.max(current_height) * 0.65 {
+        " "
+    } else {
+        ""
     }
 }
 

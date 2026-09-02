@@ -4,6 +4,10 @@
 
 仓库内全部现存 DOCX 样例的批量 HCD 文件测试位于 [`docx-suite/`](docx-suite/README.md)。它会为每个文件生成源预览、HCD 预览、稳定 nodeId 对比、revision 0 无修改回写、nodeId patch 和 revision 1 DOCX 回写产物。
 
+仓库内全部现存 PPTX 样例的批量 HCD 闭环测试位于 [`pptx-suite/`](pptx-suite/README.md)。它会生成 PPTX/HCD HTML、整套幻灯片截图、revision 0 精确回写、nodeId patch、revision 1 回写和重新导入对比报告。
+
+Markdown/TXT 的低内存 HCD 闭环测试位于 [`text-suite/`](text-suite/README.md)。它覆盖稳定 `nodeId` patch、同格式 EXACT/HIGH 回写，以及无源导出 DOCX/XLSX/PPTX/PDF/Markdown/TXT。
+
 ## 已提交内容
 
 - `source.html`：标题、段落、Unicode 中文、列表、表格、敏感文本和活动脚本输入。
@@ -69,4 +73,4 @@ open examples/hdoc/output/previews/hcd-revision-1-pdf.html
 
 ## 保真边界
 
-`output/source-backed/patched-source.html` 是基于不可变原 HTML 的范围回写；除 dirty 文本外，源字节保持不变。`output/direct` 和 `output/semantic` 使用进程内 Rust handler，保真级别为 `SEMANTIC`，用于验证标题、段落、列表、表格、Unicode 文本和安全图片等映射，不代表浏览器 CSS 像素布局或 Office 物理分页完全一致。
+`output/source-backed/patched-source.html` 是基于不可变原 HTML 的范围回写；除 dirty 文本外，源字节保持不变。`output/direct` 和 `output/semantic` 使用进程内 Rust handler：DOCX/XLSX/PPTX 为 `SEMANTIC` 结构映射，PDF 为 canonical HTML/CSS 的 `HIGH` 分页排版。PDF 会保留常见 CSS、表格、代码块、链接和 Unicode 文本层，但不代表 Chromium/WebKit 专属 CSS 或原 Office 物理分页能像素级一致。

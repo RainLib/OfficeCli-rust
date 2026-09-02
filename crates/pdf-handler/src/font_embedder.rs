@@ -5,8 +5,29 @@ use handler_common::HandlerError;
 use lopdf::{dictionary, Dictionary, Document as LopdfDocument, Object, ObjectId, Stream};
 use ttf_parser::{Face, GlyphId};
 
-/// Bundled CJK fallback font (Noto Sans SC, variable TTF).
+/// Bundled CJK fallback font (Noto Sans SC, static Regular TTF).
+///
+/// Do not replace this with the upstream variable file directly: its default
+/// instance is Thin, and print renderers that do not apply `wght` variations
+/// will silently produce much lighter output than browser HTML.
 const BUNDLED_NOTO: &[u8] = include_bytes!("../assets/NotoSansSC-Regular.ttf");
+
+/// Bundled monochrome emoji fallback. Noto Emoji uses ordinary outline glyphs,
+/// so the in-process PDF engine can subset/embed it without relying on a
+/// platform color-font implementation.
+const BUNDLED_NOTO_EMOJI: &[u8] = include_bytes!("../assets/NotoEmoji-Regular.ttf");
+
+/// Return the bundled Noto Sans SC bytes for another in-process renderer.
+///
+/// Keeping one canonical embedded font asset avoids platform-dependent CJK
+/// output when OfficeCLI's HTML print backend builds a PDF directly.
+pub fn bundled_noto_sans_sc() -> &'static [u8] {
+    BUNDLED_NOTO
+}
+
+pub fn bundled_noto_emoji() -> &'static [u8] {
+    BUNDLED_NOTO_EMOJI
+}
 
 /// Return whether the first face in a font file covers every requested character.
 ///
@@ -30,12 +51,27 @@ pub fn font_file_missing_chars(
             path.display()
         ))
     })?;
-    let face = Face::parse(&font_bytes, 0).map_err(|error| {
+    font_bytes_missing_chars(&font_bytes, chars_needed).map_err(|error| {
         HandlerError::OperationFailed(format!(
-            "failed to parse font file '{}': {error:?}",
+            "failed to parse font file '{}': {error}",
             path.display()
         ))
-    })?;
+    })
+}
+
+/// Return characters not covered by the bundled CJK fallback font.
+pub fn bundled_font_missing_chars(
+    chars_needed: &HashSet<char>,
+) -> Result<HashSet<char>, HandlerError> {
+    font_bytes_missing_chars(BUNDLED_NOTO, chars_needed)
+        .map_err(|error| HandlerError::OperationFailed(format!("bundled font: {error}")))
+}
+
+fn font_bytes_missing_chars(
+    font_bytes: &[u8],
+    chars_needed: &HashSet<char>,
+) -> Result<HashSet<char>, String> {
+    let face = Face::parse(font_bytes, 0).map_err(|error| format!("parse failed: {error:?}"))?;
     Ok(chars_needed
         .iter()
         .copied()
@@ -535,5 +571,20 @@ mod tests {
             .join("NotoSansSC-Regular.ttf");
         assert!(font_file_covers_chars(&font_path, &HashSet::from(['中', 'A'])).unwrap());
         assert!(!font_file_covers_chars(&font_path, &HashSet::from(['ə', 'ʊ'])).unwrap());
+    }
+
+    #[test]
+    fn bundled_cjk_font_is_a_static_regular_face() {
+        let face = Face::parse(BUNDLED_NOTO, 0).unwrap();
+        assert!(!face.is_variable());
+        assert_eq!(face.weight().to_number(), 400);
+    }
+
+    #[test]
+    fn bundled_emoji_font_is_static_and_covers_grinning_face() {
+        let face = Face::parse(BUNDLED_NOTO_EMOJI, 0).unwrap();
+        assert!(!face.is_variable());
+        assert_eq!(face.weight().to_number(), 400);
+        assert!(face.glyph_index('😀').is_some());
     }
 }

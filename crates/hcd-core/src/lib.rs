@@ -15,8 +15,8 @@ pub use hash::{
 pub use html::{extract_html_text_nodes, validate_css_text};
 pub use patch::{apply_patch, extract_text_page, get_text_node};
 pub use presentation::{
-    manifest_at_revision, render_standalone_html, HtmlPresentationOptions, HtmlPresentationReport,
-    DEFAULT_HTML_PRESENTATION_MAX_BYTES,
+    manifest_at_revision, render_standalone_html, render_standalone_html_with_transform,
+    HtmlPresentationOptions, HtmlPresentationReport, DEFAULT_HTML_PRESENTATION_MAX_BYTES,
 };
 pub use types::*;
 pub use validate::validate_bundle;

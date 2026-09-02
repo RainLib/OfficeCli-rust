@@ -62,6 +62,61 @@ impl PdfHandler {
             font_name,
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_table_grid(
+        &self,
+        page_num: usize,
+        x: f32,
+        top_y: f32,
+        width: f32,
+        row_height: f32,
+        rows: usize,
+        columns: usize,
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_table_grid(
+            self.reader.borrow_mut().document_mut(),
+            page_num,
+            x,
+            top_y,
+            width,
+            row_height,
+            rows,
+            columns,
+        )
+    }
+
+    pub fn add_code_panel(
+        &self,
+        page_num: usize,
+        x: f32,
+        top_y: f32,
+        width: f32,
+        height: f32,
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_code_panel(
+            self.reader.borrow_mut().document_mut(),
+            page_num,
+            x,
+            top_y,
+            width,
+            height,
+        )
+    }
+
+    pub fn add_link_annotation(
+        &self,
+        page_num: usize,
+        rect: &crate::content_stream::BBox,
+        target: &str,
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_link_annotation(
+            self.reader.borrow_mut().document_mut(),
+            page_num,
+            rect,
+            target,
+        )
+    }
 }
 
 impl DocumentHandler for PdfHandler {

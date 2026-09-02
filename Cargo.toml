@@ -64,6 +64,7 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 sha2 = "0.10"
+unicode-segmentation = "1.13"
 
 # Legacy Office format conversion
 office_oxide = { version = "0.1.2" }

@@ -219,15 +219,17 @@ officecli convert input.pdf --engine pdf2docx  # PDF -> DOCX via Python pdf2docx
 officecli convert input.html -o report.docx    # headings/paragraphs/lists/tables -> Word
 officecli convert input.html -o report.xlsx    # tables/content -> worksheet cells
 officecli convert input.html -o report.pptx    # sections/H1 headings -> slides
-officecli convert input.html -o report.pdf     # semantic paginated PDF
+officecli convert input.html -o report.pdf     # CSS-paginated PDF (pure Rust)
 ```
 
-HTML conversion is always performed in-process by OfficeCLI's Rust handlers and reports
-`engine=rust-html-semantic` with `fidelity=semantic`. It never invokes LibreOffice, WPS,
-`pdf2docx`, or a browser renderer, even when one of those engines is supplied on the command line.
-It does not require an original Office file. CSS layout, scripts, active content, and exact browser
-pagination are not carried into the output. Standalone HTML never fetches local or remote image
-URLs and represents them as safe alt text. Source-free HCD export can instead embed validated,
+HTML conversion is always performed in-process by OfficeCLI's Rust handlers. DOCX/XLSX/PPTX
+targets report `engine=rust-html-semantic` with `fidelity=semantic`; PDF reports
+`engine=rust-html-css-pdf` with `fidelity=high` and uses a pure-Rust HTML/CSS cascade, layout,
+pagination, font-subsetting, table and link renderer. It never invokes LibreOffice, WPS,
+`pdf2docx`, Chromium, or another browser renderer, even when one of those engines is supplied on
+the command line. It does not require an original Office file. JavaScript and active content remain
+disabled and unsupported browser-only CSS is reported rather than executed. Arbitrary local and remote
+URLs are not fetched; only validated content-addressed HCD assets are authorized. Source-free HCD export can embed validated,
 content-addressed raster assets natively in DOCX/XLSX/PPTX and as PNG/JPEG PDF image XObjects;
 bounded source dimensions are retained and direct PPTX picture coordinates are reused when present.
 Cropping, wrapping and page collision still remain semantic rather than source-layout exact. Input
@@ -237,10 +239,10 @@ HTML/HCD tables are emitted as native Word/Excel structures and editable Drawing
 PPTX tables wider than 12 columns or taller than 18 rows are split into bounded table slides with
 the first row repeated. Logical PPTX tables split across HCD chunks are validated and reassembled by
 stable table ID and contiguous row ranges before this layout step; PDF currently keeps the table as
-aligned semantic row text.
+a bounded native vector grid with extractable cell text and automatic page splitting.
 
 For incremental editing, `officecli hdoc import` accepts `.docx`, `.xlsx`, `.pptx`, `.pdf`,
-`.html`/`.htm`, and UTF-8 `.txt`. It emits immutable canonical HTML chunks and source maps;
+`.html`/`.htm`, UTF-8 `.md`/`.markdown`, and UTF-8 `.txt`. It emits immutable canonical HTML chunks and source maps;
 HTML headings, paragraphs, lists, and tables remain safe canonical structures, while each editable
 text span retains its exact UTF-8 source byte range. Large HTML tables use stable IDs and contiguous
 128-row fragments for frontend virtualization and source-free native Office table reconstruction.
@@ -250,10 +252,16 @@ to preserve lineage when source bytes change. `hdoc get-node <bundle> <nodeId>` 
 node through chunk bloom filters and source maps without building a full-text buffer. `hdoc apply`
 then appends nodeId-addressed text/annotation revisions. With `--source`, `hdoc export` writes the selected
 revision back against the SHA-256-verified immutable source; without a source (or with a different
-target), it can rebuild DOCX/XLSX/PPTX/PDF at explicitly reported `SEMANTIC` fidelity through the
-same in-process Rust HTML handlers. HTML and TXT source-backed export rewrites only mapped text byte
+target), it can rebuild DOCX/XLSX/PPTX/Markdown/TXT at explicitly reported `SEMANTIC` fidelity and PDF at
+canonical HTML/CSS `HIGH` fidelity through in-process Rust handlers. HTML, Markdown and TXT source-backed export rewrites only mapped text byte
 ranges, preserving all other source bytes. These HCD commands are implemented entirely in Rust and
-do not invoke an installed office suite. The PPTX adapter materializes direct text/picture
+do not invoke an installed office suite. CSS PDF output preserves safe HTTP(S)/mailto links as
+native URI annotations attached to the visible anchor label without appending the URL to document
+text, and uses the canonical stylesheet for fenced code, tables, quotes, alerts and pagination.
+PDF text can embed multiple subset fonts on one page, so emoji and uncommon symbols use a
+character-level fallback instead of being replaced when an installed font covers them. Set
+`OFFICECLI_HTML_PDF_FALLBACK_FONT_FILE` to provide a deterministic deployment fallback font.
+The PPTX adapter materializes direct text/picture
 geometry and DrawingML table grids, merges, direct cell formatting, and editable cell text while
 preserving the original presentation as the source-backed export authority. Large DrawingML tables
 stream as bounded row-group fragments (at most 128 rows per normal fragment); each fragment repeats

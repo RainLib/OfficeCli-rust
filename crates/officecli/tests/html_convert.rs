@@ -32,6 +32,19 @@ fn write_html(path: &Path) {
 }
 
 fn convert_and_validate(source: &Path, output: &Path) {
+    let pdf = output
+        .extension()
+        .is_some_and(|extension| extension == "pdf");
+    let engine = if pdf {
+        r#""engine": "rust-html-css-pdf""#
+    } else {
+        r#""engine": "rust-html-semantic""#
+    };
+    let fidelity = if pdf {
+        r#""fidelity": "high""#
+    } else {
+        r#""fidelity": "semantic""#
+    };
     officecli()
         .args([
             "convert",
@@ -42,10 +55,8 @@ fn convert_and_validate(source: &Path, output: &Path) {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            r#""engine": "rust-html-semantic""#,
-        ))
-        .stdout(predicate::str::contains(r#""fidelity": "semantic""#));
+        .stdout(predicate::str::contains(engine))
+        .stdout(predicate::str::contains(fidelity));
     officecli()
         .args(["validate", output.to_string_lossy().as_ref()])
         .assert()
@@ -76,7 +87,10 @@ fn html_always_uses_the_in_process_rust_converter() {
 
     // Even an explicitly selected external engine cannot change the HTML
     // dispatch path. This guards the early HTML routing in handle_convert.
-    for (engine, extension) in [("libreoffice", "docx"), ("pdf2docx", "pdf")] {
+    for (engine, extension, expected) in [
+        ("libreoffice", "docx", "rust-html-semantic"),
+        ("pdf2docx", "pdf", "rust-html-css-pdf"),
+    ] {
         let output = temp.path().join(format!("rust-only-{engine}.{extension}"));
         officecli()
             .args([
@@ -90,9 +104,9 @@ fn html_always_uses_the_in_process_rust_converter() {
             ])
             .assert()
             .success()
-            .stdout(predicate::str::contains(
-                r#""engine": "rust-html-semantic""#,
-            ));
+            .stdout(predicate::str::contains(format!(
+                r#""engine": "{expected}""#
+            )));
         assert!(output.exists());
     }
 }
