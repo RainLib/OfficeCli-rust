@@ -36,6 +36,87 @@ The Rust edition shares the same **CLI philosophy** — path-based DOM operation
 | PowerPoint (.pptx) | ✅   | ✅                             | ✅     | ✅                  | ✅ .ppt → .pptx |
 | PDF (.pdf)         | ✅   | ✅ (text replace, page delete) | ✅     | ✅                  | —               |
 
+## New: HCD — Chunked, Editable HTML Document Layer
+
+HCD makes **HTML the canonical editable body** across document formats. Instead of building one
+full-document DOM, `officecli hdoc import` streams a source file into bounded, content-addressed
+HTML chunks, source maps, assets, and immutable revisions. This lets a frontend load only the
+visible pages while backend changes still target stable `nodeId` values.
+
+![OfficeCLI HCD workflow](docs/assets/hcd/hcd-workflow.svg)
+
+### What the new workflow provides
+
+- **One editing model:** DOCX, XLSX, PPTX, PDF, HTML, Markdown, and TXT become canonical HTML
+  fragments with format-specific profiles.
+- **Stable addressing:** editable text and mapped images have deterministic `nodeId` values;
+  identical source bytes plus the same `documentId` produce the same IDs.
+- **Incremental revisions:** `text.splice`, annotations, `image.replace`, and `image.geometry`
+  append a revision instead of overwriting the previous state. Hash preconditions detect conflicts,
+  and `patchId` makes retries idempotent.
+- **Low-memory delivery:** chunk index pages contain at most 128 descriptors; full HTML and bounded
+  windows use the same bundle, and the example viewer keeps only a small viewport cache in the DOM.
+- **Verified assets:** raster images are content-addressed, hash-checked, revision-aware, and can be
+  read or replaced without embedding Base64 data in every HTML fragment.
+- **Pure Rust export:** a selected revision can be rebuilt as DOCX, XLSX, PPTX, PDF, Markdown, or TXT
+  without LibreOffice. When the immutable original is supplied, supported text changes use a
+  source-backed rewrite and preserve untouched package entries.
+
+### Quick HCD round trip
+
+```bash
+# Import progressively; chunk_ready events may be consumed before import completes.
+officecli hdoc import report.docx --output report.hcd --events ndjson
+
+# Validate hashes, inspect a bounded text page, and render only chunks 20–29.
+officecli hdoc validate report.hcd --json
+officecli hdoc extract-text report.hcd --limit 100 --json
+officecli hdoc render-html report.hcd --chunk-start 20 --chunk-limit 10 \
+  --output report-window.html --json
+
+# Apply nodeId-addressed edits and inspect immutable history.
+officecli hdoc apply report.hcd --patch patch.json --expected-revision 0 --json
+officecli hdoc list-revisions report.hcd --json
+
+# Rebuild through the in-process Rust handler, or provide --source for supported source-backed edits.
+officecli hdoc export report.hcd --revision 1 --output report-revision-1.docx --json
+```
+
+The standalone lazy-loading frontend is in [`examples/hdoc/lazy-viewer`](examples/hdoc/lazy-viewer).
+It fetches index pages and chunks independently, verifies hashes, and preserves `nodeId` across DOM
+eviction and reload.
+
+### Image nodes: replace content and geometry by `nodeId`
+
+The following real PPTX example was imported to HCD, then one image node was replaced and resized.
+The image keeps the same `nodeId`; its asset and geometry produce a new `visualHash` in revision 1.
+
+| Revision 0 | Revision 1 after `image.replace` + `image.geometry` |
+| --- | --- |
+| ![HCD image node before patch](docs/assets/hcd/image-node-before.png) | ![HCD image node after patch](docs/assets/hcd/image-node-after.png) |
+
+```bash
+officecli hdoc list-images presentation.hcd --limit 20 --json
+officecli hdoc get-image presentation.hcd <nodeId> --json
+officecli hdoc put-asset presentation.hcd replacement.png --json
+officecli hdoc apply presentation.hcd --patch image-patch.json \
+  --expected-revision 0 --json
+```
+
+The reproducible patch is in
+[`examples/hdoc/image-patch/patch-pictures-basic.json`](examples/hdoc/image-patch/patch-pictures-basic.json).
+Generated `.hcd` bundles and preview output remain local and are intentionally excluded from Git.
+
+### Fidelity contract
+
+HCD reports fidelity instead of claiming that every format is pixel-identical. DOCX imports target
+high-fidelity semantic flow; XLSX uses a virtualizable grid; PPTX uses slide-canvas geometry; PDF
+uses fixed-layout pages. Unsupported Office/PDF structures are retained through the immutable source
+when possible and listed as fidelity warnings. Source-backed image/media rewrites are currently
+rejected before output rather than silently dropping the requested change; source-free pure-Rust
+exports do include patched raster images. See the full contract in
+[`docs/hcd-docx-v1.zh.md`](docs/hcd-docx-v1.zh.md).
+
 ## For AI Agents — Text/Offset → Path Mapping
 
 Every supported format can emit a **TextOffsetMap** — full text plus a character-offset→path mapping. An agent reads the map, finds the text to change, gets the exact document path (e.g. `/body/p[3]/r[1]`), and calls `set` precisely. No regex guessing.

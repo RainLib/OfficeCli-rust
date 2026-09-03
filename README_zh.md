@@ -36,6 +36,84 @@ Rust 版共享相同的 **CLI 理念** — 基于路径的 DOM 操作、JSON 输
 | PowerPoint (.pptx) | ✅ | ✅ | ✅ | ✅ | ✅ .ppt → .pptx |
 | PDF (.pdf) | ✅ | ✅（文本替换、删除页面） | ✅ | ✅ | — |
 
+## 新功能：HCD — 分片、可编辑的 HTML 文档中间层
+
+HCD 将 **HTML 作为跨文档格式唯一的可编辑正文**。`officecli hdoc import` 不再构造一个
+覆盖全文的 DOM，而是把源文件流式转换为有界的、内容寻址的 HTML 分片、source map、
+asset 和不可变 revision。前端可以只加载当前可见页面，后端修改仍精确定位到稳定的
+`nodeId`。
+
+![OfficeCLI HCD 工作流](docs/assets/hcd/hcd-workflow.svg)
+
+### 新链路提供的能力
+
+- **统一编辑模型：** DOCX、XLSX、PPTX、PDF、HTML、Markdown 和 TXT 均转换为具有格式
+  profile 的 canonical HTML fragment。
+- **稳定寻址：** 可编辑文字和已映射图片均有确定性的 `nodeId`；源文件字节和
+  `documentId` 相同时，重复导入得到相同 ID。
+- **增量版本：** `text.splice`、批注、`image.replace`、`image.geometry` 追加 revision，
+  不覆盖旧版本；hash 前置条件检测冲突，`patchId` 支持幂等重试。
+- **低内存加载：** 每个索引页最多包含 128 个分片描述；全量 HTML 和局部窗口共享同一
+  bundle，示例查看器只在 DOM 中保留有限的可见区域缓存。
+- **可校验 asset：** 栅格图片按内容寻址、校验 hash、随 revision 管理，无需在每个 HTML
+  fragment 中重复嵌入 Base64。
+- **纯 Rust 导出：** 可将指定 revision 重建为 DOCX、XLSX、PPTX、PDF、Markdown 或 TXT，
+  不调用 LibreOffice；提供不可变原文件时，受支持的文本修改走 source-backed 回写，
+  未修改的 OOXML entry 保持不变。
+
+### 快速完成一次 HCD 闭环
+
+```bash
+# 渐进导入；导入完成前即可消费 chunk_ready 事件。
+officecli hdoc import report.docx --output report.hcd --events ndjson
+
+# 校验内容 hash、分页读取文本，并只渲染第 20–29 个分片。
+officecli hdoc validate report.hcd --json
+officecli hdoc extract-text report.hcd --limit 100 --json
+officecli hdoc render-html report.hcd --chunk-start 20 --chunk-limit 10 \
+  --output report-window.html --json
+
+# 通过 nodeId 修改并查看 append-only revision 历史。
+officecli hdoc apply report.hcd --patch patch.json --expected-revision 0 --json
+officecli hdoc list-revisions report.hcd --json
+
+# 使用进程内 Rust handler 重建；受支持的原文件回写可额外传入 --source。
+officecli hdoc export report.hcd --revision 1 --output report-revision-1.docx --json
+```
+
+独立的懒加载前端位于 [`examples/hdoc/lazy-viewer`](examples/hdoc/lazy-viewer)。它分别读取
+索引页与分片、校验 hash，并在 DOM 淘汰和重新加载后保持 `nodeId` 不变。
+
+### 图片节点：通过 `nodeId` 替换内容和矩形
+
+下面的真实 PPTX 示例先导入 HCD，再替换并调整一个图片节点的尺寸。图片的 `nodeId`
+保持不变，revision 1 使用新的 asset 与 geometry 计算新的 `visualHash`。
+
+| Revision 0 | 执行 `image.replace` + `image.geometry` 后的 Revision 1 |
+| --- | --- |
+| ![HCD 图片节点修改前](docs/assets/hcd/image-node-before.png) | ![HCD 图片节点修改后](docs/assets/hcd/image-node-after.png) |
+
+```bash
+officecli hdoc list-images presentation.hcd --limit 20 --json
+officecli hdoc get-image presentation.hcd <nodeId> --json
+officecli hdoc put-asset presentation.hcd replacement.png --json
+officecli hdoc apply presentation.hcd --patch image-patch.json \
+  --expected-revision 0 --json
+```
+
+可复现的 patch 位于
+[`examples/hdoc/image-patch/patch-pictures-basic.json`](examples/hdoc/image-patch/patch-pictures-basic.json)。
+生成的 `.hcd` bundle 与预览输出仅保留在本地，并已明确排除在 Git 之外。
+
+### 保真度边界
+
+HCD 会明确报告 fidelity，不笼统宣称所有格式都能像素级 1:1。DOCX 导入目标为高保真
+语义流；XLSX 使用可虚拟化 grid；PPTX 使用 slide-canvas geometry；PDF 使用固定页面布局。
+不支持的 Office/PDF 结构尽可能通过不可变原文件保留，并记录 fidelity warning。当前
+source-backed 图片/媒体回写会在写文件前拒绝执行，避免静默丢弃修改；不带 `--source`
+的纯 Rust 重建会包含已修改的栅格图片。完整契约见
+[`docs/hcd-docx-v1.zh.md`](docs/hcd-docx-v1.zh.md)。
+
 ## AI 智能体 — 文本/偏移 → 路径映射
 
 每种支持的格式都可输出 **TextOffsetMap** — 完整文本加上字符偏移→路径映射。智能体读取映射，定位待修改文本，获取精确路径（如 `/body/p[3]/r[1]`），再调用 `set` 精确修改。无需正则猜测。
