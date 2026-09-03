@@ -1,5 +1,5 @@
 use crate::content_stream::PdfColor;
-use crate::reader::PdfReader;
+use crate::reader::{text_block_separator, PdfReader};
 use handler_common::{BBoxSpan, StyleSpan, TextOffsetMap};
 
 /// Extract text from PDF with offset→path mapping, including bbox and style info.
@@ -19,7 +19,24 @@ impl PdfTextExtractor {
             let page_path = format!("/page[{}]", page_num);
 
             if let Some(parsed) = self.reader.parse_page_text_blocks(page_num) {
+                let mut previous = None;
                 for block in &parsed.text_blocks {
+                    if let Some(previous) = previous {
+                        let separator = text_block_separator(previous, block);
+                        if !separator.is_empty() {
+                            map.push_span_with_metadata(
+                                separator,
+                                &page_path,
+                                if separator == "\n" {
+                                    "line-break"
+                                } else {
+                                    "word-gap"
+                                },
+                                None,
+                                None,
+                            );
+                        }
+                    }
                     let text_path = format!("{}/text[{}]", page_path, block.index);
 
                     let bbox = Some(BBoxSpan {
@@ -62,7 +79,7 @@ impl PdfTextExtractor {
                     });
 
                     map.push_span_with_metadata(&block.text, &text_path, "text-block", bbox, style);
-                    map.push_span_with_metadata("\n", &page_path, "line-break", None, None);
+                    previous = Some(block);
                 }
             }
 

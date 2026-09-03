@@ -25,6 +25,98 @@ impl PdfHandler {
             editable,
         })
     }
+
+    pub fn ensure_font_for_chars(
+        &self,
+        page_num: usize,
+        characters: &std::collections::HashSet<char>,
+        preferred_name: &str,
+        font_file: Option<&str>,
+    ) -> Result<String, HandlerError> {
+        let mut reader = self.reader.borrow_mut();
+        crate::font_embedder::ensure_cjk_font_for_chars(
+            reader.document_mut(),
+            page_num,
+            characters,
+            Some(preferred_name),
+            font_file,
+            true,
+        )?
+        .ok_or_else(|| {
+            HandlerError::OperationFailed(
+                "font initialization returned no page resource".to_string(),
+            )
+        })
+    }
+
+    pub fn add_ready_text_blocks(
+        &self,
+        page_num: usize,
+        blocks: &[crate::modifier::ReadyTextBlock],
+        font_name: &str,
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_text_blocks_with_ready_font(
+            self.reader.borrow_mut().document_mut(),
+            page_num,
+            blocks,
+            font_name,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_table_grid(
+        &self,
+        page_num: usize,
+        x: f32,
+        top_y: f32,
+        width: f32,
+        row_height: f32,
+        rows: usize,
+        columns: usize,
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_table_grid(
+            self.reader.borrow_mut().document_mut(),
+            page_num,
+            x,
+            top_y,
+            width,
+            row_height,
+            rows,
+            columns,
+        )
+    }
+
+    pub fn add_code_panel(
+        &self,
+        page_num: usize,
+        x: f32,
+        top_y: f32,
+        width: f32,
+        height: f32,
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_code_panel(
+            self.reader.borrow_mut().document_mut(),
+            page_num,
+            x,
+            top_y,
+            width,
+            height,
+        )
+    }
+
+    pub fn add_link_annotation(
+        &self,
+        page_num: usize,
+        rect: &crate::content_stream::BBox,
+        target: &str,
+    ) -> Result<(), HandlerError> {
+        crate::modifier::add_link_annotation(
+            self.reader.borrow_mut().document_mut(),
+            page_num,
+            rect,
+            target,
+        )
+    }
 }
 
 impl DocumentHandler for PdfHandler {
@@ -369,6 +461,7 @@ impl DocumentHandler for PdfHandler {
                     &chars_needed,
                     font_val,
                     font_file_val,
+                    false,
                 );
             }
 
@@ -504,16 +597,112 @@ impl DocumentHandler for PdfHandler {
                     .and_then(|s| s.parse::<f32>().ok())
                     .unwrap_or(12.0);
                 let mut reader = self.reader.borrow_mut();
-                crate::modifier::add_text_block(
+                let characters: std::collections::HashSet<char> = properties
+                    .get("fontChars")
+                    .map(String::as_str)
+                    .unwrap_or(text)
+                    .chars()
+                    .collect();
+                let force_embed_font = properties
+                    .get("forceEmbedFont")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1");
+                let font_ready = properties
+                    .get("fontReady")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1");
+                let embedded_font = if font_ready {
+                    let font_name = font.ok_or_else(|| {
+                        HandlerError::InvalidArgument(
+                            "fontReady requires an explicit font resource name".to_string(),
+                        )
+                    })?;
+                    let page_id = *reader
+                        .document()
+                        .get_pages()
+                        .get(&(page_num as u32))
+                        .ok_or_else(|| HandlerError::PathNotFound(format!("page {page_num}")))?;
+                    let page_fonts =
+                        reader.document().get_page_fonts(page_id).map_err(|error| {
+                            HandlerError::OperationFailed(format!(
+                                "failed to inspect page font resources: {error}"
+                            ))
+                        })?;
+                    if !page_fonts.contains_key(font_name.as_bytes()) {
+                        return Err(HandlerError::InvalidArgument(format!(
+                            "fontReady resource {font_name} is not registered on page {page_num}"
+                        )));
+                    }
+                    None
+                } else {
+                    crate::font_embedder::ensure_cjk_font_for_chars(
+                        reader.document_mut(),
+                        page_num,
+                        &characters,
+                        font,
+                        properties.get("fontFile").map(String::as_str),
+                        force_embed_font,
+                    )?
+                };
+                if font_ready {
+                    crate::modifier::add_text_block_with_ready_font(
+                        reader.document_mut(),
+                        page_num,
+                        text,
+                        x,
+                        y,
+                        font.expect("fontReady was validated above"),
+                        size,
+                    )?;
+                } else {
+                    crate::modifier::add_text_block(
+                        reader.document_mut(),
+                        page_num,
+                        text,
+                        x,
+                        y,
+                        embedded_font.as_deref().or(font),
+                        size,
+                    )?;
+                }
+                Ok(format!("/page[{}]/text", page_num))
+            }
+            "image" | "picture" => {
+                let page_num = page_num_from_parent(_parent)?;
+                let source = properties
+                    .get("src")
+                    .or_else(|| properties.get("path"))
+                    .or_else(|| properties.get("file"))
+                    .ok_or_else(|| {
+                        HandlerError::InvalidArgument(
+                            "PDF image requires src, path, or file".to_string(),
+                        )
+                    })?;
+                let x = properties
+                    .get("x")
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .unwrap_or(54.0);
+                let y = properties
+                    .get("y")
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .unwrap_or(540.0);
+                let width = properties
+                    .get("width")
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .unwrap_or(240.0);
+                let height = properties
+                    .get("height")
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .unwrap_or(180.0);
+                let mut reader = self.reader.borrow_mut();
+                crate::modifier::add_image_block(
                     reader.document_mut(),
                     page_num,
-                    text,
+                    std::path::Path::new(source),
                     x,
                     y,
-                    font,
-                    size,
+                    width,
+                    height,
                 )?;
-                Ok(format!("/page[{}]/text", page_num))
+                Ok(format!("/page[{page_num}]/image"))
             }
             other => Err(HandlerError::UnsupportedType(format!(
                 "PDF does not support adding {}",

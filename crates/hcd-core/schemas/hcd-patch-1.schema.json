@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:1",
+  "title": "HTML Canonical Document patch batch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/1" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "minLength": 1, "maxLength": 256 },
+      "additionalProperties": { "type": "string", "maxLength": 65536 }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "minLength": 1, "maxLength": 256 },
+      "additionalProperties": { "type": "string", "maxLength": 262144 }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/textSplice" },
+          { "$ref": "#/$defs/annotationUpsert" },
+          { "$ref": "#/$defs/annotationRemove" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^n_[0-9a-f]{32}$"
+    },
+    "textSplice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op", "nodeId", "start", "deleteCount", "insertText", "precondition"
+      ],
+      "properties": {
+        "op": { "const": "text.splice" },
+        "nodeId": { "$ref": "#/$defs/nodeId" },
+        "start": { "type": "integer", "minimum": 0 },
+        "deleteCount": { "type": "integer", "minimum": 0 },
+        "insertText": { "type": "string", "maxLength": 2097152 },
+        "precondition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nodeHash"],
+          "properties": {
+            "nodeHash": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["annotationId", "nodeId", "start", "end", "kind", "ignored"],
+      "properties": {
+        "annotationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "nodeId": { "$ref": "#/$defs/nodeId" },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ruleId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ignored": { "type": "boolean" }
+      }
+    },
+    "annotationUpsert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "annotation"],
+      "properties": {
+        "op": { "const": "annotation.upsert" },
+        "annotation": { "$ref": "#/$defs/annotation" }
+      }
+    },
+    "annotationRemove": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "annotationId"],
+      "properties": {
+        "op": { "const": "annotation.remove" },
+        "annotationId": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    }
+  }
+}

@@ -1185,7 +1185,7 @@ fn add_cell(
         };
         cell.push_str(&format!("><f{spill}>{}</f>", escape_xml(f)));
         if !v_content.is_empty() {
-            cell.push_str(&format!("<v>{}</v>", v_content));
+            cell.push_str(&format!("<v>{}</v>", escape_xml(&v_content)));
         }
         cell.push_str("</c>");
         cell
@@ -1196,7 +1196,7 @@ fn add_cell(
         if !t_attr.is_empty() {
             cell.push_str(&format!(" {}", t_attr));
         }
-        cell.push_str(&format!("><v>{}</v></c>", v_content));
+        cell.push_str(&format!("><v>{}</v></c>", escape_xml(&v_content)));
         cell
     };
 
@@ -2328,6 +2328,14 @@ fn add_image_real(
         .get("format")
         .or_else(|| properties.get("ext"))
         .map(|s| s.as_str())
+        .or_else(|| {
+            properties
+                .get("src")
+                .or_else(|| properties.get("path"))
+                .or_else(|| properties.get("file"))
+                .and_then(|path| std::path::Path::new(path).extension())
+                .and_then(|extension| extension.to_str())
+        })
         .unwrap_or("png");
     let (ext_norm, content_type) = match ext.to_lowercase().as_str() {
         "png" => ("png", "image/png"),
@@ -2369,7 +2377,21 @@ fn add_image_real(
     let drawing_path = format!("xl/drawings/drawing{}.xml", drawing_idx);
 
     // Write image binary.
-    if let Some(b64) = properties.get("payloadBase64") {
+    if let Some(source) = properties
+        .get("src")
+        .or_else(|| properties.get("path"))
+        .or_else(|| properties.get("file"))
+    {
+        let bytes = std::fs::read(source).map_err(|error| {
+            HandlerError::OperationFailed(format!(
+                "failed to read image source '{}': {error}",
+                source
+            ))
+        })?;
+        package
+            .write_part(&media_path, bytes)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
+    } else if let Some(b64) = properties.get("payloadBase64") {
         if let Ok(bytes) = base64_decode(b64) {
             let _ = package.write_part(&media_path, bytes);
         }
@@ -2591,8 +2613,12 @@ fn update_content_types_for_image(
         return Ok(());
     }
 
-    // Insert Default after the opening <Types ...> tag.
-    if let Some(close) = xml.find('>') {
+    // Insert Default after the opening <Types ...> tag, not after an XML
+    // declaration that may precede it.
+    if let Some(close) = xml
+        .find("<Types")
+        .and_then(|start| xml[start..].find('>').map(|offset| start + offset))
+    {
         out.push_str(&xml[..close + 1]);
         if !has_ext {
             out.push_str(&default_xml);
@@ -2610,7 +2636,9 @@ fn update_content_types_for_image(
             out.push_str(body);
         }
     } else {
-        out.push_str(&xml);
+        return Err(HandlerError::OperationFailed(
+            "invalid [Content_Types].xml: missing Types root".to_string(),
+        ));
     }
 
     package

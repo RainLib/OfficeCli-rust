@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/officecli",
     "crates/oxml",
+    "crates/hcd-core",
+    "crates/hcd-docx",
+    "crates/hcd-formats",
     "crates/docx-handler",
     "crates/xlsx-handler",
     "crates/pptx-handler",
@@ -38,6 +41,8 @@ zip = "2"
 
 # PDF
 lopdf = "0.34"
+# Pin the renderer: newer Hayro/Vello releases require a newer Rust toolchain.
+hayro = "=0.5.0"
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -58,6 +63,8 @@ tempfile = "3"
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
+sha2 = "0.10"
+unicode-segmentation = "1.13"
 
 # Legacy Office format conversion
 office_oxide = { version = "0.1.2" }

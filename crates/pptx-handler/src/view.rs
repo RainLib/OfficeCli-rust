@@ -1579,12 +1579,19 @@ pub fn view_as_issues(
             });
         }
 
-        // Check for empty slides
-        if slide.shapes.is_empty() {
+        // The semantic shape model intentionally omits some visual OOXML
+        // children, notably graphicFrame tables. Inspect the raw shape tree so
+        // a table-only, picture-only, connector-only, or grouped slide is not
+        // incorrectly reported as empty.
+        let has_other_visual_content = package
+            .read_part_xml(&slide.part_path)
+            .ok()
+            .is_some_and(|xml| slide_xml_has_visual_content(&xml));
+        if slide.shapes.is_empty() && !has_other_visual_content {
             issues.push(DocumentIssue {
                 severity: IssueSeverity::Info,
                 issue_type: "empty-slide".to_string(),
-                description: format!("Slide {} has no shapes", slide.index),
+                description: format!("Slide {} has no visual content", slide.index),
                 path: Some(format!("/slide[{}]", slide.index)),
             });
         }
@@ -1617,6 +1624,24 @@ pub fn view_as_issues(
     }
 
     Ok(issues)
+}
+
+fn slide_xml_has_visual_content(xml: &str) -> bool {
+    let Ok(document) = roxmltree::Document::parse(xml) else {
+        return false;
+    };
+    document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "spTree")
+        .is_some_and(|shape_tree| {
+            shape_tree.children().any(|node| {
+                node.is_element()
+                    && matches!(
+                        node.tag_name().name(),
+                        "sp" | "pic" | "graphicFrame" | "grpSp" | "cxnSp" | "contentPart"
+                    )
+            })
+        })
 }
 
 /// Validate the presentation structure.
@@ -2246,7 +2271,7 @@ pub use handler_common::find_replace_property_keys;
 
 #[cfg(test)]
 mod group_resize_tests {
-    use super::apply_group_properties;
+    use super::{apply_group_properties, slide_xml_has_visual_content};
     use std::collections::HashMap;
 
     const SLIDE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2266,6 +2291,18 @@ mod group_resize_tests {
     </p:grpSp>
   </p:spTree></p:cSld>
 </p:sld>"#;
+
+    #[test]
+    fn table_only_slide_is_visual_content() {
+        let xml = r#"<p:sld xmlns:p="urn:p"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:graphicFrame/></p:spTree></p:cSld></p:sld>"#;
+        assert!(slide_xml_has_visual_content(xml));
+    }
+
+    #[test]
+    fn metadata_only_shape_tree_is_empty() {
+        let xml = r#"<p:sld xmlns:p="urn:p"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld></p:sld>"#;
+        assert!(!slide_xml_has_visual_content(xml));
+    }
 
     fn group_transform_attr(xml: &str, element: &str, attribute: &str) -> i64 {
         let doc = roxmltree::Document::parse(xml).unwrap();

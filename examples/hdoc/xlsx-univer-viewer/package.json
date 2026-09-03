@@ -1,0 +1,20 @@
+{
+  "name": "officecli-hcd-univer-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@univerjs/preset-sheets-core": "0.25.1",
+    "@univerjs/preset-sheets-drawing": "0.25.1",
+    "@univerjs/presets": "0.25.1"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2",
+    "vite": "7.1.7"
+  }
+}

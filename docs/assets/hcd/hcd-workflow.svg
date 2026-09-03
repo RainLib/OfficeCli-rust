@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
+  <title id="title">OfficeCLI HCD workflow</title>
+  <desc id="desc">Office and text documents stream into chunked HTML, are edited with stable node identifiers and immutable revisions, then render incrementally or export through pure Rust handlers.</desc>
+  <defs>
+    <linearGradient id="hero" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="430" rx="28" fill="#f8fafc"/>
+  <text x="60" y="62" font-family="Inter,Arial,sans-serif" font-size="30" font-weight="700" fill="#0f172a">HCD: editable HTML as the canonical document layer</text>
+  <text x="60" y="94" font-family="Inter,Arial,sans-serif" font-size="16" fill="#475569">Bounded memory · content addressed · stable nodeId · append-only revisions · pure Rust</text>
+
+  <g filter="url(#shadow)">
+    <rect x="60" y="135" width="235" height="220" rx="20" fill="#fff" stroke="#cbd5e1"/>
+    <text x="90" y="178" font-family="Inter,Arial,sans-serif" font-size="21" font-weight="700" fill="#0f172a">Stream import</text>
+    <g font-family="ui-monospace,SFMono-Regular,monospace" font-size="17" fill="#334155">
+      <rect x="90" y="204" width="72" height="34" rx="8" fill="#dbeafe"/><text x="106" y="227">DOCX</text>
+      <rect x="174" y="204" width="72" height="34" rx="8" fill="#dcfce7"/><text x="190" y="227">XLSX</text>
+      <rect x="90" y="250" width="72" height="34" rx="8" fill="#ffedd5"/><text x="106" y="273">PPTX</text>
+      <rect x="174" y="250" width="72" height="34" rx="8" fill="#fee2e2"/><text x="190" y="273">PDF</text>
+      <rect x="90" y="296" width="156" height="34" rx="8" fill="#f1f5f9"/><text x="108" y="319">HTML / MD / TXT</text>
+    </g>
+  </g>
+
+  <path d="M315 245H390" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="410" y="122" width="380" height="246" rx="22" fill="url(#hero)"/>
+    <text x="445" y="166" font-family="Inter,Arial,sans-serif" font-size="25" font-weight="700" fill="#fff">Chunked HCD bundle</text>
+    <g font-family="ui-monospace,SFMono-Regular,monospace" font-size="15" fill="#e0f2fe">
+      <text x="445" y="204">manifest.json</text>
+      <text x="445" y="235">bounded index pages</text>
+      <text x="445" y="266">canonical HTML chunks</text>
+      <text x="445" y="297">source maps</text>
+      <text x="445" y="328">assets + revisions</text>
+    </g>
+    <rect x="640" y="186" width="115" height="133" rx="14" fill="#fff" fill-opacity="0.14" stroke="#fff" stroke-opacity="0.35"/>
+    <circle cx="697" cy="224" r="18" fill="#facc15"/>
+    <text x="650" y="263" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#fff">stable nodeId</text>
+    <text x="656" y="289" font-family="Inter,Arial,sans-serif" font-size="14" fill="#dbeafe">text + image</text>
+  </g>
+
+  <path d="M810 210H885" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M810 290H885" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="905" y="135" width="235" height="96" rx="20" fill="#fff" stroke="#cbd5e1"/>
+    <text x="935" y="176" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="700" fill="#0f172a">Lazy HTML view</text>
+    <text x="935" y="205" font-family="Inter,Arial,sans-serif" font-size="15" fill="#475569">render only visible chunks</text>
+    <rect x="905" y="259" width="235" height="96" rx="20" fill="#fff" stroke="#cbd5e1"/>
+    <text x="935" y="300" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="700" fill="#0f172a">Revision export</text>
+    <text x="935" y="329" font-family="Inter,Arial,sans-serif" font-size="15" fill="#475569">DOCX · XLSX · PPTX · PDF</text>
+  </g>
+</svg>

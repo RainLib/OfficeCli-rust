@@ -6,10 +6,15 @@ edition.workspace = true
 [dependencies]
 handler-common = { path = "../handler-common" }
 lopdf = { workspace = true }
+hayro = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jpeg-decoder = "0.3"
 flate2 = "1"
+weezl = "0.1"
 ttf-parser = "0.21"
 subsetter = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -41,7 +41,8 @@ pub fn parse_workbook(package: &OxmlPackage) -> Result<Vec<(String, String, Stri
                             .attributes()
                             .filter_map(|a| a.ok())
                             .find(|a| a.key.as_ref() == b"name")
-                            .map(|a| String::from_utf8_lossy(a.value.as_ref()).to_string())
+                            .and_then(|a| a.decode_and_unescape_value(reader.decoder()).ok())
+                            .map(|value| value.into_owned())
                             .unwrap_or_default();
 
                         let rel_id = e

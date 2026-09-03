@@ -258,15 +258,14 @@ fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "convert".to_string(),
-            description: "Convert legacy Office formats and PDF to modern Office formats"
-                .to_string(),
+            description: "Convert HTML with the in-process Rust semantic converter, or convert legacy Office/PDF inputs with a selected engine".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "file": { "type": "string", "description": "Input file path (.doc, .xls, .ppt, .docx, .xlsx, .pptx, .pdf)" },
+                    "file": { "type": "string", "description": "Input file path (.html, .htm, .doc, .xls, .ppt, .docx, .xlsx, .pptx, .pdf)" },
                     "output": { "type": "string", "description": "Output file path (optional, defaults to same path with modern extension)" },
                     "force": { "type": "boolean", "description": "Overwrite output file if it exists" },
-                    "engine": { "type": "string", "enum": ["libreoffice", "oxide", "pdf-text", "pdf2docx"], "default": "libreoffice", "description": "Conversion engine: libreoffice, oxide, pdf-text, or pdf2docx" },
+                    "engine": { "type": "string", "enum": ["libreoffice", "oxide", "pdf-text", "pdf2docx"], "default": "libreoffice", "description": "Engine for non-HTML inputs; HTML always uses the in-process Rust converter" },
                 },
                 "required": ["file"]
             }),
@@ -315,7 +314,7 @@ fn execute_tool(name: &str, params: &HashMap<String, Value>) -> Result<Value, St
             Some("pptx") => "PowerPoint (.pptx): Elements: slide, shape, picture, textbox, table. Paths: /slide[N]/shape[N]",
             Some("pdf") => "PDF: Elements: page, text, image, annotation. Paths: /page[N]",
             Some("offset") => "Text Offset Mapping: Use extract_text tool to get text+offset->path mapping",
-            Some("convert") => "Convert: .doc->.docx, .xls->.xlsx, .ppt->.pptx, .pdf->.docx. Engines: libreoffice, oxide, pdf-text, pdf2docx.",
+            Some("convert") => "Convert: .html/.htm -> .docx/.xlsx/.pptx/.pdf always uses the in-process Rust converter. Legacy/PDF engines: libreoffice, oxide, pdf-text, pdf2docx.",
             None => "OfficeCLI Tools: view, get, query, set, add, remove, move, validate, extract_text, save, raw, convert, info",
             Some(other) => return Err(format!("unknown info topic: {}", other)),
         };

@@ -1,0 +1,32 @@
+body[data-hcd-profile="grid"] {
+  background: #e9eef3;
+  color: #1f1f1f;
+}
+
+.hcd-grid-toolbar {
+  border-bottom-color: #aeb7c2;
+  background: #f8fafc;
+}
+
+.hcd-grid td {
+  min-width: 72px;
+  height: 24px;
+  border-color: #c9d1d9;
+  padding: 3px 7px;
+}
+
+.hcd-grid td[data-hcd-column="1"] {
+  min-width: 150px;
+}
+
+.hcd-grid .hcd-column-header,
+.hcd-grid .hcd-row-header,
+.hcd-grid .hcd-corner-header {
+  background: #edf2f7;
+  border-color: #b8c2cc;
+}
+
+.hcd-grid-tab[aria-selected="true"] {
+  border-bottom-color: #107c41;
+  color: #0b5a2c;
+}

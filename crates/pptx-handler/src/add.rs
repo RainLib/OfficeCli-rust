@@ -1118,7 +1118,10 @@ fn add_picture(
 ) -> Result<String, HandlerError> {
     use std::path::Path;
 
-    let src = properties.get("src").or_else(|| properties.get("path"));
+    let src = properties
+        .get("src")
+        .or_else(|| properties.get("path"))
+        .or_else(|| properties.get("file"));
 
     // Resolve image extension — explicit property takes priority, then derive
     // from `src` filename extension. Default to png.
@@ -1170,7 +1173,11 @@ fn add_picture(
 
     // Write image binary — priority: src file > payloadBase64 > payloadHex > empty stub.
     let bytes_to_write = if let Some(src_path) = src {
-        std::fs::read(src_path).ok()
+        Some(std::fs::read(src_path).map_err(|error| {
+            HandlerError::OperationFailed(format!(
+                "failed to read image source '{src_path}': {error}"
+            ))
+        })?)
     } else if let Some(b64) = properties.get("payloadBase64") {
         base64_decode(b64).ok()
     } else if let Some(hex) = properties.get("payloadHex") {
@@ -1179,7 +1186,9 @@ fn add_picture(
         Some(Vec::new())
     };
     if let Some(bytes) = bytes_to_write {
-        let _ = package.write_part(&media_part_path, bytes);
+        package
+            .write_part(&media_part_path, bytes)
+            .map_err(|error| HandlerError::SaveError(error.to_string()))?;
     }
 
     // Generate a relationship ID for the image
@@ -1461,13 +1470,28 @@ fn add_table(
         .get("rows")
         .and_then(|v| v.parse().ok())
         .unwrap_or(2);
-
-    let col_width = 914400 / cols as i64; // Divide the width by columns
-    let row_height = if rows > 0 {
-        457200 / rows as i64
-    } else {
-        457200
-    }; // 0.5 inch per row default
+    if !(1..=1_000).contains(&rows) || !(1..=1_000).contains(&cols) {
+        return Err(HandlerError::InvalidArgument(
+            "PPTX table rows and cols must each be in 1..=1000".to_string(),
+        ));
+    }
+    if rows.saturating_mul(cols) > 1_000_000 {
+        return Err(HandlerError::InvalidArgument(
+            "PPTX table cannot exceed 1,000,000 cells".to_string(),
+        ));
+    }
+    let frame_width = cx
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(8_382_000);
+    let frame_height = cy
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(1_143_000);
+    let col_width = (frame_width / cols as i64).max(1);
+    let row_height = (frame_height / rows as i64).max(1);
 
     // Build the table grid
     let mut grid_cols = String::new();
@@ -1507,7 +1531,7 @@ fn add_table(
   </p:nvGraphicFramePr>
   <p:xfrm>
     <a:off x="{x}" y="{y}"/>
-    <a:ext cx="{cx}" cy="{cy}"/>
+    <a:ext cx="{frame_width}" cy="{frame_height}"/>
   </p:xfrm>
   <a:graphic>
     <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
@@ -2002,7 +2026,10 @@ fn update_ppt_content_types_for_model(
         ext, content_type
     );
     // Insert Default at the top so Override entries stay grouped after.
-    let new_xml = if let Some(pos) = xml.find('>') {
+    let new_xml = if let Some(pos) = xml
+        .find("<Types")
+        .and_then(|start| xml[start..].find('>').map(|offset| start + offset))
+    {
         // Right after opening <Types ...>
         let close = pos + 1;
         let mut out = String::with_capacity(xml.len() + default_xml.len());
@@ -2011,7 +2038,9 @@ fn update_ppt_content_types_for_model(
         out.push_str(&xml[close..]);
         out
     } else {
-        xml.replace("</Types>", &format!("{}{}</Types>", default_xml, ""))
+        return Err(HandlerError::OperationFailed(
+            "invalid [Content_Types].xml: missing Types root".to_string(),
+        ));
     };
     package
         .write_part_xml("[Content_Types].xml", &new_xml)
@@ -5747,5 +5776,54 @@ mod glb_tests {
         let json = std::str::from_utf8(&bytes[20..20 + chunk_len]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(json.trim_end_matches(' ')).unwrap();
         assert_eq!(parsed["asset"]["version"], "2.0");
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    fn minimal_package() -> OxmlPackage {
+        let mut package = OxmlPackage::create("table-test.pptx");
+        package.add_part(
+            "ppt/presentation.xml",
+            br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#,
+        );
+        package.add_part(
+            "ppt/_rels/presentation.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+        );
+        package.add_part(
+            "ppt/slides/slide1.xml",
+            br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sld>"#,
+        );
+        package
+    }
+
+    #[test]
+    fn table_rejects_zero_dimensions_before_cell_generation() {
+        let mut package = minimal_package();
+        let properties = HashMap::from([
+            ("rows".to_string(), "0".to_string()),
+            ("cols".to_string(), "2".to_string()),
+        ]);
+        let error = add_table(&mut package, "/slide[1]", &properties).unwrap_err();
+        assert!(matches!(error, HandlerError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn table_uses_positive_frame_fallback_for_non_positive_geometry() {
+        let mut package = minimal_package();
+        let properties = HashMap::from([
+            ("rows".to_string(), "2".to_string()),
+            ("cols".to_string(), "2".to_string()),
+            ("width".to_string(), "0".to_string()),
+            ("height".to_string(), "-1".to_string()),
+        ]);
+        add_table(&mut package, "/slide[1]", &properties).unwrap();
+        let xml = package.read_part_xml("ppt/slides/slide1.xml").unwrap();
+        assert!(xml.contains("<a:ext cx=\"8382000\" cy=\"1143000\"/>"));
+        assert!(!xml.contains("<a:ext cx=\"0\""));
+        assert!(!xml.contains("cy=\"-1\""));
     }
 }

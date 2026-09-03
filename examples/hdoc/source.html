@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>OfficeCLI HCD 脱敏转换测试</title>
+  <style>
+    body { font-family: "Noto Sans CJK SC", sans-serif; color: #222; }
+    h1 { color: #2455aa; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #999; padding: 6px; }
+    th { background: #e8eef9; }
+  </style>
+</head>
+<body>
+  <section>
+    <h1>智能脱敏服务转换验收</h1>
+    <p>客户账号：Secret 123，中文内容（Unicode）</p>
+    <p>联系电话：13800138000；邮箱：alice@example.com</p>
+  </section>
+
+  <section>
+    <h2>功能清单</h2>
+    <ol>
+      <li>文档转换为安全 canonical HTML</li>
+      <li>通过稳定 nodeId 提交脱敏 patch</li>
+      <li>从 HCD revision 导出 DOCX、XLSX、PPTX 和 PDF</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>账户明细</h2>
+    <table data-private="该属性不应进入 canonical HCD">
+      <tr><th>姓名</th><th>账号</th><th>状态</th></tr>
+      <tr><td>张三</td><td>6222020012345678</td><td>正常</td></tr>
+      <tr><td>李四</td><td>Secret 456</td><td>待处理</td></tr>
+    </table>
+  </section>
+
+  <script>document.write("活动脚本不应进入可编辑 HCD 或语义目标文档")</script>
+</body>
+</html>

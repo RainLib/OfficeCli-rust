@@ -1,38 +1,102 @@
 use crate::reader::PdfReader;
 use handler_common::HandlerError;
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_syntax::Pdf;
+use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::{render as render_pdf_page, RenderSettings};
+use std::sync::Arc;
 
-/// PDF rendering — converts page text content to SVG for basic preview.
-/// Full rasterization (PNG) requires external tools like poppler/mutool.
+const PREVIEW_RASTER_SCALE: f32 = 96.0 / 72.0;
+const MAX_RASTER_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RASTER_DIMENSION: u32 = 8_192;
+const MAX_RASTER_PIXELS: u64 = 32 * 1024 * 1024;
+const MAX_RASTER_PNG_BYTES: usize = 64 * 1024 * 1024;
+
+/// Reusable in-process PDF rasterizer for high-fidelity browser previews.
+/// The source is parsed once, then pages are rendered independently so watch
+/// mode can remain page-lazy.
+pub(crate) struct PdfRasterizer {
+    pdf: Pdf,
+}
+
+impl PdfRasterizer {
+    pub(crate) fn open(path: &str) -> Result<Self, HandlerError> {
+        let metadata = std::fs::metadata(path).map_err(HandlerError::IoError)?;
+        if metadata.len() > MAX_RASTER_SOURCE_BYTES {
+            return Err(HandlerError::OperationFailed(format!(
+                "PDF raster preview source is {} bytes; maximum is {MAX_RASTER_SOURCE_BYTES}",
+                metadata.len()
+            )));
+        }
+        let bytes = std::fs::read(path).map_err(HandlerError::IoError)?;
+        let pdf = Pdf::new(Arc::new(bytes)).map_err(|error| {
+            HandlerError::OperationFailed(format!(
+                "pure-Rust PDF raster preview could not open the source: {error:?}"
+            ))
+        })?;
+        Ok(Self { pdf })
+    }
+
+    pub(crate) fn render_page(&self, page: usize) -> Result<Vec<u8>, HandlerError> {
+        let page = self
+            .pdf
+            .pages()
+            .get(page.checked_sub(1).ok_or_else(|| {
+                HandlerError::InvalidArgument("PDF page numbers are 1-based".to_string())
+            })?)
+            .ok_or_else(|| {
+                HandlerError::InvalidArgument(format!("PDF page {page} does not exist"))
+            })?;
+        let (page_width, page_height) = page.render_dimensions();
+        let width = (page_width * PREVIEW_RASTER_SCALE).ceil().max(1.0) as u32;
+        let height = (page_height * PREVIEW_RASTER_SCALE).ceil().max(1.0) as u32;
+        if width > MAX_RASTER_DIMENSION || height > MAX_RASTER_DIMENSION {
+            return Err(HandlerError::OperationFailed(format!(
+                "PDF raster preview dimensions {width}x{height} exceed {MAX_RASTER_DIMENSION}px"
+            )));
+        }
+        if u64::from(width).saturating_mul(u64::from(height)) > MAX_RASTER_PIXELS {
+            return Err(HandlerError::OperationFailed(format!(
+                "PDF raster preview dimensions {width}x{height} exceed {MAX_RASTER_PIXELS} pixels"
+            )));
+        }
+        let settings = RenderSettings {
+            x_scale: PREVIEW_RASTER_SCALE,
+            y_scale: PREVIEW_RASTER_SCALE,
+            width: Some(width as u16),
+            height: Some(height as u16),
+            bg_color: WHITE,
+        };
+        let pixmap = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_pdf_page(page, &InterpreterSettings::default(), &settings)
+        }))
+        .map_err(|_| {
+            HandlerError::OperationFailed("pure-Rust PDF raster preview panicked".to_string())
+        })?;
+        let png = pixmap.into_png().map_err(|error| {
+            HandlerError::OperationFailed(format!(
+                "pure-Rust PDF raster preview PNG encoding failed: {error}"
+            ))
+        })?;
+        if png.len() > MAX_RASTER_PNG_BYTES {
+            return Err(HandlerError::OperationFailed(format!(
+                "PDF raster preview is {} bytes; maximum is {MAX_RASTER_PNG_BYTES}",
+                png.len()
+            )));
+        }
+        Ok(png)
+    }
+}
+
+/// PDF rendering with an in-process pure-Rust raster path and a semantic SVG
+/// fallback/inspection path. No poppler, mutool, browser, or LibreOffice is
+/// invoked.
 pub struct PdfRenderer;
 
 impl PdfRenderer {
     /// Render a PDF page to PNG bytes.
-    /// This requires an external tool (poppler/mutool) — returns an error if not available.
     pub fn render_page_to_png(path: &str, page: usize) -> Result<Vec<u8>, HandlerError> {
-        // Try using mutool (muPDF command-line tool) if available
-        let output = std::process::Command::new("mutool")
-            .args([
-                "draw",
-                "-F",
-                "png",
-                "-o",
-                "-",
-                "-r",
-                "150",
-                path,
-                &page.to_string(),
-            ])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => Ok(result.stdout),
-            Ok(result) => Err(HandlerError::OperationFailed(
-                format!("mutool failed: {}", String::from_utf8_lossy(&result.stderr))
-            )),
-            Err(_) => Err(HandlerError::UnsupportedMode(
-                "PNG rendering requires 'mutool' (muPDF tools) — install with: brew install mupdf-tools".to_string()
-            )),
-        }
+        PdfRasterizer::open(path)?.render_page(page)
     }
 
     /// Render a PDF page to a basic SVG preview using extracted text.

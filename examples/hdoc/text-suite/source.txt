@@ -1,0 +1,5 @@
+TXT HCD 验证文档
+
+Secret 123
+这是纯文本正文，包含中文、English 和 emoji 😀。
+每一行都是一个具有稳定 nodeId 和源字节范围的可编辑节点。

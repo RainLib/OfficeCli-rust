@@ -18,8 +18,23 @@ Thumbs.db
 *.exe
 /officecli
 dist/
+**/node_modules/
 
 # Local custom folders / reference code / build output
 source/
 examples/pdf/
 
+# Generated HCD validation artifacts (real source documents stay local)
+examples/**/*.hcd/
+examples/**/hcd/
+examples/hdoc/**/output*/
+examples/hdoc/real-documents/output*/
+examples/hdoc/docx-suite/output*/
+examples/hdoc/pptx-suite/output*/
+examples/hdoc/text-suite/output*/
+examples/hdoc/xlsx-suite/output*/
+examples/hdoc/fidelity-audit/output*/
+examples/hdoc/lazy-viewer/*.hcd/
+examples/hdoc/image-patch/*.hcd/
+examples/hdoc/image-patch/output/**/bundle.hcd/
+**/.hcd-write-lock

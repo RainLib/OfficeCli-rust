@@ -12,7 +12,63 @@
 
 use handler_common::HandlerError;
 use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId};
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
+type ReverseCmapCacheKey = (ObjectId, u64, usize);
+
+thread_local! {
+    static REVERSE_CMAP_CACHE: RefCell<HashMap<ReverseCmapCacheKey, Rc<HashMap<char, u32>>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn decoded_stream_content(stream: &lopdf::Stream) -> Cow<'_, [u8]> {
+    match stream.decompressed_content() {
+        Ok(bytes) => Cow::Owned(bytes),
+        Err(_) => Cow::Borrowed(stream.content.as_slice()),
+    }
+}
+
+fn cached_reverse_cmap(object_id: ObjectId, stream: &lopdf::Stream) -> Rc<HashMap<char, u32>> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    stream.content.hash(&mut hasher);
+    let key = (object_id, hasher.finish(), stream.content.len());
+    REVERSE_CMAP_CACHE.with(|cache| {
+        if let Some(cached) = cache.borrow().get(&key) {
+            return Rc::clone(cached);
+        }
+        let bytes = decoded_stream_content(stream);
+        let content = String::from_utf8_lossy(&bytes);
+        let cmap = parse_to_unicode_cmap(&content);
+        let reverse = Rc::new(
+            cmap.iter()
+                .flat_map(|(cid, value)| value.chars().map(move |character| (character, *cid)))
+                .collect(),
+        );
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(key, Rc::clone(&reverse));
+        reverse
+    })
+}
+
+fn decoded_stream_content_with_limit<'a>(
+    stream: &'a lopdf::Stream,
+    maximum: Option<usize>,
+    context: &str,
+) -> Result<Cow<'a, [u8]>, HandlerError> {
+    match maximum {
+        Some(maximum) => {
+            crate::reader::decode_stream_bounded(stream, maximum, context).map(Cow::Owned)
+        }
+        None => Ok(decoded_stream_content(stream)),
+    }
+}
 
 /// Bounding box for a text block in PDF coordinate space.
 /// PDF origin is bottom-left, y increases upward.
@@ -40,6 +96,24 @@ pub struct FilledRect {
     pub width: f32,
     pub height: f32,
     pub color: PdfColor,
+}
+
+#[derive(Debug, Clone)]
+pub struct PdfVectorRect {
+    pub bbox: BBox,
+    pub fill_color: Option<PdfColor>,
+    pub stroke_color: Option<PdfColor>,
+    pub stroke_width: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PdfVectorLine {
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+    pub color: PdfColor,
+    pub width: f32,
 }
 
 /// Style properties extracted from PDF operators for a text block.
@@ -106,6 +180,10 @@ pub struct FontInfo {
     pub char_widths: HashMap<u32, f32>,
     pub default_width: f32,
     pub unicode_to_cid: HashMap<u32, u32>,
+    /// FontDescriptor ascent in glyph-space units (normally 1000 units/em).
+    pub ascent: f32,
+    /// FontDescriptor descent in glyph-space units (normally negative).
+    pub descent: f32,
 }
 
 /// A structured image block extracted from a page's content stream.
@@ -117,6 +195,32 @@ pub struct PdfImageBlock {
     pub bbox: BBox,
     /// The name of the XObject resource (e.g. "Im1")
     pub xobject_name: String,
+    /// Whether the placement paints a raster image or a reusable Form XObject.
+    pub xobject_kind: PdfXObjectKind,
+    /// Complete page-space transform active at the `Do` operator.
+    pub transform: [f32; 6],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PdfXObjectKind {
+    Image,
+    Form,
+}
+
+impl PdfXObjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Form => "form",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PdfXObjectGeometry {
+    kind: PdfXObjectKind,
+    local_bbox: BBox,
+    matrix: [f32; 6],
 }
 
 /// Parsed content stream for a page — tracks line-level positions for modification.
@@ -132,6 +236,10 @@ pub struct ParsedContentStream {
     pub image_blocks: Vec<PdfImageBlock>,
     /// Maps XObject name -> Base64 Data URI string
     pub image_map: HashMap<String, String>,
+    /// Bounded vector rectangles retained for faithful HTML preview.
+    pub vector_rects: Vec<PdfVectorRect>,
+    /// Bounded vector line segments retained for faithful HTML preview.
+    pub vector_lines: Vec<PdfVectorLine>,
 }
 
 /// Estimate text width using font metrics.
@@ -188,32 +296,62 @@ fn standard_font_avg_width(font_name: &str) -> f32 {
     }
 }
 
+fn page_resource_dictionaries(doc: &LopdfDocument, page_id: ObjectId) -> Vec<&Dictionary> {
+    let Ok((inline, resource_ids)) = doc.get_page_resources(page_id) else {
+        return Vec::new();
+    };
+    let mut resources = Vec::with_capacity(resource_ids.len() + usize::from(inline.is_some()));
+    if let Some(inline) = inline {
+        resources.push(inline);
+    }
+    for resource_id in resource_ids {
+        if let Ok(dictionary) = doc.get_dictionary(resource_id) {
+            resources.push(dictionary);
+        }
+    }
+    resources
+}
+
 /// Extract font dictionaries from a page's /Resources.
-fn extract_page_fonts(doc: &LopdfDocument, page_id: ObjectId) -> HashMap<String, FontInfo> {
+fn extract_page_fonts(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    max_aux_stream_bytes: Option<usize>,
+) -> Result<HashMap<String, FontInfo>, HandlerError> {
     let mut font_map = HashMap::new();
 
-    if let Ok((resources_dict, _parent_chain)) = doc.get_page_resources(page_id) {
-        if let Some(resources) = resources_dict {
-            if let Ok(font_dict) = resources.get(b"Font") {
-                if let Object::Dictionary(dict) = font_dict {
-                    for (name, value) in dict.iter() {
-                        let pdf_name = String::from_utf8_lossy(name).to_string();
-                        if let Ok((_, font_obj)) = doc.dereference(value) {
-                            if let Object::Dictionary(font_dict) = font_obj {
-                                let info = build_font_info(doc, font_dict, &pdf_name);
-                                font_map.insert(pdf_name, info);
-                            }
-                        }
+    for resources in page_resource_dictionaries(doc, page_id) {
+        if let Ok(font_object) = resources.get(b"Font") {
+            if let Ok((_, Object::Dictionary(dict))) = doc.dereference(font_object) {
+                if font_map.len().saturating_add(dict.len()) > 4096 {
+                    return Err(HandlerError::InvalidArgument(
+                        "resource limit exceeded: PDF page has more than 4096 fonts".to_string(),
+                    ));
+                }
+                for (name, value) in dict.iter() {
+                    let pdf_name = String::from_utf8_lossy(name).to_string();
+                    if font_map.contains_key(&pdf_name) {
+                        continue;
+                    }
+                    if let Ok((_, Object::Dictionary(font_dict))) = doc.dereference(value) {
+                        let info =
+                            build_font_info(doc, font_dict, &pdf_name, max_aux_stream_bytes)?;
+                        font_map.insert(pdf_name, info);
                     }
                 }
             }
         }
     }
 
-    font_map
+    Ok(font_map)
 }
 
-fn build_font_info(doc: &LopdfDocument, font_dict: &Dictionary, pdf_name: &str) -> FontInfo {
+fn build_font_info(
+    doc: &LopdfDocument,
+    font_dict: &Dictionary,
+    pdf_name: &str,
+    max_aux_stream_bytes: Option<usize>,
+) -> Result<FontInfo, HandlerError> {
     let base_font = font_dict
         .get(b"BaseFont")
         .ok()
@@ -228,12 +366,18 @@ fn build_font_info(doc: &LopdfDocument, font_dict: &Dictionary, pdf_name: &str) 
         .unwrap_or(false);
 
     let (char_widths, default_width) = extract_font_widths(doc, font_dict, &base_font, is_cid);
+    let (ascent, descent) = extract_font_vertical_metrics(doc, font_dict, is_cid);
 
     let mut unicode_to_cid = HashMap::new();
     if let Ok(to_unicode) = font_dict.get(b"ToUnicode") {
         if let Ok(ref_id) = to_unicode.as_reference() {
             if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
-                let content = String::from_utf8_lossy(&stream.content);
+                let bytes = decoded_stream_content_with_limit(
+                    stream,
+                    max_aux_stream_bytes,
+                    "PDF ToUnicode CMap",
+                )?;
+                let content = String::from_utf8_lossy(&bytes);
                 let cmap = parse_to_unicode_cmap(&content);
                 for (cid, unicode_str) in cmap {
                     if let Some(ch) = unicode_str.chars().next() {
@@ -244,14 +388,59 @@ fn build_font_info(doc: &LopdfDocument, font_dict: &Dictionary, pdf_name: &str) 
         }
     }
 
-    FontInfo {
+    Ok(FontInfo {
         pdf_name: pdf_name.to_string(),
         base_font,
         is_cid_font: is_cid,
         char_widths,
         default_width,
         unicode_to_cid,
-    }
+        ascent,
+        descent,
+    })
+}
+
+fn dictionary_number(dictionary: &Dictionary, key: &[u8]) -> Option<f32> {
+    dictionary.get(key).ok().and_then(object_number)
+}
+
+fn extract_font_vertical_metrics(
+    doc: &LopdfDocument,
+    font_dict: &Dictionary,
+    is_cid: bool,
+) -> (f32, f32) {
+    let metrics_font = if is_cid {
+        font_dict
+            .get(b"DescendantFonts")
+            .ok()
+            .and_then(|value| doc.dereference(value).ok())
+            .and_then(|(_, value)| value.as_array().ok())
+            .and_then(|fonts| fonts.first())
+            .and_then(|font| doc.dereference(font).ok())
+            .and_then(|(_, font)| font.as_dict().ok())
+            .unwrap_or(font_dict)
+    } else {
+        font_dict
+    };
+    let descriptor = metrics_font
+        .get(b"FontDescriptor")
+        .ok()
+        .and_then(|value| doc.dereference(value).ok())
+        .and_then(|(_, value)| value.as_dict().ok());
+    let font_bbox = descriptor
+        .and_then(|descriptor| descriptor.get(b"FontBBox").ok())
+        .and_then(|value| object_bbox(doc, value));
+    let ascent = descriptor
+        .and_then(|descriptor| dictionary_number(descriptor, b"Ascent"))
+        .or_else(|| font_bbox.as_ref().map(|bbox| bbox.y + bbox.height))
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 4_000.0)
+        .unwrap_or(800.0);
+    let descent = descriptor
+        .and_then(|descriptor| dictionary_number(descriptor, b"Descent"))
+        .or_else(|| font_bbox.as_ref().map(|bbox| bbox.y))
+        .filter(|value| value.is_finite() && *value < 0.0 && *value >= -4_000.0)
+        .unwrap_or(-200.0);
+    (ascent, descent)
 }
 
 fn extract_font_widths(
@@ -749,29 +938,23 @@ pub fn encode_chunk_with_font(
         }
 
         // Try our custom ToUnicode CMap mapping first!
-        let mut custom_cmap: Option<HashMap<u32, String>> = None;
+        let mut custom_unicode_to_cid: Option<Rc<HashMap<char, u32>>> = None;
         if let Ok(to_unicode) = font.get(b"ToUnicode") {
             if let Ok(ref_id) = to_unicode.as_reference() {
                 if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
-                    let content = String::from_utf8_lossy(&stream.content);
-                    let cmap = parse_to_unicode_cmap(&content);
-                    if !cmap.is_empty() {
-                        custom_cmap = Some(cmap);
+                    let reverse = cached_reverse_cmap(ref_id, stream);
+                    if !reverse.is_empty() {
+                        custom_unicode_to_cid = Some(reverse);
                     }
                 }
             }
         }
 
-        if let Some(ref cmap) = custom_cmap {
+        if let Some(ref unicode_to_cid) = custom_unicode_to_cid {
             let mut bytes = Vec::with_capacity(text.len() * 2);
             let mut missing = String::new();
             for ch in text.chars() {
-                // Find CID that maps to ch
-                let found_cid = cmap
-                    .iter()
-                    .find(|(_, val)| val.contains(ch))
-                    .map(|(cid, _)| *cid);
-                if let Some(cid) = found_cid {
+                if let Some(cid) = unicode_to_cid.get(&ch).copied() {
                     bytes.push((cid >> 8) as u8);
                     bytes.push((cid & 0xFF) as u8);
                 } else {
@@ -887,7 +1070,8 @@ pub fn pick_fonts_for_text(
             if let Ok(to_unicode) = font.get(b"ToUnicode") {
                 if let Ok(ref_id) = to_unicode.as_reference() {
                     if let Ok(Object::Stream(stream)) = doc.get_object(ref_id) {
-                        let content = String::from_utf8_lossy(&stream.content);
+                        let bytes = decoded_stream_content(stream);
+                        let content = String::from_utf8_lossy(&bytes);
                         let cmap = parse_to_unicode_cmap(&content);
                         if !cmap.is_empty() {
                             custom_to_unicode.insert(font_name, cmap);
@@ -1166,7 +1350,12 @@ struct TextState {
     font_size: f32,
     char_spacing: f32,
     word_spacing: f32,
+    leading: f32,
+    horizontal_scale: f32,
+    rise: f32,
     fill_color: Option<PdfColor>,
+    stroke_color: Option<PdfColor>,
+    line_width: f32,
     in_bt: bool,
     bt_start_line: usize,
     tm_set: bool,
@@ -1181,9 +1370,19 @@ struct TextState {
     ctm_d: f32,
     ctm_e: f32,
     ctm_f: f32,
-    ctm_stack: Vec<[f32; 6]>,
+    graphics_stack: Vec<SavedGraphicsState>,
     filled_rects: Vec<FilledRect>,
     last_rect: Option<(f32, f32, f32, f32)>,
+    path_current: Option<(f32, f32)>,
+    path_segments: Vec<(f32, f32, f32, f32)>,
+}
+
+#[derive(Clone)]
+struct SavedGraphicsState {
+    ctm: [f32; 6],
+    fill_color: Option<PdfColor>,
+    stroke_color: Option<PdfColor>,
+    line_width: f32,
 }
 
 impl Default for TextState {
@@ -1196,7 +1395,12 @@ impl Default for TextState {
             font_size: 12.0,
             char_spacing: 0.0,
             word_spacing: 0.0,
+            leading: 0.0,
+            horizontal_scale: 1.0,
+            rise: 0.0,
             fill_color: None,
+            stroke_color: None,
+            line_width: 1.0,
             in_bt: false,
             bt_start_line: 0,
             tm_set: false,
@@ -1210,9 +1414,11 @@ impl Default for TextState {
             ctm_d: 1.0,
             ctm_e: 0.0,
             ctm_f: 0.0,
-            ctm_stack: Vec::new(),
+            graphics_stack: Vec::new(),
             filled_rects: Vec::new(),
             last_rect: None,
+            path_current: None,
+            path_segments: Vec::new(),
         }
     }
 }
@@ -1230,16 +1436,28 @@ fn is_pdf_operator(token: &str) -> bool {
             | "Tf"
             | "Tc"
             | "Tw"
+            | "TL"
+            | "Tz"
+            | "Ts"
             | "Tj"
             | "TJ"
             | "rg"
             | "g"
             | "k"
+            | "RG"
+            | "G"
+            | "K"
+            | "w"
             | "q"
             | "Q"
             | "cm"
             | "Do"
             | "re"
+            | "m"
+            | "l"
+            | "S"
+            | "s"
+            | "n"
             | "f"
             | "F"
             | "f*"
@@ -1279,24 +1497,25 @@ fn add_or_merge_text_block(
 ) {
     let (width, height) = compute_block_dimensions(&text, font_map, state);
     let effective_font_size = state.font_size * state.tm_d.abs();
+    let (descent, ascent) = effective_vertical_metrics(font_map, state);
 
     let user_bbox = BBox {
-        x: state.cursor_x,
-        y: state.line_y,
+        x: state.cursor_x + state.rise * state.tm_c,
+        y: state.line_y + state.rise * state.tm_d,
         width,
         height,
     };
 
     let transform_bbox = |bb: &BBox| -> BBox {
         let c1x = bb.x;
-        let text_scale_y = state.tm_d.signum() * bb.height;
-        let c1y = bb.y - 0.2 * text_scale_y;
+        let direction = state.tm_d.signum();
+        let c1y = bb.y + descent * direction;
         let c2x = bb.x + bb.width;
-        let c2y = bb.y - 0.2 * text_scale_y;
+        let c2y = bb.y + descent * direction;
         let c3x = bb.x;
-        let c3y = bb.y + 0.8 * text_scale_y;
+        let c3y = bb.y + ascent * direction;
         let c4x = bb.x + bb.width;
-        let c4y = bb.y + 0.8 * text_scale_y;
+        let c4y = bb.y + ascent * direction;
 
         let tx1 = c1x * state.ctm_a + c1y * state.ctm_c + state.ctm_e;
         let ty1 = c1x * state.ctm_b + c1y * state.ctm_d + state.ctm_f;
@@ -1399,7 +1618,7 @@ fn add_or_merge_text_block(
     state.cursor_x += width;
 }
 
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
     let mut i = 0;
@@ -1836,70 +2055,220 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
     encode_png(width, height, &rgb_pixels)
 }
 
+fn object_number(object: &Object) -> Option<f32> {
+    object
+        .as_float()
+        .ok()
+        .or_else(|| object.as_i64().ok().map(|value| value as f32))
+}
+
+fn object_matrix(doc: &LopdfDocument, object: &Object) -> Option<[f32; 6]> {
+    let (_, resolved) = doc.dereference(object).ok()?;
+    let values = resolved.as_array().ok()?;
+    if values.len() != 6 {
+        return None;
+    }
+    Some([
+        object_number(&values[0])?,
+        object_number(&values[1])?,
+        object_number(&values[2])?,
+        object_number(&values[3])?,
+        object_number(&values[4])?,
+        object_number(&values[5])?,
+    ])
+}
+
+fn object_bbox(doc: &LopdfDocument, object: &Object) -> Option<BBox> {
+    let (_, resolved) = doc.dereference(object).ok()?;
+    let values = resolved.as_array().ok()?;
+    if values.len() != 4 {
+        return None;
+    }
+    let x0 = object_number(&values[0])?;
+    let y0 = object_number(&values[1])?;
+    let x1 = object_number(&values[2])?;
+    let y1 = object_number(&values[3])?;
+    Some(BBox {
+        x: x0.min(x1),
+        y: y0.min(y1),
+        width: (x1 - x0).abs(),
+        height: (y1 - y0).abs(),
+    })
+}
+
+fn extract_page_xobject_geometry(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+) -> HashMap<String, PdfXObjectGeometry> {
+    let mut geometries = HashMap::new();
+    for resources in page_resource_dictionaries(doc, page_id) {
+        let Ok(xobjects) = resources.get(b"XObject") else {
+            continue;
+        };
+        let Ok((_, Object::Dictionary(xobjects))) = doc.dereference(xobjects) else {
+            continue;
+        };
+
+        for (name, value) in xobjects.iter().take(16_384) {
+            let pdf_name = String::from_utf8_lossy(name).to_string();
+            if geometries.contains_key(&pdf_name) {
+                continue;
+            }
+            let Ok((_, Object::Stream(stream))) = doc.dereference(value) else {
+                continue;
+            };
+            let kind = match stream
+                .dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|value| value.as_name_str().ok())
+            {
+                Some("Image") => PdfXObjectKind::Image,
+                Some("Form") => PdfXObjectKind::Form,
+                _ => continue,
+            };
+            let local_bbox = if kind == PdfXObjectKind::Image {
+                BBox {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                }
+            } else {
+                stream
+                    .dict
+                    .get(b"BBox")
+                    .ok()
+                    .and_then(|value| object_bbox(doc, value))
+                    .unwrap_or(BBox {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    })
+            };
+            let matrix = stream
+                .dict
+                .get(b"Matrix")
+                .ok()
+                .and_then(|value| object_matrix(doc, value))
+                .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            geometries.insert(
+                pdf_name,
+                PdfXObjectGeometry {
+                    kind,
+                    local_bbox,
+                    matrix,
+                },
+            );
+        }
+    }
+    geometries
+}
+
+fn transform_point(matrix: [f32; 6], x: f32, y: f32) -> (f32, f32) {
+    (
+        x * matrix[0] + y * matrix[2] + matrix[4],
+        x * matrix[1] + y * matrix[3] + matrix[5],
+    )
+}
+
+fn transform_xobject_bbox(
+    local_bbox: &BBox,
+    object_matrix: [f32; 6],
+    page_matrix: [f32; 6],
+) -> BBox {
+    let x1 = local_bbox.x;
+    let y1 = local_bbox.y;
+    let x2 = local_bbox.x + local_bbox.width;
+    let y2 = local_bbox.y + local_bbox.height;
+    let points = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)].map(|(x, y)| {
+        let (x, y) = transform_point(object_matrix, x, y);
+        transform_point(page_matrix, x, y)
+    });
+    let min_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    BBox {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
+}
+
 /// Extract image dictionaries from a page's /Resources and convert them to Base64 Data URIs.
 fn extract_page_images(doc: &LopdfDocument, page_id: ObjectId) -> HashMap<String, String> {
     let mut image_map = HashMap::new();
 
-    if let Ok((resources_dict, _parent_chain)) = doc.get_page_resources(page_id) {
-        if let Some(resources) = resources_dict {
-            if let Ok(xobject_dict) = resources.get(b"XObject") {
-                if let Object::Dictionary(dict) = xobject_dict {
-                    for (name, value) in dict.iter() {
-                        let pdf_name = String::from_utf8_lossy(name).to_string();
-                        if let Ok((_, xobject_obj)) = doc.dereference(value) {
-                            if let Object::Stream(stream) = xobject_obj {
-                                if let Ok(subtype_obj) = stream.dict.get(b"Subtype") {
-                                    if let Ok(name_str) = subtype_obj.as_name_str() {
-                                        if name_str == "Image" {
-                                            let filter = stream
-                                                .dict
-                                                .get(b"Filter")
-                                                .ok()
-                                                .and_then(|f| {
-                                                    f.as_name_str().ok().or_else(|| {
-                                                        f.as_array().ok().and_then(|arr| {
-                                                            arr.first().and_then(|first| {
-                                                                first.as_name_str().ok()
-                                                            })
+    for resources in page_resource_dictionaries(doc, page_id) {
+        if let Ok(xobject_dict) = resources.get(b"XObject") {
+            if let Ok((_, Object::Dictionary(dict))) = doc.dereference(xobject_dict) {
+                for (name, value) in dict.iter() {
+                    let pdf_name = String::from_utf8_lossy(name).to_string();
+                    if image_map.contains_key(&pdf_name) {
+                        continue;
+                    }
+                    if let Ok((_, xobject_obj)) = doc.dereference(value) {
+                        if let Object::Stream(stream) = xobject_obj {
+                            if let Ok(subtype_obj) = stream.dict.get(b"Subtype") {
+                                if let Ok(name_str) = subtype_obj.as_name_str() {
+                                    if name_str == "Image" {
+                                        let filter = stream
+                                            .dict
+                                            .get(b"Filter")
+                                            .ok()
+                                            .and_then(|f| {
+                                                f.as_name_str().ok().or_else(|| {
+                                                    f.as_array().ok().and_then(|arr| {
+                                                        arr.first().and_then(|first| {
+                                                            first.as_name_str().ok()
                                                         })
                                                     })
                                                 })
-                                                .unwrap_or("");
+                                            })
+                                            .unwrap_or("");
 
-                                            // Extract the raw JPEG/PNG data
-                                            if filter == "DCTDecode" || filter == "JPXDecode" {
-                                                if let Some(rgb_png_bytes) =
-                                                    convert_to_rgb_png(&stream.content)
-                                                {
-                                                    let b64 = base64_encode(&rgb_png_bytes);
-                                                    image_map.insert(
-                                                        pdf_name,
-                                                        format!("data:image/png;base64,{}", b64),
-                                                    );
-                                                } else {
-                                                    // Fallback to original bytes
-                                                    let b64 = base64_encode(&stream.content);
-                                                    image_map.insert(
-                                                        pdf_name,
-                                                        format!("data:image/jpeg;base64,{}", b64),
-                                                    );
-                                                }
-                                            } else if filter == "FlateDecode" {
-                                                if let Some(rgb_png_bytes) =
-                                                    decode_flate_to_png(stream, doc)
-                                                {
-                                                    let b64 = base64_encode(&rgb_png_bytes);
-                                                    image_map.insert(
-                                                        pdf_name.clone(),
-                                                        format!("data:image/png;base64,{}", b64),
-                                                    );
-                                                } else {
-                                                    let b64 = base64_encode(&stream.content);
-                                                    image_map.insert(
-                                                        pdf_name.clone(),
-                                                        format!("data:image/png;base64,{}", b64),
-                                                    );
-                                                }
+                                        // Extract the raw JPEG/PNG data
+                                        if filter == "DCTDecode" || filter == "JPXDecode" {
+                                            if let Some(rgb_png_bytes) =
+                                                convert_to_rgb_png(&stream.content)
+                                            {
+                                                let b64 = base64_encode(&rgb_png_bytes);
+                                                image_map.insert(
+                                                    pdf_name,
+                                                    format!("data:image/png;base64,{}", b64),
+                                                );
+                                            } else {
+                                                // Fallback to original bytes
+                                                let b64 = base64_encode(&stream.content);
+                                                image_map.insert(
+                                                    pdf_name,
+                                                    format!("data:image/jpeg;base64,{}", b64),
+                                                );
+                                            }
+                                        } else if filter == "FlateDecode" {
+                                            if let Some(rgb_png_bytes) =
+                                                decode_flate_to_png(stream, doc)
+                                            {
+                                                let b64 = base64_encode(&rgb_png_bytes);
+                                                image_map.insert(
+                                                    pdf_name.clone(),
+                                                    format!("data:image/png;base64,{}", b64),
+                                                );
                                             } else {
                                                 let b64 = base64_encode(&stream.content);
                                                 image_map.insert(
@@ -1907,6 +2276,12 @@ fn extract_page_images(doc: &LopdfDocument, page_id: ObjectId) -> HashMap<String
                                                     format!("data:image/png;base64,{}", b64),
                                                 );
                                             }
+                                        } else {
+                                            let b64 = base64_encode(&stream.content);
+                                            image_map.insert(
+                                                pdf_name.clone(),
+                                                format!("data:image/png;base64,{}", b64),
+                                            );
                                         }
                                     }
                                 }
@@ -1928,13 +2303,81 @@ pub fn parse_page_content_stream(
     page_id: ObjectId,
     doc: &LopdfDocument,
 ) -> Result<ParsedContentStream, HandlerError> {
+    parse_page_content_stream_inner(content_bytes, page_id, doc, None, true)
+}
+
+/// HCD-oriented parser: auxiliary streams are bounded and image payloads are
+/// not decoded/base64-encoded when only editable text is needed.
+pub fn parse_page_content_stream_text_only_bounded(
+    content_bytes: &[u8],
+    page_id: ObjectId,
+    doc: &LopdfDocument,
+    max_aux_stream_bytes: usize,
+) -> Result<ParsedContentStream, HandlerError> {
+    parse_page_content_stream_inner(
+        content_bytes,
+        page_id,
+        doc,
+        Some(max_aux_stream_bytes),
+        false,
+    )
+}
+
+/// Parse one bounded page including XObject image payloads for source-backed
+/// visual presentation. The caller controls both decoded content/font limits
+/// and the maximum Base64 image payload retained for this page.
+pub fn parse_page_content_stream_with_images_bounded(
+    content_bytes: &[u8],
+    page_id: ObjectId,
+    doc: &LopdfDocument,
+    max_aux_stream_bytes: usize,
+    max_image_payload_bytes: usize,
+) -> Result<ParsedContentStream, HandlerError> {
+    let parsed = parse_page_content_stream_inner(
+        content_bytes,
+        page_id,
+        doc,
+        Some(max_aux_stream_bytes),
+        true,
+    )?;
+    let image_payload_bytes = parsed
+        .image_map
+        .values()
+        .try_fold(0usize, |total, value| total.checked_add(value.len()))
+        .ok_or_else(|| image_resource_limit(max_image_payload_bytes))?;
+    if image_payload_bytes > max_image_payload_bytes {
+        return Err(image_resource_limit(max_image_payload_bytes));
+    }
+    Ok(parsed)
+}
+
+fn image_resource_limit(maximum: usize) -> HandlerError {
+    HandlerError::InvalidArgument(format!(
+        "resource limit exceeded: PDF page image payload is larger than {maximum} decoded bytes"
+    ))
+}
+
+fn parse_page_content_stream_inner(
+    content_bytes: &[u8],
+    page_id: ObjectId,
+    doc: &LopdfDocument,
+    max_aux_stream_bytes: Option<usize>,
+    include_images: bool,
+) -> Result<ParsedContentStream, HandlerError> {
     // Step 1: Split content into lines
     let content_str = String::from_utf8_lossy(content_bytes);
     let lines: Vec<String> = content_str.lines().map(|l| l.to_string()).collect();
 
     // Step 2: Extract font and image info
-    let font_map = extract_page_fonts(doc, page_id);
-    let image_map = extract_page_images(doc, page_id);
+    let font_map = extract_page_fonts(doc, page_id, max_aux_stream_bytes)?;
+    // Geometry is cheap to retain and is needed by HCD even when the page's
+    // visual authority is a composited raster. Payload decoding remains opt-in.
+    let xobject_geometry = extract_page_xobject_geometry(doc, page_id);
+    let image_map = if include_images {
+        extract_page_images(doc, page_id)
+    } else {
+        HashMap::new()
+    };
 
     // Also load actual lopdf encodings for ToUnicode mapping
     let mut encodings = std::collections::HashMap::new();
@@ -1948,7 +2391,12 @@ pub fn parse_page_content_stream(
             if let Ok(to_unicode) = font.get(b"ToUnicode") {
                 if let Ok(ref_id) = to_unicode.as_reference() {
                     if let Ok(lopdf::Object::Stream(stream)) = doc.get_object(ref_id) {
-                        let content = String::from_utf8_lossy(&stream.content);
+                        let bytes = decoded_stream_content_with_limit(
+                            stream,
+                            max_aux_stream_bytes,
+                            "PDF ToUnicode CMap",
+                        )?;
+                        let content = String::from_utf8_lossy(&bytes);
                         let cmap = parse_to_unicode_cmap(&content);
                         if !cmap.is_empty() {
                             custom_to_unicode.insert(font_name, cmap);
@@ -1963,6 +2411,8 @@ pub fn parse_page_content_stream(
     let mut state = TextState::default();
     let mut text_blocks = Vec::new();
     let mut image_blocks = Vec::new();
+    let mut vector_rects = Vec::new();
+    let mut vector_lines = Vec::new();
     let mut block_counter = 0usize;
     let mut image_counter = 0usize;
 
@@ -2012,6 +2462,9 @@ pub fn parse_page_content_stream(
                         if len >= 2 {
                             let dx = parse_float(&operands[len - 2]);
                             let dy = parse_float(&operands[len - 1]);
+                            if token == "TD" {
+                                state.leading = -dy;
+                            }
                             // Displacements are transformed by the active text matrix!
                             state.line_x = dx * state.tm_a + dy * state.tm_c + state.line_x;
                             state.line_y = dx * state.tm_b + dy * state.tm_d + state.line_y;
@@ -2020,7 +2473,11 @@ pub fn parse_page_content_stream(
                         }
                     }
                     "T*" => {
-                        state.line_y -= state.font_size * state.tm_d.abs();
+                        // T* is exactly `0 -TL Td`; it must use the text leading,
+                        // not the font size. Using font size shifts every later
+                        // line when a producer uses TD/T* with custom leading.
+                        state.line_x -= state.leading * state.tm_c;
+                        state.line_y -= state.leading * state.tm_d;
                         state.cursor_x = state.line_x;
                     }
                     "Tf" => {
@@ -2046,6 +2503,21 @@ pub fn parse_page_content_stream(
                         let len = operands.len();
                         if len >= 1 {
                             state.word_spacing = parse_float(&operands[len - 1]);
+                        }
+                    }
+                    "TL" => {
+                        if let Some(value) = operands.last() {
+                            state.leading = parse_float(value);
+                        }
+                    }
+                    "Tz" => {
+                        if let Some(value) = operands.last() {
+                            state.horizontal_scale = parse_float(value) / 100.0;
+                        }
+                    }
+                    "Ts" => {
+                        if let Some(value) = operands.last() {
+                            state.rise = parse_float(value);
                         }
                     }
                     "rg" => {
@@ -2076,25 +2548,64 @@ pub fn parse_page_content_stream(
                             ));
                         }
                     }
+                    "RG" => {
+                        let len = operands.len();
+                        if len >= 3 {
+                            state.stroke_color = Some(PdfColor::Rgb(
+                                parse_float(&operands[len - 3]),
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            ));
+                        }
+                    }
+                    "G" => {
+                        if let Some(value) = operands.last() {
+                            state.stroke_color = Some(PdfColor::Gray(parse_float(value)));
+                        }
+                    }
+                    "K" => {
+                        let len = operands.len();
+                        if len >= 4 {
+                            state.stroke_color = Some(PdfColor::Cmyk(
+                                parse_float(&operands[len - 4]),
+                                parse_float(&operands[len - 3]),
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            ));
+                        }
+                    }
+                    "w" => {
+                        if let Some(value) = operands.last() {
+                            state.line_width = parse_float(value).abs().clamp(0.1, 1000.0);
+                        }
+                    }
                     "q" => {
-                        state.ctm_stack.push([
-                            state.ctm_a,
-                            state.ctm_b,
-                            state.ctm_c,
-                            state.ctm_d,
-                            state.ctm_e,
-                            state.ctm_f,
-                        ]);
+                        state.graphics_stack.push(SavedGraphicsState {
+                            ctm: [
+                                state.ctm_a,
+                                state.ctm_b,
+                                state.ctm_c,
+                                state.ctm_d,
+                                state.ctm_e,
+                                state.ctm_f,
+                            ],
+                            fill_color: state.fill_color.clone(),
+                            stroke_color: state.stroke_color.clone(),
+                            line_width: state.line_width,
+                        });
                         state.last_rect = None;
                     }
                     "Q" => {
-                        if let Some(restored) = state.ctm_stack.pop() {
-                            state.ctm_a = restored[0];
-                            state.ctm_b = restored[1];
-                            state.ctm_c = restored[2];
-                            state.ctm_d = restored[3];
-                            state.ctm_e = restored[4];
-                            state.ctm_f = restored[5];
+                        if let Some(restored) = state.graphics_stack.pop() {
+                            state.ctm_a = restored.ctm[0];
+                            state.ctm_b = restored.ctm[1];
+                            state.ctm_c = restored.ctm[2];
+                            state.ctm_d = restored.ctm[3];
+                            state.ctm_e = restored.ctm[4];
+                            state.ctm_f = restored.ctm[5];
+                            state.fill_color = restored.fill_color;
+                            state.stroke_color = restored.stroke_color;
+                            state.line_width = restored.line_width;
                         }
                         state.last_rect = None;
                     }
@@ -2134,8 +2645,36 @@ pub fn parse_page_content_stream(
                             state.last_rect = Some((rx, ry, rw, rh));
                         }
                     }
+                    "m" => {
+                        let len = operands.len();
+                        if len >= 2 {
+                            state.path_current = Some((
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            ));
+                        }
+                    }
+                    "l" => {
+                        let len = operands.len();
+                        if len >= 2 {
+                            let next = (
+                                parse_float(&operands[len - 2]),
+                                parse_float(&operands[len - 1]),
+                            );
+                            if let Some((x1, y1)) = state.path_current {
+                                state.path_segments.push((x1, y1, next.0, next.1));
+                            }
+                            state.path_current = Some(next);
+                        }
+                    }
                     "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                        let strokes = matches!(token.as_str(), "B" | "B*" | "b" | "b*");
                         if let Some((rx, ry, rw, rh)) = state.last_rect.take() {
+                            if vector_rects.len().saturating_add(vector_lines.len()) >= 100_000 {
+                                return Err(HandlerError::InvalidArgument(
+                                    "PDF page exceeds 100000 vector preview primitives".to_string(),
+                                ));
+                            }
                             state.filled_rects.push(FilledRect {
                                 x: rx,
                                 y: ry,
@@ -2143,7 +2682,65 @@ pub fn parse_page_content_stream(
                                 height: rh,
                                 color: state.fill_color.clone().unwrap_or(PdfColor::Gray(0.0)),
                             });
+                            vector_rects.push(PdfVectorRect {
+                                bbox: BBox {
+                                    x: rx,
+                                    y: ry,
+                                    width: rw,
+                                    height: rh,
+                                },
+                                fill_color: state.fill_color.clone(),
+                                stroke_color: strokes.then(|| {
+                                    state.stroke_color.clone().unwrap_or(PdfColor::Gray(0.0))
+                                }),
+                                stroke_width: state.line_width,
+                            });
                         }
+                        state.path_current = None;
+                        state.path_segments.clear();
+                    }
+                    "S" | "s" => {
+                        if let Some((rx, ry, rw, rh)) = state.last_rect.take() {
+                            if vector_rects.len().saturating_add(vector_lines.len()) >= 100_000 {
+                                return Err(HandlerError::InvalidArgument(
+                                    "PDF page exceeds 100000 vector preview primitives".to_string(),
+                                ));
+                            }
+                            vector_rects.push(PdfVectorRect {
+                                bbox: BBox {
+                                    x: rx,
+                                    y: ry,
+                                    width: rw,
+                                    height: rh,
+                                },
+                                fill_color: None,
+                                stroke_color: Some(
+                                    state.stroke_color.clone().unwrap_or(PdfColor::Gray(0.0)),
+                                ),
+                                stroke_width: state.line_width,
+                            });
+                        }
+                        for (x1, y1, x2, y2) in state.path_segments.drain(..) {
+                            if vector_rects.len().saturating_add(vector_lines.len()) >= 100_000 {
+                                return Err(HandlerError::InvalidArgument(
+                                    "PDF page exceeds 100000 vector preview primitives".to_string(),
+                                ));
+                            }
+                            vector_lines.push(PdfVectorLine {
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                color: state.stroke_color.clone().unwrap_or(PdfColor::Gray(0.0)),
+                                width: state.line_width,
+                            });
+                        }
+                        state.path_current = None;
+                    }
+                    "n" => {
+                        state.last_rect = None;
+                        state.path_current = None;
+                        state.path_segments.clear();
                     }
                     "Do" => {
                         if let Some(operand) = operands.last() {
@@ -2153,17 +2750,26 @@ pub fn parse_page_content_stream(
                                 operand.to_string()
                             };
 
-                            if image_map.contains_key(&xobject_name) {
+                            if let Some(geometry) = xobject_geometry.get(&xobject_name) {
                                 image_counter += 1;
+                                let transform = [
+                                    state.ctm_a,
+                                    state.ctm_b,
+                                    state.ctm_c,
+                                    state.ctm_d,
+                                    state.ctm_e,
+                                    state.ctm_f,
+                                ];
                                 image_blocks.push(PdfImageBlock {
                                     index: image_counter,
-                                    bbox: BBox {
-                                        x: state.ctm_e,
-                                        y: state.ctm_f,
-                                        width: state.ctm_a.abs(),
-                                        height: state.ctm_d.abs(),
-                                    },
+                                    bbox: transform_xobject_bbox(
+                                        &geometry.local_bbox,
+                                        geometry.matrix,
+                                        transform,
+                                    ),
                                     xobject_name,
+                                    xobject_kind: geometry.kind,
+                                    transform,
                                 });
                             }
                         }
@@ -2281,6 +2887,8 @@ pub fn parse_page_content_stream(
         font_map,
         image_blocks,
         image_map,
+        vector_rects,
+        vector_lines,
     })
 }
 
@@ -2290,7 +2898,7 @@ fn compute_block_dimensions(
     state: &TextState,
 ) -> (f32, f32) {
     let effective_height = state.font_size * state.tm_d.abs();
-    let effective_width_scale = state.font_size * state.tm_a.abs();
+    let effective_width_scale = state.font_size * state.tm_a.abs() * state.horizontal_scale.abs();
 
     let width = if let Some(ref font_name) = state.font_name {
         let font_info = font_map
@@ -2303,6 +2911,8 @@ fn compute_block_dimensions(
                 char_widths: HashMap::new(),
                 default_width: standard_font_avg_width(font_name),
                 unicode_to_cid: HashMap::new(),
+                ascent: 800.0,
+                descent: -200.0,
             });
         estimate_text_width(
             text,
@@ -2317,9 +2927,24 @@ fn compute_block_dimensions(
     (width, effective_height)
 }
 
+fn effective_vertical_metrics(
+    font_map: &HashMap<String, FontInfo>,
+    state: &TextState,
+) -> (f32, f32) {
+    let (ascent, descent) = state
+        .font_name
+        .as_ref()
+        .and_then(|font_name| font_map.get(font_name))
+        .map(|font| (font.ascent, font.descent))
+        .unwrap_or((800.0, -200.0));
+    let scale = state.font_size * state.tm_d.abs() / 1000.0;
+    (descent * scale, ascent * scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::dictionary;
 
     fn extract_pdf_string(s: &str) -> Option<String> {
         decode_pdf_string(s, None, None, false)
@@ -2368,9 +2993,109 @@ mod tests {
             char_widths: HashMap::new(),
             default_width: 580.0,
             unicode_to_cid: HashMap::new(),
+            ascent: 800.0,
+            descent: -200.0,
         };
         let width = estimate_text_width("Hello", &font_info, 12.0, 0.0, 0.0);
         assert!(width > 30.0 && width < 40.0);
+    }
+
+    fn parser_document(resources: Dictionary) -> (LopdfDocument, ObjectId) {
+        let mut document = LopdfDocument::with_version("1.7");
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(lopdf::dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => resources,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(lopdf::dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        (document, page_id)
+    }
+
+    #[test]
+    fn text_next_line_uses_td_leading_instead_of_font_size() {
+        let (document, page_id) = parser_document(Dictionary::new());
+        let content = b"BT /F1 1 Tf 10 0 0 10 100 500 Tm 0 -2 TD (first) Tj T* (second) Tj ET";
+        let parsed =
+            parse_page_content_stream_text_only_bounded(content, page_id, &document, 1024).unwrap();
+
+        assert_eq!(parsed.text_blocks.len(), 2);
+        assert!((parsed.text_blocks[0].user_bbox.y - 480.0).abs() < 0.01);
+        assert!((parsed.text_blocks[1].user_bbox.y - 460.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn graphics_state_restore_keeps_temporary_fill_out_of_later_text() {
+        let (document, page_id) = parser_document(Dictionary::new());
+        let content = b"0 g q 0.95 0.97 0.99 rg 0 0 100 20 re f Q BT /F1 11 Tf 1 0 0 1 54 700 Tm (Black text) Tj ET";
+        let parsed =
+            parse_page_content_stream_text_only_bounded(content, page_id, &document, 1024).unwrap();
+
+        assert_eq!(parsed.text_blocks.len(), 1);
+        assert!(matches!(
+            parsed.text_blocks[0].style.fill_color,
+            Some(PdfColor::Gray(value)) if value.abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn text_only_parser_keeps_image_geometry_without_decoding_payload() {
+        let mut document = LopdfDocument::with_version("1.7");
+        let image_id = document.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1,
+                "Height" => 1,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            vec![0],
+        ));
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", image_id);
+        let mut resources = Dictionary::new();
+        resources.set("XObject", xobjects);
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(lopdf::dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => resources,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(lopdf::dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+
+        let parsed = parse_page_content_stream_text_only_bounded(
+            b"q 20 0 0 30 10 40 cm /Im1 Do Q",
+            page_id,
+            &document,
+            1024,
+        )
+        .unwrap();
+
+        assert!(parsed.image_map.is_empty());
+        assert_eq!(parsed.image_blocks.len(), 1);
+        let image = &parsed.image_blocks[0];
+        assert_eq!(image.xobject_kind, PdfXObjectKind::Image);
+        assert!((image.bbox.x - 10.0).abs() < 0.01);
+        assert!((image.bbox.y - 40.0).abs() < 0.01);
+        assert!((image.bbox.width - 20.0).abs() < 0.01);
+        assert!((image.bbox.height - 30.0).abs() < 0.01);
     }
 
     #[test]
