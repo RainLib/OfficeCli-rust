@@ -48,6 +48,7 @@ pub fn export_docx(
 
     let revision_manifest = manifest_at_revision(&bundle, &head, revision)?;
     let (dirty_parts, dirty_node_ids) = dirty_state_through(&bundle, revision)?;
+    reject_image_source_export(&bundle, &revision_manifest, &dirty_node_ids)?;
     let text_by_part =
         collect_text_by_part(&bundle, &revision_manifest, &dirty_parts, &dirty_node_ids)?;
 
@@ -100,6 +101,28 @@ pub fn export_docx(
         serde_json::to_writer_pretty(file, &report)?;
     }
     Ok(report)
+}
+
+fn reject_image_source_export(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_node_ids: &HashSet<String>,
+) -> Result<(), HcdError> {
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in page.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            if let Some(entry) = source_map.entries.iter().find(|entry| {
+                dirty_node_ids.contains(&entry.node_id) && entry.source.node_kind == "image"
+            }) {
+                return Err(HcdError::Unsupported(format!(
+                    "revision changes image node {}; source-backed DOCX image rewrite is not implemented and export was stopped before writing output; omit --source to use the pure-Rust semantic rebuild",
+                    entry.node_id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn manifest_at_revision(

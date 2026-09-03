@@ -69,6 +69,51 @@ impl Bundle {
         )
     }
 
+    pub fn asset_index_href_for_revision(&self, revision: u64) -> Result<String, HcdError> {
+        Ok(self.revision(revision)?.asset_index_href)
+    }
+
+    pub fn read_asset_index_for_revision(
+        &self,
+        revision: u64,
+    ) -> Result<Vec<AssetDescriptor>, HcdError> {
+        let href = self.asset_index_href_for_revision(revision)?;
+        read_json_bounded(
+            &self.resolve_href(&href)?,
+            MAX_CONTROL_PART_BYTES,
+            "revision asset index",
+        )
+    }
+
+    /// Write an unindexed immutable asset object. It becomes visible to a
+    /// revision only when an `image.replace` patch references its hash.
+    pub fn stage_asset_from_reader(
+        &self,
+        extension: &str,
+        reader: &mut (impl std::io::Read + ?Sized),
+    ) -> Result<AssetDescriptor, HcdError> {
+        let (href, hash, byte_length) =
+            write_asset_payload(&self.root, extension, reader, crate::MAX_STAGED_ASSET_BYTES)?;
+        let source_part = format!("html/uploads/{hash}");
+        let descriptor = AssetDescriptor {
+            source_part,
+            hash: hash.clone(),
+            href,
+            byte_length,
+        };
+        let path = self.root.join("assets/staged").join(format!("{hash}.json"));
+        atomic_write_json(&path, &descriptor)?;
+        Ok(descriptor)
+    }
+
+    pub(crate) fn staged_asset(&self, hash: &str) -> Result<AssetDescriptor, HcdError> {
+        read_json_bounded(
+            &self.resolve_href(&format!("assets/staged/{hash}.json"))?,
+            MAX_CONTROL_PART_BYTES,
+            "staged asset",
+        )
+    }
+
     pub fn read_chunk(&self, descriptor: &ChunkDescriptor) -> Result<String, HcdError> {
         read_text_bounded(
             &self.resolve_href(&descriptor.html_href)?,
@@ -228,6 +273,8 @@ impl BundleWriter {
             "maps/sha256",
             "annotations/sha256",
             "assets/sha256",
+            "assets/staged",
+            "assets/indexes/sha256",
             "revisions",
         ] {
             fs::create_dir_all(root.join(directory))?;
@@ -404,51 +451,7 @@ impl BundleWriter {
         extension: &str,
         reader: &mut (impl std::io::Read + ?Sized),
     ) -> Result<(String, String, u64), HcdError> {
-        let temp = tempfile::Builder::new()
-            .prefix(".hcd-asset-")
-            .tempfile_in(self.root.join("assets/sha256"))?;
-        let mut file = temp.reopen()?;
-        let mut hasher = Sha256::new();
-        let mut total = 0u64;
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let count = reader.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            file.write_all(&buffer[..count])?;
-            hasher.update(&buffer[..count]);
-            total += count as u64;
-        }
-        file.sync_all()?;
-        let hash = encode_digest(hasher.finalize().as_slice());
-        let clean_extension = extension
-            .trim_start_matches('.')
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric())
-            .collect::<String>();
-        let file_name = if clean_extension.is_empty() {
-            hash.clone()
-        } else {
-            format!("{hash}.{clean_extension}")
-        };
-        let relative = format!("assets/sha256/{file_name}");
-        let target = self.root.join(&relative);
-        if target.exists() {
-            let existing_hash = crate::hash_file(&target)?;
-            if existing_hash != hash {
-                return Err(HcdError::InvalidBundle(format!(
-                    "content-addressed asset {} contains hash {}",
-                    target.display(),
-                    existing_hash
-                )));
-            }
-            drop(temp);
-        } else {
-            temp.persist(&target)
-                .map_err(|error| HcdError::Io(error.error))?;
-        }
-        Ok((relative, hash, total))
+        write_asset_payload(&self.root, extension, reader, u64::MAX)
     }
 
     pub fn finish(mut self, mut manifest: HcdManifest) -> Result<HcdManifest, HcdError> {
@@ -458,7 +461,8 @@ impl BundleWriter {
         let bundle = Bundle {
             root: self.root.clone(),
         };
-        manifest.root_hash = finalize_root_hash(&bundle, self.root_hasher.clone())?;
+        manifest.root_hash =
+            finalize_root_hash(&bundle, self.root_hasher.clone(), "assets/index.json")?;
         manifest.annotation_root_hash = hash_bytes(b"[]");
         manifest.annotation_href = None;
         manifest.index_prefix = "indexes/rev-00000000000000000000".to_string();
@@ -478,6 +482,7 @@ impl BundleWriter {
             root_hash: manifest.root_hash.clone(),
             annotation_root_hash: manifest.annotation_root_hash.clone(),
             index_prefix: manifest.index_prefix.clone(),
+            asset_index_href: "assets/index.json".to_string(),
             created_at_epoch_ms: now_epoch_ms(),
             dirty_node_ids: Vec::new(),
             dirty_chunk_ids: Vec::new(),
@@ -639,16 +644,80 @@ pub(crate) fn hash_descriptor(hasher: &mut Sha256, descriptor: &ChunkDescriptor)
 pub(crate) fn finalize_root_hash(
     bundle: &Bundle,
     descriptor_hasher: Sha256,
+    asset_index_href: &str,
 ) -> Result<String, HcdError> {
     let descriptor_digest = descriptor_hasher.finalize();
     let styles = crate::hash::hash_file(&bundle.resolve_href("styles.css")?)?;
-    let assets = crate::hash::hash_file(&bundle.resolve_href("assets/index.json")?)?;
+    let assets = crate::hash::hash_file(&bundle.resolve_href(asset_index_href)?)?;
     let mut root = Sha256::new();
     root.update(b"officecli-hcd-body-root/1\0");
     hash_root_component(&mut root, "chunks-and-maps", descriptor_digest.as_slice());
     hash_root_component(&mut root, "styles.css", styles.as_bytes());
     hash_root_component(&mut root, "assets/index.json", assets.as_bytes());
     Ok(encode_digest(root.finalize().as_slice()))
+}
+
+fn write_asset_payload(
+    root: &Path,
+    extension: &str,
+    reader: &mut (impl std::io::Read + ?Sized),
+    maximum_bytes: u64,
+) -> Result<(String, String, u64), HcdError> {
+    fs::create_dir_all(root.join("assets/sha256"))?;
+    let temp = tempfile::Builder::new()
+        .prefix(".hcd-asset-")
+        .tempfile_in(root.join("assets/sha256"))?;
+    let mut file = temp.reopen()?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total.checked_add(count as u64).ok_or_else(|| {
+            HcdError::ResourceLimit("staged asset byte count overflowed".to_string())
+        })?;
+        if total > maximum_bytes {
+            return Err(HcdError::ResourceLimit(format!(
+                "asset exceeds the {maximum_bytes} byte limit"
+            )));
+        }
+        file.write_all(&buffer[..count])?;
+        hasher.update(&buffer[..count]);
+    }
+    file.sync_all()?;
+    let hash = encode_digest(hasher.finalize().as_slice());
+    let clean_extension = extension
+        .trim_start_matches('.')
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(16)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let file_name = if clean_extension.is_empty() {
+        hash.clone()
+    } else {
+        format!("{hash}.{clean_extension}")
+    };
+    let relative = format!("assets/sha256/{file_name}");
+    let target = root.join(&relative);
+    if target.exists() {
+        let existing_hash = crate::hash_file(&target)?;
+        if existing_hash != hash {
+            return Err(HcdError::InvalidBundle(format!(
+                "content-addressed asset {} contains hash {}",
+                target.display(),
+                existing_hash
+            )));
+        }
+        drop(temp);
+    } else {
+        temp.persist(&target)
+            .map_err(|error| HcdError::Io(error.error))?;
+    }
+    Ok((relative, hash, total))
 }
 
 fn hash_root_component(hasher: &mut Sha256, name: &str, value: &[u8]) {

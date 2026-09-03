@@ -179,7 +179,10 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             &manifest.styles_href,
         )),
     }
-    let asset_hashes = validate_assets(bundle, &mut issues);
+    let asset_index_href = bundle
+        .asset_index_href_for_revision(manifest.revision)
+        .unwrap_or_else(|_| "assets/index.json".to_string());
+    let asset_hashes = validate_assets(bundle, &asset_index_href, &mut issues);
     let annotations = load_annotations(bundle, &manifest, &mut issues);
     let mut annotation_targets: HashMap<[u8; 16], Option<usize>> = annotations
         .as_ref()
@@ -524,7 +527,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             "maps/sha256",
         ));
     }
-    match finalize_root_hash(bundle, root_hasher) {
+    match finalize_root_hash(bundle, root_hasher, &asset_index_href) {
         Ok(actual_root) if actual_root != manifest.root_hash => issues.push(issue(
             "ROOT_HASH_MISMATCH",
             format!("expected {}, actual {actual_root}", manifest.root_hash),
@@ -1301,15 +1304,19 @@ fn validate_annotation_ranges(
     }
 }
 
-fn validate_assets(bundle: &Bundle, issues: &mut Vec<ValidationIssue>) -> HashSet<String> {
+fn validate_assets(
+    bundle: &Bundle,
+    asset_index_href: &str,
+    issues: &mut Vec<ValidationIssue>,
+) -> HashSet<String> {
     let mut known_hashes = HashSet::new();
-    let index_path = match bundle.resolve_href("assets/index.json") {
+    let index_path = match bundle.resolve_href(asset_index_href) {
         Ok(path) => path,
         Err(error) => {
             issues.push(issue(
                 "ASSET_INDEX_INVALID",
                 error.to_string(),
-                "assets/index.json",
+                asset_index_href,
             ));
             return known_hashes;
         }
@@ -1321,7 +1328,7 @@ fn validate_assets(bundle: &Bundle, issues: &mut Vec<ValidationIssue>) -> HashSe
                 issues.push(issue(
                     "ASSET_INDEX_INVALID",
                     error.to_string(),
-                    "assets/index.json",
+                    asset_index_href,
                 ));
                 return known_hashes;
             }

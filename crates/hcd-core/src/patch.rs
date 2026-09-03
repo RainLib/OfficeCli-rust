@@ -4,10 +4,12 @@ use crate::bundle::{
 };
 use crate::hash::{hash_bytes, node_bloom_might_contain};
 use crate::{
-    extract_html_text_nodes, AnnotationSet, ApplyResult, FidelityWarning, HcdError, NodeStylePatch,
-    PatchBatch, PatchOperation, RevisionRecord, TextExtractEntry, TextExtractPage, TextNodeLookup,
-    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2, HCD_SCHEMA_VERSION,
-    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, AnnotationSet,
+    ApplyResult, AssetDescriptor, FidelityWarning, HcdError, ImageExtractEntry, ImageExtractPage,
+    ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeStylePatch, PatchBatch,
+    PatchOperation, RevisionRecord, TextExtractEntry, TextExtractPage, TextNodeLookup,
+    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_3,
+    HCD_SCHEMA_VERSION, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -34,6 +36,13 @@ struct Splice {
 struct StyleChange {
     style: NodeStylePatch,
     node_hash: String,
+}
+
+#[derive(Clone, Default)]
+struct ImageChange {
+    asset_hash: Option<String>,
+    geometry: Option<ImageGeometry>,
+    visual_hash: String,
 }
 
 pub fn apply_patch(
@@ -86,6 +95,7 @@ pub fn apply_patch(
 
     let splices = collect_splices(patch)?;
     let styles = collect_styles(patch)?;
+    let images = collect_image_changes(patch)?;
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -98,13 +108,14 @@ pub fn apply_patch(
         .keys()
         .cloned()
         .chain(styles.keys().cloned())
+        .chain(images.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
         .collect();
 
     let new_revision = manifest.revision + 1;
     let new_index_prefix = format!("indexes/rev-{new_revision:020}");
     let new_index_root = bundle.root().join(&new_index_prefix);
-    let content_changed = !splices.is_empty() || !styles.is_empty();
+    let content_changed = !splices.is_empty() || !styles.is_empty() || !images.is_empty();
     if content_changed {
         fs::create_dir_all(&new_index_root)?;
     }
@@ -114,6 +125,32 @@ pub fn apply_patch(
     let mut dirty_chunks = BTreeSet::new();
     let mut dirty_parts = BTreeSet::new();
     let mut root_hasher = Sha256::new();
+    let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
+    let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
+    let mut asset_by_hash: HashMap<String, AssetDescriptor> = asset_index
+        .iter()
+        .map(|asset| (asset.hash.clone(), asset.clone()))
+        .collect();
+    for change in images.values() {
+        let Some(hash) = change.asset_hash.as_deref() else {
+            continue;
+        };
+        if asset_by_hash.contains_key(hash) {
+            continue;
+        }
+        let staged = bundle.staged_asset(hash)?;
+        validate_staged_asset(bundle, &staged, hash)?;
+        asset_by_hash.insert(hash.to_string(), staged.clone());
+        asset_index.push(staged);
+    }
+    asset_index.sort_by(|left, right| left.hash.cmp(&right.hash));
+    asset_index.dedup_by(|left, right| left.hash == right.hash);
+    let asset_index_href =
+        if asset_index == bundle.read_asset_index_for_revision(manifest.revision)? {
+            current_asset_index_href
+        } else {
+            bundle.write_json_object("assets/indexes", &asset_index)?.0
+        };
 
     for page_number in 0..manifest.index_page_count {
         let mut page = bundle.read_index_page(&manifest, page_number)?;
@@ -130,6 +167,7 @@ pub fn apply_patch(
             let mut source_map = bundle.read_map(descriptor)?;
             let mut html = bundle.read_chunk(descriptor)?;
             let mut html_nodes = extract_html_text_nodes(&html)?;
+            let mut image_nodes = extract_html_image_nodes(&html)?;
             let mut chunk_changed = false;
             for entry in &mut source_map.entries {
                 if !target_node_ids.contains(&entry.node_id) {
@@ -149,6 +187,67 @@ pub fn apply_patch(
                     )));
                 }
                 found_nodes.insert(entry.node_id.clone(), current_text.chars().count());
+                if entry.source.node_kind == "image"
+                    && (styles.contains_key(&entry.node_id) || splices.contains_key(&entry.node_id))
+                {
+                    return Err(HcdError::Unsupported(format!(
+                        "image node {} accepts image.replace/image.geometry, not text or node.style operations",
+                        entry.node_id
+                    )));
+                }
+                if let Some(change) = images.get(&entry.node_id) {
+                    if entry.source.node_kind != "image" {
+                        return Err(HcdError::Unsupported(format!(
+                            "node {} is not an image node",
+                            entry.node_id
+                        )));
+                    }
+                    let current = image_nodes.get(&entry.node_id).ok_or_else(|| {
+                        HcdError::InvalidBundle(format!(
+                            "mapped image node {} is missing visual state",
+                            entry.node_id
+                        ))
+                    })?;
+                    if current.visual_hash != change.visual_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "image node {} expected visual hash {}, actual {}",
+                            entry.node_id, change.visual_hash, current.visual_hash
+                        )));
+                    }
+                    let asset_hash = change
+                        .asset_hash
+                        .clone()
+                        .or_else(|| current.asset_hash.clone());
+                    let geometry = change.geometry.clone().or_else(|| current.geometry.clone());
+                    if let Some(hash) = change.asset_hash.as_deref() {
+                        let asset = asset_by_hash.get(hash).ok_or_else(|| {
+                            HcdError::InvalidBundle(format!("asset {hash} is unavailable"))
+                        })?;
+                        replace_image_asset(&mut html, &entry.node_id, asset)?;
+                    }
+                    if let Some(geometry) = change.geometry.as_ref() {
+                        replace_image_geometry(&mut html, &entry.node_id, geometry)?;
+                    }
+                    let new_visual_hash =
+                        image_visual_hash(asset_hash.as_deref(), geometry.as_ref());
+                    set_element_attribute(
+                        &mut html,
+                        &entry.node_id,
+                        "data-hcd-visual-hash",
+                        &new_visual_hash,
+                    )?;
+                    image_nodes.insert(
+                        entry.node_id.clone(),
+                        crate::HtmlImageNode {
+                            visual_hash: new_visual_hash,
+                            asset_hash,
+                            geometry,
+                        },
+                    );
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
                 let style_change = styles.get(&entry.node_id);
                 if let Some(change) = style_change {
                     if !entry.source.editable {
@@ -230,7 +329,7 @@ pub fn apply_patch(
     validate_annotation_ranges(patch, &found_nodes)?;
     let (annotation_href, annotation_root_hash) = apply_annotations(bundle, &manifest, patch)?;
     let root_hash = if content_changed {
-        finalize_root_hash(bundle, root_hasher)?
+        finalize_root_hash(bundle, root_hasher, &asset_index_href)?
     } else {
         manifest.root_hash.clone()
     };
@@ -261,6 +360,12 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             })
+            .chain(images.keys().map(|node_id| FidelityWarning {
+                code: "HCD_IMAGE_PATCH_SEMANTIC_EXPORT".to_string(),
+                message: "image changes are canonical in HCD and pure-Rust semantic exports; source-backed Office/PDF export rejects them before writing until format-specific media rewrites are implemented".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .collect(),
         idempotent_replay: false,
     };
@@ -275,6 +380,7 @@ pub fn apply_patch(
         root_hash,
         annotation_root_hash,
         index_prefix: manifest.index_prefix.clone(),
+        asset_index_href,
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: result.dirty_node_ids.clone(),
         dirty_chunk_ids: result.dirty_chunk_ids.clone(),
@@ -307,6 +413,10 @@ pub fn extract_text_page(
         let html_nodes = extract_html_text_nodes(&html)?;
         while entry_offset < source_map.entries.len() && entries.len() < limit {
             let entry = &source_map.entries[entry_offset];
+            if entry.source.node_kind == "image" {
+                entry_offset += 1;
+                continue;
+            }
             let text = html_nodes.get(&entry.node_id).ok_or_else(|| {
                 HcdError::InvalidBundle(format!(
                     "mapped node {} is missing from canonical HTML",
@@ -367,6 +477,9 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
             let Some(entry) = matches.next() else {
                 continue;
             };
+            if entry.source.node_kind == "image" {
+                continue;
+            }
             if matches.next().is_some() || found.is_some() {
                 return Err(HcdError::InvalidBundle(format!(
                     "node ID {node_id} occurs in more than one source map"
@@ -404,6 +517,113 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
     })
 }
 
+pub fn get_image_node(bundle: &Bundle, node_id: &str) -> Result<ImageNodeLookup, HcdError> {
+    validate_node_id(node_id)?;
+    let manifest = bundle.manifest()?;
+    let mut found = None;
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(&manifest, page_number)?;
+        for descriptor in &page.chunks {
+            if !node_bloom_might_contain(&descriptor.node_bloom, node_id) {
+                continue;
+            }
+            let source_map = bundle.read_map(descriptor)?;
+            let Some(entry) = source_map
+                .entries
+                .iter()
+                .find(|entry| entry.node_id == node_id && entry.source.node_kind == "image")
+            else {
+                continue;
+            };
+            if found.is_some() {
+                return Err(HcdError::InvalidBundle(format!(
+                    "image node ID {node_id} occurs in more than one source map"
+                )));
+            }
+            let html = bundle.read_chunk(descriptor)?;
+            let images = extract_html_image_nodes(&html)?;
+            let image = images.get(node_id).ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "mapped image node {node_id} is missing from canonical HTML"
+                ))
+            })?;
+            found = Some(ImageNodeLookup {
+                document_id: manifest.document_id.clone(),
+                revision: manifest.revision,
+                chunk_id: descriptor.chunk_id.clone(),
+                node: ImageNodeState {
+                    node_id: node_id.to_string(),
+                    visual_hash: image.visual_hash.clone(),
+                    asset_hash: image.asset_hash.clone(),
+                    geometry: image.geometry.clone(),
+                    source: entry.source.clone(),
+                },
+            });
+        }
+    }
+    found.ok_or_else(|| HcdError::NodeNotFound(node_id.to_string()))
+}
+
+pub fn extract_image_page(
+    bundle: &Bundle,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<ImageExtractPage, HcdError> {
+    let manifest = bundle.manifest()?;
+    let limit = limit.clamp(1, 10_000);
+    let (mut sequence, mut entry_offset) = parse_cursor(cursor)?;
+    let mut entries = Vec::with_capacity(limit.min(256));
+    while sequence < manifest.chunk_count && entries.len() < limit {
+        let page_number = sequence / INDEX_PAGE_SIZE;
+        let descriptor_offset = sequence % INDEX_PAGE_SIZE;
+        let page = bundle.read_index_page(&manifest, page_number)?;
+        let descriptor = page.chunks.get(descriptor_offset).ok_or_else(|| {
+            HcdError::InvalidBundle(format!("missing chunk descriptor at sequence {sequence}"))
+        })?;
+        let source_map = bundle.read_map(descriptor)?;
+        let mut images = None;
+        while entry_offset < source_map.entries.len() && entries.len() < limit {
+            let entry = &source_map.entries[entry_offset];
+            entry_offset += 1;
+            if entry.source.node_kind != "image" {
+                continue;
+            }
+            let images = match &images {
+                Some(images) => images,
+                None => images.insert(extract_html_image_nodes(&bundle.read_chunk(descriptor)?)?),
+            };
+            let image = images.get(&entry.node_id).ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "mapped image node {} is missing from canonical HTML",
+                    entry.node_id
+                ))
+            })?;
+            entries.push(ImageExtractEntry {
+                chunk_id: descriptor.chunk_id.clone(),
+                node: ImageNodeState {
+                    node_id: entry.node_id.clone(),
+                    visual_hash: image.visual_hash.clone(),
+                    asset_hash: image.asset_hash.clone(),
+                    geometry: image.geometry.clone(),
+                    source: entry.source.clone(),
+                },
+            });
+        }
+        if entry_offset >= source_map.entries.len() {
+            sequence += 1;
+            entry_offset = 0;
+        }
+    }
+    let next_cursor =
+        (sequence < manifest.chunk_count).then(|| format!("{sequence}:{entry_offset}"));
+    Ok(ImageExtractPage {
+        document_id: manifest.document_id,
+        revision: manifest.revision,
+        entries,
+        next_cursor,
+    })
+}
+
 fn validate_patch_header(
     manifest: &crate::HcdManifest,
     patch: &PatchBatch,
@@ -437,6 +657,7 @@ fn validate_patch_identity(
 ) -> Result<(), HcdError> {
     if patch.schema_version != HCD_PATCH_SCHEMA_VERSION
         && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_2
+        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
     {
         return Err(HcdError::InvalidPatch(format!(
             "unsupported schema version {}",
@@ -495,7 +716,7 @@ fn validate_patch_identity(
                 style,
                 precondition,
             } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_2 {
+                if patch.schema_version == HCD_PATCH_SCHEMA_VERSION {
                     return Err(HcdError::InvalidPatch(
                         "node.style requires schemaVersion hcd-patch/2".to_string(),
                     ));
@@ -503,6 +724,34 @@ fn validate_patch_identity(
                 validate_node_id(node_id)?;
                 validate_sha256("nodeHash", &precondition.node_hash)?;
                 validate_node_style(style)?;
+            }
+            PatchOperation::ImageReplace {
+                node_id,
+                asset_hash,
+                precondition,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3 {
+                    return Err(HcdError::InvalidPatch(
+                        "image.replace requires schemaVersion hcd-patch/3".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("assetHash", asset_hash)?;
+                validate_sha256("visualHash", &precondition.visual_hash)?;
+            }
+            PatchOperation::ImageGeometry {
+                node_id,
+                geometry,
+                precondition,
+            } => {
+                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3 {
+                    return Err(HcdError::InvalidPatch(
+                        "image.geometry requires schemaVersion hcd-patch/3".to_string(),
+                    ));
+                }
+                validate_node_id(node_id)?;
+                validate_sha256("visualHash", &precondition.visual_hash)?;
+                crate::html::validate_image_geometry(geometry)?;
             }
             PatchOperation::AnnotationUpsert { annotation } => {
                 validate_annotation(annotation)?;
@@ -705,6 +954,54 @@ fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, H
     Ok(styles)
 }
 
+fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageChange>, HcdError> {
+    let mut images: BTreeMap<String, ImageChange> = BTreeMap::new();
+    for operation in &patch.operations {
+        let (node_id, visual_hash) = match operation {
+            PatchOperation::ImageReplace {
+                node_id,
+                precondition,
+                ..
+            }
+            | PatchOperation::ImageGeometry {
+                node_id,
+                precondition,
+                ..
+            } => (node_id, &precondition.visual_hash),
+            _ => continue,
+        };
+        let change = images
+            .entry(node_id.clone())
+            .or_insert_with(|| ImageChange {
+                visual_hash: visual_hash.clone(),
+                ..ImageChange::default()
+            });
+        if change.visual_hash != *visual_hash {
+            return Err(HcdError::InvalidPatch(format!(
+                "image operations for {node_id} use different visualHash preconditions"
+            )));
+        }
+        match operation {
+            PatchOperation::ImageReplace { asset_hash, .. } => {
+                if change.asset_hash.replace(asset_hash.clone()).is_some() {
+                    return Err(HcdError::InvalidPatch(format!(
+                        "patch contains more than one image.replace for {node_id}"
+                    )));
+                }
+            }
+            PatchOperation::ImageGeometry { geometry, .. } => {
+                if change.geometry.replace(geometry.clone()).is_some() {
+                    return Err(HcdError::InvalidPatch(format!(
+                        "patch contains more than one image.geometry for {node_id}"
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(images)
+}
+
 fn splice_text(text: &str, splices: &[Splice]) -> Result<String, HcdError> {
     let mut ordered = splices.to_vec();
     ordered.sort_by_key(|splice| splice.start);
@@ -827,6 +1124,222 @@ fn apply_node_style(
     Ok(())
 }
 
+fn validate_staged_asset(
+    bundle: &Bundle,
+    asset: &AssetDescriptor,
+    expected_hash: &str,
+) -> Result<(), HcdError> {
+    if asset.hash != expected_hash {
+        return Err(HcdError::InvalidBundle(format!(
+            "staged asset descriptor hash {} does not match {expected_hash}",
+            asset.hash
+        )));
+    }
+    let path = bundle.resolve_href(&asset.href)?;
+    let metadata = fs::metadata(&path)?;
+    if metadata.len() != asset.byte_length {
+        return Err(HcdError::InvalidBundle(format!(
+            "staged asset {expected_hash} expected {} bytes, found {}",
+            asset.byte_length,
+            metadata.len()
+        )));
+    }
+    let actual = crate::hash_file(path)?;
+    if actual != expected_hash {
+        return Err(HcdError::InvalidBundle(format!(
+            "staged asset {expected_hash} contains hash {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn replace_image_asset(
+    html: &mut String,
+    node_id: &str,
+    asset: &AssetDescriptor,
+) -> Result<(), HcdError> {
+    set_element_attribute(html, node_id, "data-hcd-asset-hash", &asset.hash)?;
+    set_element_attribute(html, node_id, "data-hcd-image-asset-patched", "true")?;
+    let (_, target_end) = element_start_tag_range(html, node_id)?;
+    let target_tag = &html[..=target_end];
+    let image_start = if target_tag[target_tag.rfind('<').unwrap_or(0)..].starts_with("<img") {
+        target_tag.rfind('<').unwrap_or(0)
+    } else {
+        html[target_end + 1..]
+            .find("<img")
+            .map(|offset| target_end + 1 + offset)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle(format!("image node {node_id} has no img child"))
+            })?
+    };
+    let image_end = html[image_start..]
+        .find('>')
+        .map(|offset| image_start + offset)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle(format!("image node {node_id} img is not closed"))
+        })?;
+    set_attribute_in_range(
+        html,
+        image_start,
+        image_end,
+        "src",
+        &format!("asset://sha256/{}", asset.hash),
+    )?;
+    let image_end = html[image_start..]
+        .find('>')
+        .map(|offset| image_start + offset)
+        .ok_or_else(|| {
+            HcdError::InvalidBundle(format!("image node {node_id} img is not closed"))
+        })?;
+    set_attribute_in_range(
+        html,
+        image_start,
+        image_end,
+        "data-hcd-asset-href",
+        &asset.href,
+    )
+}
+
+fn replace_image_geometry(
+    html: &mut String,
+    node_id: &str,
+    geometry: &ImageGeometry,
+) -> Result<(), HcdError> {
+    crate::html::validate_image_geometry(geometry)?;
+    set_element_attribute(html, node_id, "data-hcd-image-geometry-patched", "true")?;
+    for (name, value) in [
+        ("data-hcd-x", canonical_f64(geometry.x)),
+        ("data-hcd-y", canonical_f64(geometry.y)),
+        ("data-hcd-width", canonical_f64(geometry.width)),
+        ("data-hcd-height", canonical_f64(geometry.height)),
+    ] {
+        set_element_attribute(html, node_id, name, &value)?;
+    }
+    set_element_attribute(
+        html,
+        node_id,
+        "data-hcd-geometry-unit",
+        match geometry.unit {
+            ImageGeometryUnit::Emu => "emu",
+            ImageGeometryUnit::Pt => "pt",
+        },
+    )?;
+    if geometry.unit == ImageGeometryUnit::Emu {
+        for (name, value) in [
+            ("data-hcd-x-emu", canonical_f64(geometry.x)),
+            ("data-hcd-y-emu", canonical_f64(geometry.y)),
+            ("data-hcd-width-emu", canonical_f64(geometry.width)),
+            ("data-hcd-height-emu", canonical_f64(geometry.height)),
+        ] {
+            set_element_attribute(html, node_id, name, &value)?;
+        }
+    } else {
+        set_element_attribute(
+            html,
+            node_id,
+            "data-hcd-bbox",
+            &format!(
+                "{},{},{},{}",
+                canonical_f64(geometry.x),
+                canonical_f64(geometry.y),
+                canonical_f64(geometry.width),
+                canonical_f64(geometry.height)
+            ),
+        )?;
+    }
+    let scale = match geometry.unit {
+        ImageGeometryUnit::Emu => 96.0 / 914_400.0,
+        ImageGeometryUnit::Pt => 1.0,
+    };
+    let suffix = match geometry.unit {
+        ImageGeometryUnit::Emu => "px",
+        ImageGeometryUnit::Pt => "pt",
+    };
+    let mut properties = BTreeMap::new();
+    properties.insert("position".to_string(), "absolute".to_string());
+    properties.insert(
+        "left".to_string(),
+        format!("{}{suffix}", canonical_f64(geometry.x * scale)),
+    );
+    properties.insert(
+        "top".to_string(),
+        format!("{}{suffix}", canonical_f64(geometry.y * scale)),
+    );
+    properties.insert(
+        "width".to_string(),
+        format!("{}{suffix}", canonical_f64(geometry.width * scale)),
+    );
+    properties.insert(
+        "height".to_string(),
+        format!("{}{suffix}", canonical_f64(geometry.height * scale)),
+    );
+    let marker = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
+    update_start_tag_style(html, &marker, &properties, false)
+}
+
+fn set_element_attribute(
+    html: &mut String,
+    node_id: &str,
+    name: &str,
+    value: &str,
+) -> Result<(), HcdError> {
+    let (start, end) = element_start_tag_range(html, node_id)?;
+    set_attribute_in_range(html, start, end, name, value)
+}
+
+fn element_start_tag_range(html: &str, node_id: &str) -> Result<(usize, usize), HcdError> {
+    let marker = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
+    let offset = html
+        .find(&marker)
+        .ok_or_else(|| HcdError::InvalidBundle(format!("image node {node_id} is missing")))?;
+    let start = html[..offset]
+        .rfind('<')
+        .ok_or_else(|| HcdError::InvalidBundle(format!("image node {node_id} has no start tag")))?;
+    let end = html[offset..]
+        .find('>')
+        .map(|relative| offset + relative)
+        .ok_or_else(|| HcdError::InvalidBundle(format!("image node {node_id} is not closed")))?;
+    Ok((start, end))
+}
+
+fn set_attribute_in_range(
+    html: &mut String,
+    tag_start: usize,
+    tag_end: usize,
+    name: &str,
+    value: &str,
+) -> Result<(), HcdError> {
+    let tag = &html[tag_start..=tag_end];
+    let marker = format!(" {name}=\"");
+    let escaped = escape_attribute(value);
+    let mut replacement = tag.to_string();
+    if let Some(start) = replacement.find(&marker) {
+        let value_start = start + marker.len();
+        let value_end = replacement[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .ok_or_else(|| HcdError::InvalidBundle(format!("attribute {name} is not closed")))?;
+        replacement.replace_range(value_start..value_end, &escaped);
+    } else {
+        let insertion = replacement
+            .rfind("/>")
+            .unwrap_or_else(|| replacement.len().saturating_sub(1));
+        replacement.insert_str(insertion, &format!(" {name}=\"{escaped}\""));
+    }
+    html.replace_range(tag_start..=tag_end, &replacement);
+    Ok(())
+}
+
+fn canonical_f64(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    format!("{value:.6}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
 fn update_start_tag_style(
     html: &mut String,
     marker: &str,
@@ -945,7 +1458,10 @@ fn apply_annotations(
                 set.annotations
                     .retain(|annotation| annotation.annotation_id != *annotation_id);
             }
-            PatchOperation::TextSplice { .. } | PatchOperation::NodeStyle { .. } => {}
+            PatchOperation::TextSplice { .. }
+            | PatchOperation::NodeStyle { .. }
+            | PatchOperation::ImageReplace { .. }
+            | PatchOperation::ImageGeometry { .. } => {}
         }
     }
     set.annotations

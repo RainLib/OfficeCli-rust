@@ -344,7 +344,30 @@ pub(crate) fn checked_export_state(
     let manifest = manifest_at_revision(bundle, &head, revision)?;
     let (dirty_parts, dirty_nodes) = dirty_state_through(bundle, revision)?;
     reject_presentation_style_source_export(bundle, &manifest, &dirty_nodes)?;
+    reject_image_source_export(bundle, &manifest, &dirty_nodes)?;
     Ok((manifest, revision, dirty_parts, dirty_nodes))
+}
+
+fn reject_image_source_export(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_nodes: &HashSet<String>,
+) -> Result<(), HcdError> {
+    for page_number in 0..manifest.index_page_count {
+        let page = bundle.read_index_page(manifest, page_number)?;
+        for descriptor in page.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            if let Some(entry) = source_map.entries.iter().find(|entry| {
+                dirty_nodes.contains(&entry.node_id) && entry.source.node_kind == "image"
+            }) {
+                return Err(HcdError::Unsupported(format!(
+                    "revision changes image node {}; source-backed {} image rewrite is not implemented and export was stopped before writing output; omit --source to use the pure-Rust semantic rebuild",
+                    entry.node_id, manifest.source.format
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn reject_presentation_style_source_export(

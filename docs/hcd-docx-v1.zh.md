@@ -107,6 +107,30 @@ officecli hdoc extract-text document.hcd \
 # 使用稳定 nodeId 随机读取当前 revision 的单个文本节点，不扫描/缓冲全文
 officecli hdoc get-node document.hcd n_0123456789abcdef0123456789abcdef --json
 
+# 分页列出 append-only revision，并读取一条 revision 记录
+officecli hdoc list-revisions document.hcd --cursor 0 --limit 100 --json
+officecli hdoc get-revision document.hcd 1 --json
+
+# 校验 asset 的 size/hash；可选地原子复制到新路径
+ASSET_HASH=$(jq -r '.[0].hash' document.hcd/assets/index.json)
+officecli hdoc get-asset document.hcd "$ASSET_HASH" --json
+officecli hdoc get-asset document.hcd "$ASSET_HASH" --output image.png --json
+
+# 分页发现图片节点，并读取一个节点当前的 asset/geometry/visualHash
+officecli hdoc list-images document.hcd --limit 100 --json
+officecli hdoc get-image document.hcd n_0123456789abcdef0123456789abcdef --json
+
+# 暂存替换图片；暂存本身不推进 revision，也不改变正文 root hash
+officecli hdoc put-asset document.hcd replacement.png --json
+
+# 只物化从第 128 个 chunk 开始的 16 个 chunk；省略窗口参数仍输出全文
+officecli hdoc render-html document.hcd \
+  --output partial.html \
+  --revision 1 \
+  --chunk-start 128 \
+  --chunk-limit 16 \
+  --json
+
 officecli hdoc apply document.hcd \
   --patch patch.json \
   --expected-revision 0 \
@@ -195,6 +219,47 @@ HCD 脱敏识别 annotation 默认不写回源格式。导出后会重新打开�
 4. 前端按 region 和 sequence 虚拟滚动。通用 chunk descriptor 的 `continuation=true` 表示同一 source part 的后续 chunk；任何跨 fragment 的 canonical 表格必须按 HTML 内相同的 `data-hcd-table-node-id` 和连续 `data-hcd-row-start/end` 拼接，并以 `data-hcd-table-final=true` 判断末片，不能仅依赖 chunk continuation。
 5. patch 成功后先上传新内容寻址对象和 revision，再由 Java 数据库 CAS 推进 authoritative head。
 6. 任意 `failed` 或子进程异常都使整个导入失效，已上传的无引用对象由后台 GC 清理。
+
+仓库中的 `examples/hdoc/lazy-viewer` 是通用只读参考实现：index page 渐进读取，视口前后预取 chunk，超过驻留上限后用等高 placeholder 卸载正文，重新进入视口时按 `htmlHash` 校验并恢复 canonical fragment，因此 nodeId 不因卸载而变化。它对 PDF/PPTX 的自然 page/slide 分片最直接；DOCX 是语义 chunk 虚拟化，不等于 Word 物理页。XLSX 使用 `examples/hdoc/xlsx-univer-viewer`，按 sheet/row window 进入 Univer Canvas 并保留 cell→nodeId 映射。
+
+`hdoc render-html --chunk-start/--chunk-limit` 生成可离线打开的部分独立 HTML；默认仍为全量输出。部分 HTML 的 `firstChunk/chunkCount/totalChunkCount/nextChunk` 可供 Java API 返回下一窗口游标。完整 `render-html` 与部分 `render-html` 都只在 Rust 端常驻一个有界 chunk；区别是完整输出最终仍包含全部 DOM，而 lazy viewer 只下载并驻留视口附近的 canonical chunk。
+
+### 图片节点与 `hcd-patch/3`
+
+DOCX、XLSX、PPTX、PDF 中可定位的图片进入 source-map，使用稳定 `nodeId`。图片正文与几何状态使用独立 `visualHash`，不会把二进制内容误当作文本 `nodeHash`。`list-images` 可分页返回 `nodeId`、`assetHash`、完整矩形和单位；Office 坐标使用 `emu`，PDF 固定布局使用 `pt`。
+
+`put-asset` 仅接受经过文件头检查的 PNG/JPEG/GIF/WebP，单文件最多 64 MiB。它只写入不可变暂存对象；`image.replace` 成功时，新 asset 才进入该 revision 的内容寻址 asset index。旧 revision 仍读取自己的 asset index。
+
+```json
+{
+  "schemaVersion": "hcd-patch/3",
+  "documentId": "document-id",
+  "patchId": "replace-picture-001",
+  "baseRevision": 0,
+  "operations": [
+    {
+      "op": "image.replace",
+      "nodeId": "n_0123456789abcdef0123456789abcdef",
+      "assetHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "precondition": { "visualHash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" }
+    },
+    {
+      "op": "image.geometry",
+      "nodeId": "n_0123456789abcdef0123456789abcdef",
+      "geometry": {
+        "x": 914400,
+        "y": 457200,
+        "width": 2743200,
+        "height": 1371600,
+        "unit": "emu"
+      },
+      "precondition": { "visualHash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" }
+    }
+  ]
+}
+```
+
+同一 patch 中的替换和几何操作使用修改前相同的 `visualHash`，作为一次原子修改提交。同一图片已被其他 revision 修改时返回冲突。当前图片 patch 可在 HCD HTML 和不带 `--source` 的纯 Rust 语义导出中生效；DOCX/XLSX/PPTX/PDF 的原包增量媒体重写尚未实现，带 `--source` 导出会在创建输出文件前明确失败，不会静默保留旧图片。
 
 ## 后续保真优先级
 

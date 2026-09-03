@@ -367,7 +367,7 @@ where
     let theme_colors = presentation_theme_colors(&mut archive)?;
     let mut writer = BundleWriter::create(output)?;
     writer.write_styles(
-        ".hcd-slide{display:block;overflow:hidden;background:#fff;font-family:Arial,'Helvetica Neue','PingFang SC','Microsoft YaHei',sans-serif}.hcd-slide-shape{box-sizing:border-box;white-space:pre-wrap}.hcd-slide-picture,.hcd-slide-chart{box-sizing:border-box;overflow:hidden}.hcd-slide-picture img,.hcd-slide-chart img{display:block;width:100%;height:100%;object-fit:contain}.hcd-slide-table-frame{box-sizing:border-box;overflow:hidden}.hcd-ppt-table{border-collapse:collapse}.hcd-ppt-table td{box-sizing:border-box;overflow:hidden;vertical-align:top}.hcd-slide-text{white-space:pre-wrap;margin:0}.hcd-ppt-run{white-space:pre-wrap}.hcd-empty-slide{min-height:10em}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
+        ".hcd-slide{display:block;overflow:hidden;background:#fff;font-family:Arial,'Helvetica Neue','PingFang SC','Microsoft YaHei',sans-serif}.hcd-slide-shape{box-sizing:border-box;white-space:pre-wrap}.hcd-slide-picture,.hcd-slide-chart{box-sizing:border-box;overflow:hidden}.hcd-slide-picture img,.hcd-slide-chart img{display:block;width:100%;height:100%;object-fit:contain}.hcd-slide-table-frame{box-sizing:border-box;overflow:hidden}.hcd-ppt-table{border-collapse:collapse}.hcd-ppt-table td{box-sizing:border-box;overflow:hidden;vertical-align:top}.hcd-slide-text{white-space:pre-wrap;margin:0}.hcd-ppt-run{white-space:pre-wrap}.hcd-empty-slide{min-height:10em}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:not([data-hcd-node-kind=\"image\"]):hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
     )?;
     let mut assets = import_assets(&mut archive, &writer, emit)?;
     assets.extend(import_chart_assets(&mut archive, &writer, emit)?);
@@ -1888,15 +1888,41 @@ fn finish_picture(
         .clone()
         .unwrap_or_else(|| picture.ordinal.to_string());
     let node_id = stable_node_id(&[document_id, part, "picture", &identity]);
+    let asset = picture
+        .relationship_id
+        .as_ref()
+        .and_then(|id| asset_relationships.get(id));
+    let geometry = match (picture.x, picture.y, picture.width, picture.height) {
+        (Some(x), Some(y), Some(width), Some(height)) => Some(hcd_core::ImageGeometry {
+            x: x as f64,
+            y: y as f64,
+            width: width as f64,
+            height: height as f64,
+            unit: hcd_core::ImageGeometryUnit::Emu,
+        }),
+        _ => None,
+    };
+    let node_hash = hash_bytes(b"");
+    let visual_hash =
+        hcd_core::image_visual_hash(asset.map(|asset| asset.hash.as_str()), geometry.as_ref());
     let source_path = picture
         .source_id
         .as_deref()
         .map(|source_id| format!("/picture[@id={}]", escape_attribute(source_id)))
         .unwrap_or_else(|| format!("/picture[{}]", picture.ordinal));
     let mut attributes = format!(
-        " data-hcd-id=\"{node_id}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\"",
+        " data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-visual-hash=\"{visual_hash}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"true\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\"",
         escape_attribute(part)
     );
+    if let Some(asset) = asset {
+        attributes.push_str(&format!(" data-hcd-asset-hash=\"{}\"", asset.hash));
+    }
+    if let Some(geometry) = &geometry {
+        attributes.push_str(&format!(
+            " data-hcd-x=\"{}\" data-hcd-y=\"{}\" data-hcd-width=\"{}\" data-hcd-height=\"{}\" data-hcd-geometry-unit=\"emu\"",
+            geometry.x, geometry.y, geometry.width, geometry.height
+        ));
+    }
     if let Some(source_id) = &picture.source_id {
         attributes.push_str(&format!(
             " data-hcd-picture-id=\"{}\"",
@@ -1941,10 +1967,7 @@ fn finish_picture(
         ),
         _ => String::new(),
     };
-    let image = picture
-        .relationship_id
-        .as_ref()
-        .and_then(|id| asset_relationships.get(id))
+    let image = asset
         .map(|asset| {
             format!(
                 "<img src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\" alt=\"{}\"/>",
@@ -1956,7 +1979,18 @@ fn finish_picture(
         .unwrap_or_default();
     RenderedSlideBlock {
         html: format!("<div class=\"hcd-slide-picture\"{attributes}{style}>{image}</div>"),
-        entries: Vec::new(),
+        entries: vec![NodeMapEntry {
+            node_id,
+            node_hash,
+            source: SourceAnchor {
+                part: part.to_string(),
+                text_ordinal: picture.ordinal as u64,
+                paragraph_id: Some(source_path),
+                text_id: asset.map(|asset| asset.source_part.clone()),
+                node_kind: "image".to_string(),
+                editable: true,
+            },
+        }],
     }
 }
 
@@ -3272,7 +3306,7 @@ mod tests {
         assert!(html.contains("data-hcd-picture-id=\"4\""));
         assert!(html.contains("data-hcd-picture-name=\"Picture &amp; One\""));
         assert!(html.contains("data-hcd-node-kind=\"image\""));
-        assert!(html.contains("data-hcd-editable=\"false\""));
+        assert!(html.contains("data-hcd-editable=\"true\""));
         assert!(html.contains("data-hcd-source-part=\"ppt/slides/slide2.xml\""));
         assert!(html.contains("data-hcd-source-path=\"/picture[@id=4]\""));
         assert!(html.contains("<img src=\"asset://sha256/"));

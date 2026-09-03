@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OfficeCLI HCD Lazy Viewer</title>
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header class="toolbar">
+    <strong>OfficeCLI HCD</strong>
+    <label>Bundle URL <input id="bundle" value="/examples/hdoc/docx-suite/output/hcd/"></label>
+    <label>Revision <input id="revision" type="number" min="0" placeholder="head"></label>
+    <label>驻留分片 <input id="cache" type="number" min="2" max="64" value="12"></label>
+    <button id="load" type="button">加载</button>
+    <output id="status" aria-live="polite">等待加载</output>
+  </header>
+  <main class="viewer-shell">
+    <iframe id="viewer" title="HCD lazy preview"></iframe>
+  </main>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

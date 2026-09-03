@@ -134,8 +134,18 @@ where
         let left = x - self.page_llx;
         let top = self.page_height - (y - self.page_lly) - height;
         let kind = xobject_kind.as_str();
+        let geometry = hcd_core::ImageGeometry {
+            x: left as f64,
+            y: top as f64,
+            width: width as f64,
+            height: height as f64,
+            unit: hcd_core::ImageGeometryUnit::Pt,
+        };
+        let node_hash = hash_bytes(b"");
+        let visual_hash = hcd_core::image_visual_hash(hash.as_deref(), Some(&geometry));
         let common = format!(
-            "class=\"hcd-pdf-image hcd-pdf-visual-node\" data-hcd-id=\"{node_id}\" data-hcd-node-kind=\"pdf-{kind}\" data-hcd-source-path=\"{source_path}\" data-hcd-source-order=\"{index}\" data-hcd-xobject=\"{}\" data-hcd-mapping=\"source\" data-hcd-geometry=\"xobject-ctm\" data-hcd-bbox=\"{x},{y},{width},{height}\" data-hcd-transform=\"{},{},{},{},{},{}\" style=\"position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{width:.1}pt;height:{height:.1}pt\"",
+            "class=\"hcd-pdf-image hcd-pdf-visual-node\" data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-visual-hash=\"{visual_hash}\"{} data-hcd-node-kind=\"pdf-{kind}\" data-hcd-editable=\"true\" data-hcd-source-path=\"{source_path}\" data-hcd-source-order=\"{index}\" data-hcd-xobject=\"{}\" data-hcd-mapping=\"source\" data-hcd-geometry=\"xobject-ctm\" data-hcd-x=\"{left}\" data-hcd-y=\"{top}\" data-hcd-width=\"{width}\" data-hcd-height=\"{height}\" data-hcd-geometry-unit=\"pt\" data-hcd-bbox=\"{left},{top},{width},{height}\" data-hcd-source-bbox=\"{x},{y},{width},{height}\" data-hcd-transform=\"{},{},{},{},{},{}\" style=\"position:absolute;left:{left:.1}pt;top:{top:.1}pt;width:{width:.1}pt;height:{height:.1}pt\"",
+            hash.as_ref().map(|hash| format!(" data-hcd-asset-hash=\"{hash}\"")).unwrap_or_default(),
             escape_attribute(&xobject_name),
             transform[0],
             transform[1],
@@ -157,6 +167,18 @@ where
             self.flush()?;
         }
         self.html.push_str(&block);
+        self.entries.push(NodeMapEntry {
+            node_id,
+            node_hash,
+            source: SourceAnchor {
+                part,
+                text_ordinal: index as u64,
+                paragraph_id: Some(source_path),
+                text_id: None,
+                node_kind: "image".to_string(),
+                editable: true,
+            },
+        });
         self.blocks += 1;
         Ok(())
     }
@@ -887,12 +909,27 @@ mod tests {
         assert!(html.contains("data-hcd-geometry=\"xobject-ctm\""));
 
         let source_map = bundle.read_map(&index.chunks[0]).unwrap();
-        assert_eq!(source_map.entries.len(), 1);
+        assert_eq!(source_map.entries.len(), 2);
+        let text_entry = source_map
+            .entries
+            .iter()
+            .find(|entry| entry.source.node_kind == "pdf-text")
+            .expect("mapped PDF text node");
         assert_eq!(
-            source_map.entries[0].source.paragraph_id.as_deref(),
+            text_entry.source.paragraph_id.as_deref(),
             Some("/page[1]/text[1]")
         );
-        assert!(source_map.entries[0].source.editable);
+        assert!(text_entry.source.editable);
+        let image_entry = source_map
+            .entries
+            .iter()
+            .find(|entry| entry.source.node_kind == "image")
+            .expect("mapped PDF image node");
+        assert_eq!(
+            image_entry.source.paragraph_id.as_deref(),
+            Some("/page[1]/image[1]")
+        );
+        assert!(image_entry.source.editable);
     }
 
     fn compressed_repeated(byte: u8, decoded_size: usize) -> Vec<u8> {

@@ -329,6 +329,144 @@ fn identical_source_uses_deterministic_default_document_and_node_ids() {
 }
 
 #[test]
+fn hdoc_chunk_window_and_revision_queries_are_cursor_addressable() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.txt");
+    let bundle = temp.path().join("bundle");
+    let patch_path = temp.path().join("patch.json");
+    let preview = temp.path().join("chunk-1.html");
+    std::fs::write(&source, "alpha\nbeta\ngamma\n").unwrap();
+
+    officecli()
+        .args([
+            "hdoc",
+            "import",
+            source.to_string_lossy().as_ref(),
+            "--output",
+            bundle.to_string_lossy().as_ref(),
+            "--document-id",
+            "chunk-window",
+            "--chunk-blocks",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let imported = manifest(&bundle);
+    assert_eq!(imported["chunkCount"], 3);
+
+    officecli()
+        .args([
+            "hdoc",
+            "render-html",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            preview.to_string_lossy().as_ref(),
+            "--chunk-start",
+            "1",
+            "--chunk-limit",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""firstChunk": 1"#))
+        .stdout(predicate::str::contains(r#""chunkCount": 1"#))
+        .stdout(predicate::str::contains(r#""totalChunkCount": 3"#))
+        .stdout(predicate::str::contains(r#""nextChunk": 2"#));
+    let preview = std::fs::read_to_string(preview).unwrap();
+    assert!(!preview.contains("alpha"));
+    assert!(preview.contains("beta"));
+    assert!(!preview.contains("gamma"));
+
+    let extract = officecli()
+        .args([
+            "hdoc",
+            "extract-text",
+            bundle.to_string_lossy().as_ref(),
+            "--limit",
+            "1",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(extract.status.success());
+    let extract: Value = serde_json::from_slice(&extract.stdout).unwrap();
+    let node = &extract["data"]["entries"][0];
+    std::fs::write(
+        &patch_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": "hcd-patch/1",
+            "documentId": "chunk-window",
+            "patchId": "chunk-window-1",
+            "baseRevision": 0,
+            "operations": [{
+                "op": "text.splice",
+                "nodeId": node["nodeId"],
+                "start": 0,
+                "deleteCount": 5,
+                "insertText": "ALPHA",
+                "precondition": { "nodeHash": node["nodeHash"] }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "apply",
+            bundle.to_string_lossy().as_ref(),
+            "--patch",
+            patch_path.to_string_lossy().as_ref(),
+            "--expected-revision",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    officecli()
+        .args([
+            "hdoc",
+            "list-revisions",
+            bundle.to_string_lossy().as_ref(),
+            "--limit",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""headRevision": 1"#))
+        .stdout(predicate::str::contains(r#""nextCursor": 1"#));
+    officecli()
+        .args([
+            "hdoc",
+            "list-revisions",
+            bundle.to_string_lossy().as_ref(),
+            "--cursor",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""revision": 1"#))
+        .stdout(predicate::str::contains("chunk-window-1"));
+    officecli()
+        .args([
+            "hdoc",
+            "get-revision",
+            bundle.to_string_lossy().as_ref(),
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""revision": 1"#))
+        .stdout(predicate::str::contains("chunk-window-1"));
+}
+
+#[test]
 fn hdoc_patch_v2_supports_atomic_cross_node_text_and_presentation_style() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.txt");

@@ -6043,6 +6043,23 @@ fn append_image(
             .map(|drawing_id| format!("drawing-{drawing_id}"))
             .unwrap_or_else(|| format!("image-{image_ordinal}-{relationship_id}"));
         let node_id = stable_node_id(&[document_id, part, "image", &source_identity]);
+        let node_hash = hash_bytes(b"");
+        let geometry = drawing.and_then(|drawing| {
+            Some(hcd_core::ImageGeometry {
+                x: drawing
+                    .horizontal_offset_emu
+                    .or(drawing.simple_x_emu)
+                    .unwrap_or(0) as f64,
+                y: drawing
+                    .vertical_offset_emu
+                    .or(drawing.simple_y_emu)
+                    .unwrap_or(0) as f64,
+                width: drawing.width_emu? as f64,
+                height: drawing.height_emu? as f64,
+                unit: hcd_core::ImageGeometryUnit::Emu,
+            })
+        });
+        let visual_hash = hcd_core::image_visual_hash(Some(&asset.hash), geometry.as_ref());
         let mut classes = vec!["hcd-drawing"];
         if let Some(layout) = drawing.and_then(|drawing| drawing.layout) {
             classes.push(match layout {
@@ -6054,14 +6071,23 @@ fn append_image(
             classes.push(wrap_class);
         }
         let mut attributes = format!(
-            " class=\"{}\" data-hcd-id=\"{}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"/drawing[{}]\" src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\"",
+            " class=\"{}\" data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\" data-hcd-visual-hash=\"{}\" data-hcd-asset-hash=\"{}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"true\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"/drawing[{}]\" src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\"",
             classes.join(" "),
             escape_attribute(&node_id),
+            node_hash,
+            visual_hash,
+            asset.hash,
             escape_attribute(part),
             image_ordinal,
             asset.hash,
             escape_attribute(&asset.href)
         );
+        if let Some(geometry) = &geometry {
+            attributes.push_str(&format!(
+                " data-hcd-x=\"{}\" data-hcd-y=\"{}\" data-hcd-width=\"{}\" data-hcd-height=\"{}\" data-hcd-geometry-unit=\"emu\"",
+                geometry.x, geometry.y, geometry.width, geometry.height
+            ));
+        }
         let alt = drawing
             .and_then(|drawing| drawing.alt.as_deref())
             .unwrap_or("");
@@ -6208,6 +6234,18 @@ fn append_image(
             attributes.push('"');
         }
         paragraph.html.push_str(&format!("<img{attributes}/>"));
+        paragraph.entries.push(NodeMapEntry {
+            node_id,
+            node_hash,
+            source: SourceAnchor {
+                part: part.to_string(),
+                text_ordinal: image_ordinal,
+                paragraph_id: Some(format!("/drawing[{image_ordinal}]")),
+                text_id: Some(asset.source_part.clone()),
+                node_kind: "image".to_string(),
+                editable: true,
+            },
+        });
     }
 }
 
@@ -6471,7 +6509,7 @@ fn escape_attribute(text: &str) -> String {
 }
 
 fn default_styles() -> &'static str {
-    r#"article,.hcd-chunk{display:block}.hcd-chunk-overflow{content-visibility:visible;contain:none;overflow:visible}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em;white-space:nowrap}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{padding:.25em .4em;vertical-align:top}.hcd-paragraph-group{min-width:0}.hcd-textbox-canvas{position:relative;max-width:100%}.hcd-textbox{box-sizing:border-box;margin:0}.hcd-textbox-content>.hcd-table{margin:0;max-width:100%}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
+    r#"article,.hcd-chunk{display:block}.hcd-chunk-overflow{content-visibility:visible;contain:none;overflow:visible}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em;white-space:nowrap}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{padding:.25em .4em;vertical-align:top}.hcd-paragraph-group{min-width:0}.hcd-textbox-canvas{position:relative;max-width:100%}.hcd-textbox{box-sizing:border-box;margin:0}.hcd-textbox-content>.hcd-table{margin:0;max-width:100%}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:not([data-hcd-node-kind=\"image\"]):hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
 }
 
 #[cfg(test)]
@@ -7006,7 +7044,7 @@ mod tests {
         assert!(html.contains("data-hcd-wrap-side=\"right\""));
         assert!(html.contains("data-hcd-drawing-id=\"42\""));
         assert!(html.contains("data-hcd-node-kind=\"image\""));
-        assert!(html.contains("data-hcd-editable=\"false\""));
+        assert!(html.contains("data-hcd-editable=\"true\""));
         assert!(html.contains("data-hcd-source-part=\"word/document.xml\""));
         assert!(html.contains("data-hcd-source-path=\"/drawing[1]\""));
         assert!(html.contains("data-hcd-behind-document=\"false\""));

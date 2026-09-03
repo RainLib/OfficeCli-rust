@@ -12,6 +12,14 @@ const ONE_PIXEL_PNG: &[u8] = &[
     0xae, 0x42, 0x60, 0x82,
 ];
 
+const SECOND_PIXEL_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c,
+    0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xff, 0x1f, 0x00,
+    0x02, 0xeb, 0x01, 0xf5, 0x8f, 0x59, 0x97, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+];
+
 fn officecli() -> Command {
     Command::cargo_bin("officecli").unwrap()
 }
@@ -94,6 +102,22 @@ fn office_zip_contains_png(path: &Path, media_prefix: &str) -> bool {
     false
 }
 
+fn office_zip_contains_bytes(path: &Path, media_prefix: &str, expected: &[u8]) -> bool {
+    let file = std::fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        if entry.name().starts_with(media_prefix) && !entry.is_dir() {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if bytes == expected {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn office_zip_text(path: &Path, part: &str) -> String {
     let file = std::fs::File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -118,6 +142,33 @@ fn office_zip_text_parts(path: &Path, prefix: &str, suffix: &str) -> Vec<String>
     }
     parts.sort_by(|left, right| left.0.cmp(&right.0));
     parts.into_iter().map(|(_, text)| text).collect()
+}
+
+fn first_image_map_entry(bundle: &Path) -> Value {
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    let prefix = manifest["indexPrefix"].as_str().unwrap();
+    for page in 0..manifest["indexPageCount"].as_u64().unwrap() {
+        let index: Value = serde_json::from_slice(
+            &std::fs::read(bundle.join(prefix).join(format!("{page:06}.json"))).unwrap(),
+        )
+        .unwrap();
+        for chunk in index["chunks"].as_array().unwrap() {
+            let map: Value = serde_json::from_slice(
+                &std::fs::read(bundle.join(chunk["mapHref"].as_str().unwrap())).unwrap(),
+            )
+            .unwrap();
+            if let Some(entry) = map["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["source"]["nodeKind"] == "image")
+            {
+                return entry.clone();
+            }
+        }
+    }
+    panic!("bundle has no mapped image node")
 }
 
 fn bundle_html(bundle: &Path) -> String {
@@ -385,10 +436,26 @@ fn xlsx_hcd_media_is_content_addressed() {
         .starts_with("xl/media/"));
     assert!(bundle.join(assets[0]["href"].as_str().unwrap()).is_file());
     assert_eq!(assets[0]["byteLength"], ONE_PIXEL_PNG.len());
+    let copied_asset = temp.path().join("copied-pixel.png");
+    officecli()
+        .args([
+            "hdoc",
+            "get-asset",
+            bundle.to_string_lossy().as_ref(),
+            assets[0]["hash"].as_str().unwrap(),
+            "--output",
+            copied_asset.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""byteLength": 68"#))
+        .stdout(predicate::str::contains("copied-pixel.png"));
+    assert_eq!(std::fs::read(&copied_asset).unwrap(), ONE_PIXEL_PNG);
     let html = bundle_html(&bundle);
     assert!(html.contains("class=\"hcd-sheet-picture\""));
     assert!(html.contains("data-hcd-node-kind=\"image\""));
-    assert!(html.contains("data-hcd-editable=\"false\""));
+    assert!(html.contains("data-hcd-editable=\"true\""));
     assert!(html.contains("data-hcd-source-part=\"xl/worksheets/sheet1.xml\""));
     assert!(html.contains("data-hcd-anchor-from=\"B2\""));
     assert!(html.contains("data-hcd-width-emu=\"1828800\""));
@@ -424,6 +491,242 @@ fn xlsx_hcd_media_is_content_addressed() {
         .assert()
         .success();
     assert!(office_zip_contains_png(&docx, "word/media/"));
+}
+
+#[test]
+fn hcd_image_node_replace_and_geometry_are_revisioned_and_hash_guarded() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("image.xlsx");
+    let original = temp.path().join("original.png");
+    let replacement = temp.path().join("replacement.png");
+    let bundle = temp.path().join("bundle");
+    std::fs::write(&original, ONE_PIXEL_PNG).unwrap();
+    std::fs::write(&replacement, SECOND_PIXEL_PNG).unwrap();
+    officecli()
+        .args(["create", source.to_string_lossy().as_ref()])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "add",
+            source.to_string_lossy().as_ref(),
+            "/Sheet1",
+            "--type",
+            "image",
+            "--prop",
+            &format!("file={}", original.display()),
+            "--prop",
+            "anchor=B2",
+            "--prop",
+            "width=2in",
+            "--prop",
+            "height=1in",
+        ])
+        .assert()
+        .success();
+    import_and_extract(&source, &bundle, "image-patch-doc");
+    let image_entry = first_image_map_entry(&bundle);
+    let node_id = image_entry["nodeId"].as_str().unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "list-images",
+            bundle.to_string_lossy().as_ref(),
+            "--limit",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(node_id))
+        .stdout(predicate::str::contains(r#""unit": "emu""#));
+    let before = officecli()
+        .args([
+            "hdoc",
+            "get-image",
+            bundle.to_string_lossy().as_ref(),
+            node_id,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(before.status.success());
+    let before: Value = serde_json::from_slice(&before.stdout).unwrap();
+    let visual_hash = before["data"]["visualHash"].as_str().unwrap();
+    let original_asset_hash = before["data"]["assetHash"].as_str().unwrap();
+
+    let staged = officecli()
+        .args([
+            "hdoc",
+            "put-asset",
+            bundle.to_string_lossy().as_ref(),
+            replacement.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(staged.status.success());
+    let staged: Value = serde_json::from_slice(&staged.stdout).unwrap();
+    let replacement_hash = staged["data"]["hash"].as_str().unwrap();
+    assert_ne!(replacement_hash, original_asset_hash);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(bundle.join("assets/index.json")).unwrap())
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "staging must not mutate revision 0's asset index"
+    );
+
+    let patch = temp.path().join("image-patch.json");
+    std::fs::write(
+        &patch,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": "hcd-patch/3",
+            "documentId": "image-patch-doc",
+            "patchId": "image-replace-geometry-1",
+            "baseRevision": 0,
+            "operations": [
+                {
+                    "op": "image.replace",
+                    "nodeId": node_id,
+                    "assetHash": replacement_hash,
+                    "precondition": { "visualHash": visual_hash }
+                },
+                {
+                    "op": "image.geometry",
+                    "nodeId": node_id,
+                    "geometry": { "x": 914400, "y": 457200, "width": 2743200, "height": 1371600, "unit": "emu" },
+                    "precondition": { "visualHash": visual_hash }
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "apply",
+            bundle.to_string_lossy().as_ref(),
+            "--patch",
+            patch.to_string_lossy().as_ref(),
+            "--expected-revision",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("HCD_IMAGE_PATCH_SEMANTIC_EXPORT"));
+
+    officecli()
+        .args([
+            "hdoc",
+            "validate",
+            bundle.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""valid": true"#));
+    let after = officecli()
+        .args([
+            "hdoc",
+            "get-image",
+            bundle.to_string_lossy().as_ref(),
+            node_id,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(after.status.success());
+    let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert_eq!(after["data"]["assetHash"], replacement_hash);
+    assert_eq!(after["data"]["geometry"]["x"].as_f64(), Some(914400.0));
+    assert_eq!(after["data"]["geometry"]["width"].as_f64(), Some(2743200.0));
+    assert_ne!(after["data"]["visualHash"], visual_hash);
+
+    officecli()
+        .args([
+            "hdoc",
+            "get-asset",
+            bundle.to_string_lossy().as_ref(),
+            replacement_hash,
+            "--json",
+        ])
+        .assert()
+        .success();
+    officecli()
+        .args([
+            "hdoc",
+            "get-asset",
+            bundle.to_string_lossy().as_ref(),
+            replacement_hash,
+            "--revision",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("path not found"));
+    let preview = temp.path().join("revision-1.html");
+    officecli()
+        .args([
+            "hdoc",
+            "render-html",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            preview.to_string_lossy().as_ref(),
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let preview = std::fs::read_to_string(preview).unwrap();
+    assert!(preview.contains(replacement_hash));
+    assert!(preview.contains("data-hcd-x=\"914400\""));
+    assert!(preview.contains("width:288px"));
+
+    let source_backed = temp.path().join("source-backed.xlsx");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--source",
+            source.to_string_lossy().as_ref(),
+            "--output",
+            source_backed.to_string_lossy().as_ref(),
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("stopped before writing output"));
+    assert!(!source_backed.exists());
+
+    let semantic = temp.path().join("semantic.pptx");
+    officecli()
+        .args([
+            "hdoc",
+            "export",
+            bundle.to_string_lossy().as_ref(),
+            "--output",
+            semantic.to_string_lossy().as_ref(),
+            "--revision",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success();
+    assert!(office_zip_contains_bytes(
+        &semantic,
+        "ppt/media/",
+        SECOND_PIXEL_PNG
+    ));
 }
 
 #[test]

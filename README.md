@@ -261,6 +261,19 @@ text, and uses the canonical stylesheet for fenced code, tables, quotes, alerts 
 PDF text can embed multiple subset fonts on one page, so emoji and uncommon symbols use a
 character-level fallback instead of being replaced when an installed font covers them. Set
 `OFFICECLI_HTML_PDF_FALLBACK_FONT_FILE` to provide a deterministic deployment fallback font.
+`hdoc render-html --chunk-start N --chunk-limit M` materializes an independently viewable bounded
+window while preserving the default full-document output when those flags are omitted.
+`hdoc list-revisions`/`get-revision` expose the append-only history, and `hdoc get-asset` verifies a
+content-addressed asset before reporting or copying it. The dependency-free
+`examples/hdoc/lazy-viewer` progressively reads index pages, verifies chunk hashes, keeps only a
+bounded viewport cache in the DOM, and preserves canonical node IDs across eviction/reload. XLSX
+continues to use the Univer Canvas example for sheet/row-window virtualization and editable-cell
+node mapping.
+Mapped DOCX/XLSX/PPTX/PDF pictures are first-class image nodes: `hdoc list-images` and
+`get-image` expose stable node IDs, asset hashes, geometry and visual preconditions. `put-asset`
+stages a bounded raster without changing the current revision; `hcd-patch/3` atomically applies
+`image.replace` and `image.geometry`. Patched images are preserved by source-free pure-Rust exports;
+source-backed media rewrites fail before output until their format-specific rewriters are added.
 The PPTX adapter materializes direct text/picture
 geometry and DrawingML table grids, merges, direct cell formatting, and editable cell text while
 preserving the original presentation as the source-backed export authority. Large DrawingML tables

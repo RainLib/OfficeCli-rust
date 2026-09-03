@@ -1,4 +1,4 @@
-use crate::HcdError;
+use crate::{hash_bytes, HcdError, ImageGeometry, ImageGeometryUnit};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::BTreeMap;
@@ -83,6 +83,191 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
         )));
     }
     Ok(nodes)
+}
+
+/// Canonical, hashable state for mapped image nodes in one bounded fragment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HtmlImageNode {
+    pub visual_hash: String,
+    pub asset_hash: Option<String>,
+    pub geometry: Option<ImageGeometry>,
+}
+
+pub fn image_visual_hash(asset_hash: Option<&str>, geometry: Option<&ImageGeometry>) -> String {
+    let geometry = geometry.map_or_else(
+        || "none".to_string(),
+        |value| {
+            format!(
+                "{},{},{},{},{}",
+                canonical_number(value.x),
+                canonical_number(value.y),
+                canonical_number(value.width),
+                canonical_number(value.height),
+                match value.unit {
+                    ImageGeometryUnit::Emu => "emu",
+                    ImageGeometryUnit::Pt => "pt",
+                }
+            )
+        },
+    );
+    hash_bytes(
+        format!(
+            "officecli-hcd-image/1\0asset={}\0geometry={geometry}",
+            asset_hash.unwrap_or("none")
+        )
+        .as_bytes(),
+    )
+}
+
+pub fn extract_html_image_nodes(html: &str) -> Result<BTreeMap<String, HtmlImageNode>, HcdError> {
+    let mut reader = Reader::from_str(html);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::with_capacity(16 * 1024);
+    let mut nodes = BTreeMap::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("HTML XML parse error: {error}")))?;
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let attributes = decoded_attributes(&reader, &start)?;
+                let Some(node_id) = attributes.get("data-hcd-id") else {
+                    buffer.clear();
+                    continue;
+                };
+                let Some(declared_hash) = attributes.get("data-hcd-visual-hash") else {
+                    buffer.clear();
+                    continue;
+                };
+                let asset_hash = attributes.get("data-hcd-asset-hash").cloned();
+                let geometry = image_geometry_from_attributes(&attributes)?;
+                let actual_hash = image_visual_hash(asset_hash.as_deref(), geometry.as_ref());
+                if actual_hash != *declared_hash {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "image node {node_id} visual hash {declared_hash} does not match {actual_hash}"
+                    )));
+                }
+                if nodes
+                    .insert(
+                        node_id.clone(),
+                        HtmlImageNode {
+                            visual_hash: actual_hash,
+                            asset_hash,
+                            geometry,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "duplicate canonical image node {node_id}"
+                    )));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(nodes)
+}
+
+fn decoded_attributes<B: std::io::BufRead>(
+    reader: &Reader<B>,
+    start: &quick_xml::events::BytesStart<'_>,
+) -> Result<BTreeMap<String, String>, HcdError> {
+    let mut output = BTreeMap::new();
+    for attribute in start.attributes().with_checks(true) {
+        let attribute = attribute
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid HTML attribute: {error}")))?;
+        let key = std::str::from_utf8(attribute.key.as_ref())
+            .map_err(|error| {
+                HcdError::InvalidBundle(format!("invalid HTML attribute name: {error}"))
+            })?
+            .to_string();
+        let value = attribute
+            .decode_and_unescape_value(reader.decoder())
+            .map_err(|error| HcdError::InvalidBundle(format!("invalid HTML attribute: {error}")))?
+            .into_owned();
+        output.insert(key, value);
+    }
+    Ok(output)
+}
+
+fn image_geometry_from_attributes(
+    attributes: &BTreeMap<String, String>,
+) -> Result<Option<ImageGeometry>, HcdError> {
+    let values = [
+        attributes.get("data-hcd-x"),
+        attributes.get("data-hcd-y"),
+        attributes.get("data-hcd-width"),
+        attributes.get("data-hcd-height"),
+    ];
+    if values.iter().all(|value| value.is_none()) {
+        return Ok(None);
+    }
+    if values.iter().any(|value| value.is_none()) {
+        return Err(HcdError::InvalidBundle(
+            "image geometry must contain x, y, width, and height".to_string(),
+        ));
+    }
+    let parse = |name: &str, value: &str| {
+        value.parse::<f64>().map_err(|error| {
+            HcdError::InvalidBundle(format!("invalid image {name} value {value}: {error}"))
+        })
+    };
+    let unit = match attributes.get("data-hcd-geometry-unit").map(String::as_str) {
+        Some("emu") => ImageGeometryUnit::Emu,
+        Some("pt") => ImageGeometryUnit::Pt,
+        Some(value) => {
+            return Err(HcdError::InvalidBundle(format!(
+                "unsupported image geometry unit {value}"
+            )))
+        }
+        None => {
+            return Err(HcdError::InvalidBundle(
+                "image geometry has no data-hcd-geometry-unit".to_string(),
+            ))
+        }
+    };
+    let geometry = ImageGeometry {
+        x: parse("x", values[0].expect("checked geometry"))?,
+        y: parse("y", values[1].expect("checked geometry"))?,
+        width: parse("width", values[2].expect("checked geometry"))?,
+        height: parse("height", values[3].expect("checked geometry"))?,
+        unit,
+    };
+    validate_image_geometry(&geometry)?;
+    Ok(Some(geometry))
+}
+
+pub(crate) fn validate_image_geometry(geometry: &ImageGeometry) -> Result<(), HcdError> {
+    if !geometry.x.is_finite()
+        || !geometry.y.is_finite()
+        || !geometry.width.is_finite()
+        || !geometry.height.is_finite()
+        || geometry.x.abs() > 1_000_000_000_000.0
+        || geometry.y.abs() > 1_000_000_000_000.0
+        || !(0.0..=1_000_000_000_000.0).contains(&geometry.width)
+        || !(0.0..=1_000_000_000_000.0).contains(&geometry.height)
+        || geometry.width == 0.0
+        || geometry.height == 0.0
+    {
+        return Err(HcdError::InvalidPatch(
+            "image geometry must be finite, bounded, and have positive width/height".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_number(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let formatted = format!("{value:.6}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn node_attributes<B: std::io::BufRead>(

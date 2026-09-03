@@ -224,6 +224,22 @@ pub enum PatchOperation {
         style: NodeStylePatch,
         precondition: NodePrecondition,
     },
+    /// Replace the content-addressed payload displayed by one mapped image
+    /// node. The asset must already be indexed or have been staged with the
+    /// CLI before the patch is applied.
+    #[serde(rename = "image.replace", rename_all = "camelCase")]
+    ImageReplace {
+        node_id: String,
+        asset_hash: String,
+        precondition: VisualPrecondition,
+    },
+    /// Replace the complete image rectangle in its declared coordinate unit.
+    #[serde(rename = "image.geometry", rename_all = "camelCase")]
+    ImageGeometry {
+        node_id: String,
+        geometry: ImageGeometry,
+        precondition: VisualPrecondition,
+    },
     #[serde(rename = "annotation.upsert", rename_all = "camelCase")]
     AnnotationUpsert { annotation: Annotation },
     #[serde(rename = "annotation.remove", rename_all = "camelCase")]
@@ -233,16 +249,47 @@ pub enum PatchOperation {
 impl PatchOperation {
     pub fn node_id(&self) -> Option<&str> {
         match self {
-            Self::TextSplice { node_id, .. } => Some(node_id),
-            Self::NodeStyle { node_id, .. } => Some(node_id),
+            Self::TextSplice { node_id, .. }
+            | Self::NodeStyle { node_id, .. }
+            | Self::ImageReplace { node_id, .. }
+            | Self::ImageGeometry { node_id, .. } => Some(node_id),
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. } => None,
         }
     }
 
     pub fn is_content_change(&self) -> bool {
-        matches!(self, Self::TextSplice { .. } | Self::NodeStyle { .. })
+        matches!(
+            self,
+            Self::TextSplice { .. }
+                | Self::NodeStyle { .. }
+                | Self::ImageReplace { .. }
+                | Self::ImageGeometry { .. }
+        )
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageGeometryUnit {
+    Emu,
+    Pt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageGeometry {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub unit: ImageGeometryUnit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VisualPrecondition {
+    pub visual_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -325,6 +372,10 @@ pub struct RevisionRecord {
     pub root_hash: String,
     pub annotation_root_hash: String,
     pub index_prefix: String,
+    /// Immutable asset index used by this revision. Older bundles omit this
+    /// field and resolve to the original `assets/index.json`.
+    #[serde(default = "default_asset_index_href")]
+    pub asset_index_href: String,
     pub created_at_epoch_ms: u128,
     #[serde(default)]
     pub dirty_node_ids: Vec<String>,
@@ -332,6 +383,10 @@ pub struct RevisionRecord {
     pub dirty_chunk_ids: Vec<String>,
     #[serde(default)]
     pub dirty_source_parts: Vec<String>,
+}
+
+fn default_asset_index_href() -> String {
+    "assets/index.json".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -405,6 +460,46 @@ pub struct TextNodeLookup {
     pub revision: u64,
     #[serde(flatten)]
     pub node: TextExtractEntry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageNodeState {
+    pub node_id: String,
+    pub visual_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<ImageGeometry>,
+    pub source: SourceAnchor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageNodeLookup {
+    pub document_id: String,
+    pub revision: u64,
+    pub chunk_id: String,
+    #[serde(flatten)]
+    pub node: ImageNodeState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageExtractEntry {
+    pub chunk_id: String,
+    #[serde(flatten)]
+    pub node: ImageNodeState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageExtractPage {
+    pub document_id: String,
+    pub revision: u64,
+    pub entries: Vec<ImageExtractEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

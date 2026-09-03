@@ -88,6 +88,13 @@ window.hcdGridHitTest=(clientX,clientY)=>{const content=document.querySelector('
 pub struct HtmlPresentationOptions {
     pub revision: Option<u64>,
     pub max_output_bytes: u64,
+    /// Zero-based first chunk sequence to materialize. The default starts at
+    /// the beginning of the revision.
+    pub chunk_start: usize,
+    /// Maximum number of chunks to materialize. `None` preserves the legacy
+    /// full-document behavior. This is a presentation window only and does
+    /// not change the authoritative revision or its root hash.
+    pub chunk_limit: Option<usize>,
     /// Prefix used to turn canonical `asset://sha256/...` references into
     /// browser-readable URLs. `None` leaves canonical references untouched.
     pub asset_base_href: Option<String>,
@@ -109,6 +116,8 @@ impl Default for HtmlPresentationOptions {
         Self {
             revision: None,
             max_output_bytes: DEFAULT_HTML_PRESENTATION_MAX_BYTES,
+            chunk_start: 0,
+            chunk_limit: None,
             asset_base_href: None,
             text_hitboxes_enabled: true,
             image_hitboxes_enabled: true,
@@ -123,7 +132,11 @@ pub struct HtmlPresentationReport {
     pub document_id: String,
     pub revision: u64,
     pub profile: String,
+    pub first_chunk: usize,
     pub chunk_count: usize,
+    pub total_chunk_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_chunk: Option<usize>,
     pub bytes_written: u64,
 }
 
@@ -181,11 +194,30 @@ pub fn render_standalone_html_with_transform(
 ) -> Result<HtmlPresentationReport, HcdError> {
     let head = bundle.manifest()?;
     let (manifest, revision) = manifest_at_revision(bundle, &head, options.revision)?;
+    let first_chunk = options.chunk_start;
+    if first_chunk > manifest.chunk_count {
+        return Err(HcdError::InvalidBundle(format!(
+            "chunk start {first_chunk} exceeds revision {revision} chunk count {}",
+            manifest.chunk_count
+        )));
+    }
+    if options.chunk_limit == Some(0) {
+        return Err(HcdError::InvalidBundle(
+            "chunk limit must be greater than zero".to_string(),
+        ));
+    }
+    let chunk_end = match options.chunk_limit {
+        Some(limit) => first_chunk
+            .checked_add(limit)
+            .ok_or_else(|| HcdError::ResourceLimit("chunk window overflowed usize".to_string()))?
+            .min(manifest.chunk_count),
+        None => manifest.chunk_count,
+    };
     let paginate_docx_preview =
         manifest.profile == "semantic-flow" && manifest.source.format.eq_ignore_ascii_case("docx");
     let asset_hrefs = if options.asset_base_href.is_some() {
         bundle
-            .read_asset_index()?
+            .read_asset_index_for_revision(revision)?
             .into_iter()
             .map(|asset| (asset.hash, asset.href))
             .collect::<HashMap<_, _>>()
@@ -252,8 +284,10 @@ pub fn render_standalone_html_with_transform(
         .as_bytes(),
     )?;
 
-    let mut expected_sequence = 0usize;
-    for page_number in 0..manifest.index_page_count {
+    let mut expected_sequence = first_chunk;
+    let first_index_page = first_chunk / crate::INDEX_PAGE_SIZE;
+    let end_index_page = chunk_end.div_ceil(crate::INDEX_PAGE_SIZE);
+    for page_number in first_index_page..end_index_page {
         let page = bundle.read_index_page(&manifest, page_number)?;
         if page.revision != revision || page.page != page_number {
             return Err(HcdError::InvalidBundle(format!(
@@ -261,6 +295,9 @@ pub fn render_standalone_html_with_transform(
             )));
         }
         for descriptor in page.chunks {
+            if descriptor.sequence < first_chunk || descriptor.sequence >= chunk_end {
+                continue;
+            }
             if descriptor.sequence != expected_sequence {
                 return Err(HcdError::InvalidBundle(format!(
                     "expected chunk sequence {expected_sequence}, found {}",
@@ -303,10 +340,9 @@ pub fn render_standalone_html_with_transform(
             expected_sequence += 1;
         }
     }
-    if expected_sequence != manifest.chunk_count {
+    if expected_sequence != chunk_end {
         return Err(HcdError::InvalidBundle(format!(
-            "manifest declares {} chunks, materialized {expected_sequence}",
-            manifest.chunk_count
+            "requested chunk window {first_chunk}..{chunk_end}, materialized through {expected_sequence}"
         )));
     }
     if manifest.profile == "grid" {
@@ -341,7 +377,10 @@ pub fn render_standalone_html_with_transform(
         document_id: manifest.document_id,
         revision,
         profile: manifest.profile,
-        chunk_count: expected_sequence,
+        first_chunk,
+        chunk_count: chunk_end - first_chunk,
+        total_chunk_count: manifest.chunk_count,
+        next_chunk: (chunk_end < manifest.chunk_count).then_some(chunk_end),
         bytes_written: written,
     })
 }
@@ -484,6 +523,8 @@ mod tests {
     fn preview_style_override_is_safe_and_opt_in() {
         let default = HtmlPresentationOptions::default();
         assert!(default.override_stylesheet.is_none());
+        assert_eq!(default.chunk_start, 0);
+        assert_eq!(default.chunk_limit, None);
         assert!(crate::validate_css_text(".hcd-grid td{color:#123456}").is_ok());
         assert!(crate::validate_css_text(".hcd-grid{background:url(javascript:x)}").is_err());
     }

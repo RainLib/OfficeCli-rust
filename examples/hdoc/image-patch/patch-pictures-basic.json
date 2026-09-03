@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "hcd-patch/3",
+  "documentId": "image-real-pptx",
+  "patchId": "pictures-basic-replace-and-move-1",
+  "baseRevision": 0,
+  "operations": [
+    {
+      "op": "image.replace",
+      "nodeId": "n_9f0a3d6a60677cc2a40a592eb56cb04f",
+      "assetHash": "b3c727c5ceb17ed8741174182cc8dc55fe76c1363f65a09a88e42fc5db3886e5",
+      "precondition": {
+        "visualHash": "9ef961dee70e8e79cd5241a5b56afa3c64c4b66716eedab1765b2ae70e00f9db"
+      }
+    },
+    {
+      "op": "image.geometry",
+      "nodeId": "n_9f0a3d6a60677cc2a40a592eb56cb04f",
+      "geometry": {
+        "x": 914400,
+        "y": 457200,
+        "width": 4572000,
+        "height": 2743200,
+        "unit": "emu"
+      },
+      "precondition": {
+        "visualHash": "9ef961dee70e8e79cd5241a5b56afa3c64c4b66716eedab1765b2ae70e00f9db"
+      }
+    }
+  ]
+}

@@ -373,7 +373,7 @@ pub enum Command {
     Help(HelpCommand),
     /// Import CSV/TSV data into an Excel sheet
     Import(ImportCommand),
-    /// Convert DOCX to and from the chunked HTML Canonical Document format
+    /// Convert supported documents to and from the chunked HTML Canonical Document format
     Hdoc(HdocCommand),
     /// Manage and inspect installed plugins
     Plugins(PluginsCommand),

@@ -7,7 +7,7 @@ use hcd_core::{
 };
 use hcd_formats::{ExportOptions, ImportOptions};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_SEMANTIC_ASSET_BYTES: u64 = 64 * 1024 * 1024;
@@ -30,6 +30,18 @@ pub enum HdocSubcommand {
     ExtractText(HdocExtractTextCommand),
     /// Resolve one current text node by stable HCD nodeId
     GetNode(HdocGetNodeCommand),
+    /// Resolve one mapped image node and its asset/geometry state
+    GetImage(HdocGetImageCommand),
+    /// List mapped image nodes with cursor pagination
+    ListImages(HdocListImagesCommand),
+    /// List immutable revision records from an append-only HCD history
+    ListRevisions(HdocListRevisionsCommand),
+    /// Read one immutable HCD revision record
+    GetRevision(HdocGetRevisionCommand),
+    /// Inspect and optionally copy one verified content-addressed asset
+    GetAsset(HdocGetAssetCommand),
+    /// Stage a bounded raster image for a later image.replace patch
+    PutAsset(HdocPutAssetCommand),
     /// Materialize the current chunk sequence as a standalone inspection HTML file
     RenderHtml(HdocRenderHtmlCommand),
     /// Apply a text/annotation patch and append a revision
@@ -81,6 +93,62 @@ pub struct HdocGetNodeCommand {
 }
 
 #[derive(Args)]
+pub struct HdocGetImageCommand {
+    pub bundle: String,
+    /// Stable mapped image node ID (`n_` followed by 32 lowercase hex digits)
+    pub node_id: String,
+}
+
+#[derive(Args)]
+pub struct HdocListImagesCommand {
+    pub bundle: String,
+    /// Opaque cursor returned by a previous page
+    #[arg(long)]
+    pub cursor: Option<String>,
+    /// Maximum image nodes to return
+    #[arg(long, default_value_t = 100)]
+    pub limit: usize,
+}
+
+#[derive(Args)]
+pub struct HdocListRevisionsCommand {
+    pub bundle: String,
+    /// First revision number to return
+    #[arg(long, default_value_t = 0)]
+    pub cursor: u64,
+    /// Maximum revision records to return (1-1000)
+    #[arg(long, default_value_t = 100)]
+    pub limit: usize,
+}
+
+#[derive(Args)]
+pub struct HdocGetRevisionCommand {
+    pub bundle: String,
+    /// Immutable revision number
+    pub revision: u64,
+}
+
+#[derive(Args)]
+pub struct HdocGetAssetCommand {
+    pub bundle: String,
+    /// Lowercase SHA-256 from assets/index.json
+    pub hash: String,
+    /// Asset index revision; defaults to the current head
+    #[arg(long)]
+    pub revision: Option<u64>,
+    /// Optional destination for a verified copy; must not already exist
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct HdocPutAssetCommand {
+    pub bundle: String,
+    /// PNG, JPEG, GIF, or WebP image to stage (maximum 64 MiB)
+    pub image: PathBuf,
+}
+
+#[derive(Args)]
 pub struct HdocRenderHtmlCommand {
     pub bundle: String,
     /// Standalone HTML output path; written incrementally without a full-document buffer
@@ -89,6 +157,12 @@ pub struct HdocRenderHtmlCommand {
     /// Revision to render; defaults to the current head
     #[arg(long)]
     pub revision: Option<u64>,
+    /// Zero-based first HCD chunk to include
+    #[arg(long, default_value_t = 0)]
+    pub chunk_start: usize,
+    /// Maximum number of consecutive chunks to include; omitted means all remaining chunks
+    #[arg(long)]
+    pub chunk_limit: Option<usize>,
     /// Text-node hover-outline state in the generated preview
     #[arg(long, value_enum, default_value_t = HdocHitboxState::On)]
     pub text_hitboxes: HdocHitboxState,
@@ -151,6 +225,12 @@ pub fn handle_hdoc(
         HdocSubcommand::Validate(command) => validate(command, format),
         HdocSubcommand::ExtractText(command) => extract_text(command, format),
         HdocSubcommand::GetNode(command) => get_node(command, format),
+        HdocSubcommand::GetImage(command) => get_image(command, format),
+        HdocSubcommand::ListImages(command) => list_images(command, format),
+        HdocSubcommand::ListRevisions(command) => list_revisions(command, format),
+        HdocSubcommand::GetRevision(command) => get_revision(command, format),
+        HdocSubcommand::GetAsset(command) => get_asset(command, format),
+        HdocSubcommand::PutAsset(command) => put_asset(command, format),
         HdocSubcommand::RenderHtml(command) => render_html(command, format),
         HdocSubcommand::Apply(command) => apply(command, format),
         HdocSubcommand::Export(command) => export(command, format),
@@ -255,6 +335,293 @@ fn get_node(
     render(&node, format, text)
 }
 
+fn get_image(
+    command: HdocGetImageCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let image = hcd_core::get_image_node(&bundle, &command.node_id).map_err(handler_error)?;
+    let text = format!(
+        "{} asset={} visualHash={}",
+        image.node.node_id,
+        image.node.asset_hash.as_deref().unwrap_or("none"),
+        image.node.visual_hash
+    );
+    render(&image, format, text)
+}
+
+fn list_images(
+    command: HdocListImagesCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    if !(1..=10_000).contains(&command.limit) {
+        return Err(HandlerError::InvalidArgument(
+            "--limit must be between 1 and 10000".to_string(),
+        ));
+    }
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let page = hcd_core::extract_image_page(&bundle, command.cursor.as_deref(), command.limit)
+        .map_err(handler_error)?;
+    let text = if page.entries.is_empty() {
+        "No mapped image nodes".to_string()
+    } else {
+        page.entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{} asset={} visualHash={}",
+                    entry.node.node_id,
+                    entry.node.asset_hash.as_deref().unwrap_or("none"),
+                    entry.node.visual_hash
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    render(&page, format, text)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionPage {
+    document_id: String,
+    head_revision: u64,
+    revisions: Vec<hcd_core::RevisionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<u64>,
+}
+
+fn list_revisions(
+    command: HdocListRevisionsCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    if !(1..=1000).contains(&command.limit) {
+        return Err(HandlerError::InvalidArgument(
+            "--limit must be between 1 and 1000".to_string(),
+        ));
+    }
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let manifest = bundle.manifest().map_err(handler_error)?;
+    let terminal = manifest.revision.checked_add(1).ok_or_else(|| {
+        HandlerError::InvalidArgument("head revision cannot be incremented".to_string())
+    })?;
+    if command.cursor > terminal {
+        return Err(HandlerError::InvalidArgument(format!(
+            "--cursor {} is beyond head revision {}",
+            command.cursor, manifest.revision
+        )));
+    }
+    let end = command
+        .cursor
+        .saturating_add(command.limit as u64)
+        .min(terminal);
+    let mut revisions = Vec::with_capacity((end - command.cursor) as usize);
+    for revision in command.cursor..end {
+        revisions.push(bundle.revision(revision).map_err(handler_error)?);
+    }
+    let next_cursor = (end < terminal).then_some(end);
+    let text = if revisions.is_empty() {
+        format!("No revisions at or after {}", command.cursor)
+    } else {
+        revisions
+            .iter()
+            .map(|record| {
+                format!(
+                    "revision {} parent={} patch={} root={}",
+                    record.revision,
+                    record
+                        .parent_revision
+                        .map_or_else(|| "none".to_string(), |value| value.to_string()),
+                    record.patch_id.as_deref().unwrap_or("none"),
+                    record.root_hash
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    render(
+        &RevisionPage {
+            document_id: manifest.document_id,
+            head_revision: manifest.revision,
+            revisions,
+            next_cursor,
+        },
+        format,
+        text,
+    )
+}
+
+fn get_revision(
+    command: HdocGetRevisionCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let manifest = bundle.manifest().map_err(handler_error)?;
+    if command.revision > manifest.revision {
+        return Err(HandlerError::InvalidArgument(format!(
+            "revision {} is ahead of head {}",
+            command.revision, manifest.revision
+        )));
+    }
+    let record = bundle.revision(command.revision).map_err(handler_error)?;
+    let text = serde_json::to_string_pretty(&record)?;
+    render(&record, format, text)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetReadResult {
+    asset: hcd_core::AssetDescriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<PathBuf>,
+}
+
+fn get_asset(
+    command: HdocGetAssetCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    if command.hash.len() != 64
+        || !command
+            .hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(HandlerError::InvalidArgument(
+            "asset hash must be a 64-character lowercase SHA-256 digest".to_string(),
+        ));
+    }
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let head = bundle.manifest().map_err(handler_error)?.revision;
+    let revision = command.revision.unwrap_or(head);
+    if revision > head {
+        return Err(HandlerError::InvalidArgument(format!(
+            "revision {revision} is ahead of head {head}"
+        )));
+    }
+    let asset = bundle
+        .read_asset_index_for_revision(revision)
+        .map_err(handler_error)?
+        .into_iter()
+        .find(|asset| asset.hash == command.hash)
+        .ok_or_else(|| HandlerError::PathNotFound(format!("asset {}", command.hash)))?;
+    let source = bundle.resolve_href(&asset.href).map_err(handler_error)?;
+    let metadata = std::fs::metadata(&source)?;
+    if metadata.len() != asset.byte_length {
+        return Err(HandlerError::ValidationError(format!(
+            "asset {} expected {} bytes, found {}",
+            asset.hash,
+            asset.byte_length,
+            metadata.len()
+        )));
+    }
+    let actual_hash = hash_file(&source).map_err(handler_error)?;
+    if actual_hash != asset.hash {
+        return Err(HandlerError::ValidationError(format!(
+            "asset {} content hash is {}",
+            asset.hash, actual_hash
+        )));
+    }
+    if let Some(output) = command.output.as_deref() {
+        if output.exists() {
+            return Err(HandlerError::InvalidArgument(format!(
+                "asset output already exists: {}",
+                output.display()
+            )));
+        }
+        let parent = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".officecli-hcd-asset-")
+            .tempfile_in(parent)?;
+        let mut input = std::fs::File::open(&source)?;
+        std::io::copy(&mut input, temporary.as_file_mut())?;
+        temporary.as_file_mut().flush()?;
+        temporary.persist(output).map_err(|error| error.error)?;
+    }
+    let text = match command.output.as_deref() {
+        Some(output) => format!(
+            "Copied asset {} ({} bytes) to {}",
+            asset.hash,
+            asset.byte_length,
+            output.display()
+        ),
+        None => format!(
+            "asset {} {} bytes {}",
+            asset.hash, asset.byte_length, asset.href
+        ),
+    };
+    render(
+        &AssetReadResult {
+            asset,
+            output: command.output,
+        },
+        format,
+        text,
+    )
+}
+
+fn put_asset(
+    command: HdocPutAssetCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let extension = command
+        .image
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            HandlerError::InvalidArgument("staged image must have an extension".to_string())
+        })?;
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        return Err(HandlerError::InvalidArgument(
+            "staged image must be PNG, JPEG, GIF, or WebP".to_string(),
+        ));
+    }
+    let metadata = std::fs::metadata(&command.image)?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(HandlerError::InvalidArgument(format!(
+            "staged image is not a non-empty regular file: {}",
+            command.image.display()
+        )));
+    }
+    if metadata.len() > hcd_core::MAX_STAGED_ASSET_BYTES {
+        return Err(HandlerError::InvalidArgument(format!(
+            "staged image is {} bytes; maximum is {}",
+            metadata.len(),
+            hcd_core::MAX_STAGED_ASSET_BYTES
+        )));
+    }
+    let mut header = [0u8; 12];
+    let mut input = std::fs::File::open(&command.image)?;
+    let count = input.read(&mut header)?;
+    let valid_magic = match extension.as_str() {
+        "png" => count >= 8 && header[..8] == [137, 80, 78, 71, 13, 10, 26, 10],
+        "jpg" | "jpeg" => count >= 3 && header[..3] == [0xff, 0xd8, 0xff],
+        "gif" => count >= 6 && matches!(&header[..6], b"GIF87a" | b"GIF89a"),
+        "webp" => count >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP",
+        _ => false,
+    };
+    if !valid_magic {
+        return Err(HandlerError::InvalidArgument(format!(
+            "{} content does not match its .{extension} image extension",
+            command.image.display()
+        )));
+    }
+    input.rewind()?;
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    let descriptor = bundle
+        .stage_asset_from_reader(&extension, &mut input)
+        .map_err(handler_error)?;
+    let text = format!(
+        "Staged image {} ({} bytes); reference this hash from image.replace",
+        descriptor.hash, descriptor.byte_length
+    );
+    render(&descriptor, format, text)
+}
+
 fn render_html(
     command: HdocRenderHtmlCommand,
     format: OutputFormat,
@@ -288,6 +655,8 @@ fn render_html(
         &bundle,
         &HtmlPresentationOptions {
             revision: command.revision,
+            chunk_start: command.chunk_start,
+            chunk_limit: command.chunk_limit,
             asset_base_href: Some(asset_base_href),
             text_hitboxes_enabled: command.text_hitboxes == HdocHitboxState::On,
             image_hitboxes_enabled: command.image_hitboxes == HdocHitboxState::On,
@@ -325,7 +694,10 @@ fn render_html(
         "documentId": report.document_id,
         "revision": report.revision,
         "profile": report.profile,
+        "firstChunk": report.first_chunk,
         "chunkCount": report.chunk_count,
+        "totalChunkCount": report.total_chunk_count,
+        "nextChunk": report.next_chunk,
         "bytes": report.bytes_written,
         "output": output,
         "style": style_path,
@@ -591,7 +963,7 @@ fn semantic_export(
     .map_err(handler_error)?;
     let chunk_count = presentation.chunk_count;
     materialized.as_file_mut().flush()?;
-    let assets = semantic_assets(bundle).map_err(handler_error)?;
+    let assets = semantic_assets(bundle, revision).map_err(handler_error)?;
     let summary = super::html_convert::convert_html_with_assets(
         materialized.path(),
         output_path,
@@ -671,8 +1043,9 @@ fn semantic_export(
 
 fn semantic_assets(
     bundle: &Bundle,
+    revision: u64,
 ) -> Result<HashMap<String, super::html_convert::SemanticAsset>, HcdError> {
-    let records = bundle.read_asset_index()?;
+    let records = bundle.read_asset_index_for_revision(revision)?;
     let mut total = 0u64;
     let mut assets = HashMap::with_capacity(records.len());
     for record in records {

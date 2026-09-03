@@ -847,7 +847,7 @@ fn render_xlsx_styles(
     archive: &mut StreamingOxmlArchive,
 ) -> Result<(String, XlsxStyleCatalog), HcdError> {
     let mut css = String::from(
-        ".hcd-sheet{overflow:auto;background:#fff}.hcd-grid{border-collapse:separate;border-spacing:0;table-layout:fixed;background:#fff}.hcd-grid td{box-sizing:border-box;min-width:64px;height:20px;border:0;border-right:1px solid #ddd;border-bottom:1px solid #ddd;padding:.2em .35em;vertical-align:middle;white-space:nowrap}.hcd-grid .hcd-empty{background:#fff}.hcd-grid td>span{white-space:inherit}.hcd-sheet[data-hcd-show-grid-lines=\"false\"] .hcd-grid td{border-color:transparent}.hcd-sheet-drawing-layer{position:relative;overflow:auto;background:repeating-linear-gradient(0deg,#fff 0,#fff 19px,#eef1f5 20px),repeating-linear-gradient(90deg,transparent 0,transparent 63px,#eef1f5 64px)}.hcd-sheet-picture,.hcd-sheet-chart{position:absolute;box-sizing:border-box;overflow:hidden;background:#fff}.hcd-sheet-picture img,.hcd-sheet-chart img{display:block;width:100%;height:100%;object-fit:contain}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id],body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-chart[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id]:hover,body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-chart[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
+        ".hcd-sheet{overflow:auto;background:#fff}.hcd-grid{border-collapse:separate;border-spacing:0;table-layout:fixed;background:#fff}.hcd-grid td{box-sizing:border-box;min-width:64px;height:20px;border:0;border-right:1px solid #ddd;border-bottom:1px solid #ddd;padding:.2em .35em;vertical-align:middle;white-space:nowrap}.hcd-grid .hcd-empty{background:#fff}.hcd-grid td>span{white-space:inherit}.hcd-sheet[data-hcd-show-grid-lines=\"false\"] .hcd-grid td{border-color:transparent}.hcd-sheet-drawing-layer{position:relative;overflow:auto;background:repeating-linear-gradient(0deg,#fff 0,#fff 19px,#eef1f5 20px),repeating-linear-gradient(90deg,transparent 0,transparent 63px,#eef1f5 64px)}.hcd-sheet-picture,.hcd-sheet-chart{position:absolute;box-sizing:border-box;overflow:hidden;background:#fff}.hcd-sheet-picture img,.hcd-sheet-chart img{display:block;width:100%;height:100%;object-fit:contain}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id],body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-chart[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id]:hover,body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-chart[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:not([data-hcd-node-kind=\"image\"]):hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
     );
     if !archive.contains("xl/styles.xml") {
         return Ok((css, XlsxStyleCatalog::default()));
@@ -2296,6 +2296,15 @@ where
         ])
         .replacen("n_", "c_", 1);
         let (x, y, width, height) = drawing_geometry(&picture.anchor);
+        let geometry = hcd_core::ImageGeometry {
+            x: x as f64,
+            y: y as f64,
+            width: width as f64,
+            height: height as f64,
+            unit: hcd_core::ImageGeometryUnit::Emu,
+        };
+        let node_hash = hash_bytes(b"");
+        let visual_hash = hcd_core::image_visual_hash(Some(&picture.asset.hash), Some(&geometry));
         let source_path = picture
             .anchor
             .picture_id
@@ -2305,7 +2314,8 @@ where
         let from_cell = drawing_cell(picture.anchor.from_col, picture.anchor.from_row);
         let to_cell = drawing_cell(picture.anchor.to_col, picture.anchor.to_row);
         let mut attributes = format!(
-            " data-hcd-id=\"{node_id}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\" data-hcd-drawing-part=\"{}\" data-hcd-anchor-kind=\"{}\" data-hcd-x-emu=\"{x}\" data-hcd-y-emu=\"{y}\" data-hcd-width-emu=\"{width}\" data-hcd-height-emu=\"{height}\"",
+            " data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-visual-hash=\"{visual_hash}\" data-hcd-asset-hash=\"{}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"true\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\" data-hcd-drawing-part=\"{}\" data-hcd-anchor-kind=\"{}\" data-hcd-x=\"{x}\" data-hcd-y=\"{y}\" data-hcd-width=\"{width}\" data-hcd-height=\"{height}\" data-hcd-geometry-unit=\"emu\" data-hcd-x-emu=\"{x}\" data-hcd-y-emu=\"{y}\" data-hcd-width-emu=\"{width}\" data-hcd-height-emu=\"{height}\"",
+            picture.asset.hash,
             escape_attribute(&picture.sheet_part),
             escape_attribute(&picture.drawing_part),
             escape_attribute(&picture.anchor.kind),
@@ -2365,7 +2375,18 @@ where
                     &identity,
                 ])
                 .replacen("n_", "c_", 1),
-                entries: Vec::new(),
+                entries: vec![NodeMapEntry {
+                    node_id,
+                    node_hash,
+                    source: SourceAnchor {
+                        part: picture.drawing_part.clone(),
+                        text_ordinal: picture.ordinal,
+                        paragraph_id: Some(source_path),
+                        text_id: Some(picture.asset.source_part.clone()),
+                        node_kind: "image".to_string(),
+                        editable: true,
+                    },
+                }],
             },
             1,
             *count > 0,
