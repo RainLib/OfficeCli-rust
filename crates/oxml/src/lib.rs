@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod chart_preview;
 pub mod content_types;
 pub mod namespace;
 pub mod package;

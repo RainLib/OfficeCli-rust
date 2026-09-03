@@ -84,7 +84,26 @@
         "nodeBloom": { "$ref": "#/$defs/sha256" },
         "firstNodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
         "lastNodeId": { "type": "string", "pattern": "^n_[0-9a-f]{32}$" },
-        "continuation": { "type": "boolean" }
+        "continuation": { "type": "boolean" },
+        "grid": { "$ref": "#/$defs/gridChunkAddress" }
+      }
+    },
+    "gridChunkAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sheetId", "sheetName", "sheetIndex", "sheetState", "kind"],
+      "properties": {
+        "sheetId": { "type": "string", "pattern": "^s_[0-9a-f]{32}$" },
+        "sheetName": { "type": "string", "minLength": 1, "maxLength": 31 },
+        "sheetIndex": { "type": "integer", "minimum": 0 },
+        "sheetState": { "enum": ["visible", "hidden", "veryHidden"] },
+        "kind": { "enum": ["cells", "picture", "chart"] },
+        "rowStart": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "rowEnd": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "columnStart": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "columnEnd": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "defaultColumnWidthEmu": { "type": "integer", "minimum": 1, "maximum": 100000000 },
+        "defaultRowHeightEmu": { "type": "integer", "minimum": 1, "maximum": 100000000 }
       }
     },
     "sourceAnchor": {

@@ -205,6 +205,13 @@ pub struct BundleWriter {
     finished: bool,
 }
 
+struct ChunkWriteOptions {
+    region: String,
+    block_count: usize,
+    continuation: bool,
+    grid: Option<crate::GridChunkAddress>,
+}
+
 impl BundleWriter {
     pub fn create(root: impl AsRef<Path>) -> Result<Self, HcdError> {
         let root = root.as_ref().to_path_buf();
@@ -254,6 +261,48 @@ impl BundleWriter {
         source_map: ChunkSourceMap,
         block_count: usize,
         continuation: bool,
+    ) -> Result<ChunkDescriptor, HcdError> {
+        self.write_chunk_with_options(
+            chunk_id,
+            html,
+            source_map,
+            ChunkWriteOptions {
+                region,
+                block_count,
+                continuation,
+                grid: None,
+            },
+        )
+    }
+
+    pub fn write_grid_chunk(
+        &mut self,
+        chunk_id: String,
+        html: String,
+        source_map: ChunkSourceMap,
+        block_count: usize,
+        continuation: bool,
+        grid: crate::GridChunkAddress,
+    ) -> Result<ChunkDescriptor, HcdError> {
+        self.write_chunk_with_options(
+            chunk_id,
+            html,
+            source_map,
+            ChunkWriteOptions {
+                region: "sheet".to_string(),
+                block_count,
+                continuation,
+                grid: Some(grid),
+            },
+        )
+    }
+
+    fn write_chunk_with_options(
+        &mut self,
+        chunk_id: String,
+        html: String,
+        source_map: ChunkSourceMap,
+        options: ChunkWriteOptions,
     ) -> Result<ChunkDescriptor, HcdError> {
         if html.len() > MAX_CHUNK_BYTES {
             return Err(HcdError::ResourceLimit(format!(
@@ -307,13 +356,13 @@ impl BundleWriter {
         let descriptor = ChunkDescriptor {
             sequence: self.chunk_count,
             chunk_id,
-            region,
+            region: options.region,
             html_href,
             html_hash,
             map_href,
             map_hash,
             byte_length: html.len() as u64,
-            block_count,
+            block_count: options.block_count,
             node_count: source_map.entries.len(),
             text_chars: html_nodes.values().map(|text| text.chars().count()).sum(),
             node_bloom: node_bloom(
@@ -327,7 +376,8 @@ impl BundleWriter {
                 .first()
                 .map(|entry| entry.node_id.clone()),
             last_node_id: source_map.entries.last().map(|entry| entry.node_id.clone()),
-            continuation,
+            continuation: options.continuation,
+            grid: options.grid,
         };
         self.add_descriptor(descriptor.clone())?;
         Ok(descriptor)

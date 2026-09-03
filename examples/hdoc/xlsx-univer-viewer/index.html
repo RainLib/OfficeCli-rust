@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OfficeCLI HCD · Univer Canvas Viewer</title>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <strong>OfficeCLI HCD</strong>
+        <span id="status">正在读取分片索引…</span>
+      </div>
+      <label>Bundle URL <input id="bundle-url" spellcheck="false" /></label>
+      <label class="mode-control">模式
+        <select id="viewer-mode" aria-label="查看模式">
+          <option value="readonly">只读</option>
+          <option value="editable">可编辑</option>
+        </select>
+      </label>
+      <button id="load" type="button">加载</button>
+    </header>
+    <main id="app"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

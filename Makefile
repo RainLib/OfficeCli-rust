@@ -1,4 +1,4 @@
-.PHONY: build release dev check test clippy fmt fmt-fix lint clean run install install-local install-check dist download smoke hcd-stress help
+.PHONY: build release dev check test clippy fmt fmt-fix lint clean run install install-local install-check dist download smoke hcd-stress hcd-fidelity-audit help
 
 .DEFAULT_GOAL := help
 
@@ -101,6 +101,14 @@ smoke: build    ## Quick smoke test of release binary
 hcd-stress:     ## Import, patch, and export a ~2 GiB DOCX; enforce 512 MiB peak RSS
 	@chmod +x scripts/hcd-stress.sh
 	@./scripts/hcd-stress.sh
+
+hcd-fidelity-audit: ## Combine DOCX/PPTX/XLSX suite summaries (set *_SUMMARY and AUDIT_OUTPUT)
+	@chmod +x examples/hdoc/fidelity-audit/run.sh
+	@./examples/hdoc/fidelity-audit/run.sh \
+		"$(or $(DOCX_SUMMARY),examples/hdoc/docx-suite/output/summary.json)" \
+		"$(or $(PPTX_SUMMARY),examples/hdoc/pptx-suite/output/summary.json)" \
+		"$(or $(XLSX_SUMMARY),examples/hdoc/xlsx-suite/output/summary.json)" \
+		"$(or $(AUDIT_OUTPUT),/tmp/officecli-hcd-fidelity-audit)"
 
 # ── Clean ──────────────────────────────────────────────────────────────
 clean:          ## Remove build artifacts

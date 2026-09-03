@@ -5,8 +5,8 @@ use crate::common::{
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    SourceAnchor, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    FidelityReport, FidelityWarning, GridChunkAddress, GridChunkKind, HcdError, HcdManifest,
+    ImportEvent, NodeMapEntry, SourceAnchor, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -15,7 +15,7 @@ use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use time::{Date, Duration, Month};
 
@@ -24,6 +24,8 @@ const ROWS_PER_WINDOW: usize = 128;
 const MAX_MERGED_RANGES: usize = 1_000_000;
 const MAX_FORMAT_CODE_BYTES: usize = 1_024;
 const MAX_DRAWING_IMAGES: usize = 100_000;
+const MAX_DRAWING_CHARTS: usize = 100_000;
+const MAX_CHART_REFERENCE_POINTS: usize = 2_048;
 const DEFAULT_COLUMN_WIDTH_EMU: i64 = 609_600;
 const DEFAULT_ROW_HEIGHT_EMU: i64 = 190_500;
 
@@ -66,6 +68,32 @@ struct XlsxDrawingPicture {
     asset: AssetRecord,
 }
 
+struct XlsxDrawingChart {
+    sheet_name: String,
+    sheet_part: String,
+    drawing_part: String,
+    chart_part: String,
+    ordinal: u64,
+    anchor: XlsxDrawingAnchor,
+}
+
+#[derive(Clone, Copy)]
+enum ChartSeriesField {
+    Name,
+    Categories,
+    XValues,
+    Values,
+    BubbleSizes,
+}
+
+struct ChartRangeRequest {
+    series_index: usize,
+    field: ChartSeriesField,
+    sheet_part: String,
+    range: MergeRange,
+    values: Vec<Option<String>>,
+}
+
 #[derive(Clone, Copy)]
 enum DrawingMarker {
     From,
@@ -76,6 +104,8 @@ enum DrawingMarker {
 struct SheetPart {
     name: String,
     part: String,
+    index: usize,
+    state: &'static str,
 }
 
 struct WorkbookInfo {
@@ -108,8 +138,17 @@ struct RenderedRow {
     html: String,
     entries: Vec<NodeMapEntry>,
     merge_end_row: Option<u32>,
-    cells: Vec<(u32, String)>,
+    cells: Vec<RenderedCell>,
     merge_anchors: Vec<MergeRange>,
+    merge_covers: Vec<MergeRange>,
+    first_column: Option<u32>,
+    last_column: Option<u32>,
+}
+
+struct RenderedCell {
+    column: u32,
+    span: u32,
+    html: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,6 +387,17 @@ impl MergeCursor {
             .filter(|range| range.start_row == row)
             .collect()
     }
+
+    fn current_row_covers(&self) -> Vec<MergeRange> {
+        let Some(row) = self.current_row else {
+            return Vec::new();
+        };
+        self.active_by_column
+            .values()
+            .map(|index| self.ranges[*index])
+            .filter(|range| range.start_row < row && row <= range.end_row)
+            .collect()
+    }
 }
 
 #[derive(Default)]
@@ -420,6 +470,8 @@ where
 {
     document_id: &'a str,
     sheet_name: &'a str,
+    sheet_index: usize,
+    sheet_state: &'static str,
     part: &'a str,
     writer: &'a mut BundleWriter,
     emit: &'a mut F,
@@ -429,10 +481,13 @@ where
     rows: usize,
     first_row: Option<u64>,
     last_row: Option<u64>,
+    first_column: Option<u32>,
+    last_column: Option<u32>,
     html: String,
     entries: Vec<NodeMapEntry>,
     column_markup: String,
     default_column_width: Option<f64>,
+    default_row_height: Option<f64>,
     view_attributes: String,
     hold_until_row: Option<u32>,
 }
@@ -443,8 +498,7 @@ where
 {
     fn new(
         document_id: &'a str,
-        sheet_name: &'a str,
-        part: &'a str,
+        sheet: &'a SheetPart,
         options: &ImportOptions,
         view: &WorksheetViewMetadata,
         writer: &'a mut BundleWriter,
@@ -452,8 +506,10 @@ where
     ) -> Self {
         Self {
             document_id,
-            sheet_name,
-            part,
+            sheet_name: &sheet.name,
+            sheet_index: sheet.index,
+            sheet_state: sheet.state,
+            part: &sheet.part,
             writer,
             emit,
             soft_bytes: options.chunk_soft_bytes.min(MAX_CHUNK_BYTES),
@@ -462,10 +518,13 @@ where
             rows: 0,
             first_row: None,
             last_row: None,
+            first_column: None,
+            last_column: None,
             html: String::new(),
             entries: Vec::new(),
             column_markup: String::new(),
             default_column_width: None,
+            default_row_height: None,
             view_attributes: view.html_attributes(),
             hold_until_row: None,
         }
@@ -505,6 +564,18 @@ where
         }
         self.first_row.get_or_insert(row.number);
         self.last_row = Some(row.number);
+        if let Some(first_column) = row.first_column {
+            self.first_column = Some(
+                self.first_column
+                    .map_or(first_column, |current| current.min(first_column)),
+            );
+        }
+        if let Some(last_column) = row.last_column {
+            self.last_column = Some(
+                self.last_column
+                    .map_or(last_column, |current| current.max(last_column)),
+            );
+        }
         if let Some(end_row) = row.merge_end_row {
             self.hold_until_row = Some(self.hold_until_row.unwrap_or(0).max(end_row));
         }
@@ -531,12 +602,19 @@ where
             .default_column_width
             .map(|width| format!(" data-hcd-default-column-width=\"{width:.2}\""))
             .unwrap_or_default();
+        let default_height = self
+            .default_row_height
+            .map(|height| format!(" data-hcd-default-row-height-points=\"{height:.2}\""))
+            .unwrap_or_default();
         let html = format!(
-            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-row-start=\"{}\" data-hcd-row-end=\"{}\"{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody>{}</tbody></table></section>",
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\" data-hcd-row-start=\"{}\" data-hcd-row-end=\"{}\"{}{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody>{}</tbody></table></section>",
             escape_attribute(self.sheet_name),
+            self.sheet_index,
+            self.sheet_state,
             first,
             last,
             default_width,
+            default_height,
             self.view_attributes,
             self.column_markup,
             self.html
@@ -546,19 +624,33 @@ where
             chunk_id: chunk_id.clone(),
             entries: std::mem::take(&mut self.entries),
         };
-        let descriptor = self.writer.write_chunk(
+        let descriptor = self.writer.write_grid_chunk(
             chunk_id,
-            "sheet".to_string(),
             html,
             map,
             self.rows,
             self.ordinal > 0,
+            GridChunkAddress {
+                sheet_id: sheet_grid_id(self.document_id, self.part),
+                sheet_name: self.sheet_name.to_string(),
+                sheet_index: self.sheet_index,
+                sheet_state: self.sheet_state.to_string(),
+                kind: GridChunkKind::Cells,
+                row_start: Some(first),
+                row_end: Some(last),
+                column_start: self.first_column,
+                column_end: self.last_column,
+                default_column_width_emu: Some(default_column_width_emu(self.default_column_width)),
+                default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
+            },
         )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
         self.ordinal += 1;
         self.rows = 0;
         self.first_row = None;
         self.last_row = None;
+        self.first_column = None;
+        self.last_column = None;
         self.hold_until_row = None;
         self.html.clear();
         Ok(())
@@ -582,10 +674,17 @@ where
             .default_column_width
             .map(|width| format!(" data-hcd-default-column-width=\"{width:.2}\""))
             .unwrap_or_default();
+        let default_height = self
+            .default_row_height
+            .map(|height| format!(" data-hcd-default-row-height-points=\"{height:.2}\""))
+            .unwrap_or_default();
         let html = format!(
-            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\"{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody></tbody></table></section>",
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\"{}{}{}><table class=\"hcd-grid\"><colgroup>{}</colgroup><tbody></tbody></table></section>",
             escape_attribute(self.sheet_name),
+            self.sheet_index,
+            self.sheet_state,
             default_width,
+            default_height,
             self.view_attributes,
             self.column_markup
         );
@@ -594,9 +693,26 @@ where
             chunk_id: chunk_id.clone(),
             entries: Vec::new(),
         };
-        let descriptor =
-            self.writer
-                .write_chunk(chunk_id, "sheet".to_string(), html, map, 1, false)?;
+        let descriptor = self.writer.write_grid_chunk(
+            chunk_id,
+            html,
+            map,
+            1,
+            false,
+            GridChunkAddress {
+                sheet_id: sheet_grid_id(self.document_id, self.part),
+                sheet_name: self.sheet_name.to_string(),
+                sheet_index: self.sheet_index,
+                sheet_state: self.sheet_state.to_string(),
+                kind: GridChunkKind::Cells,
+                row_start: None,
+                row_end: None,
+                column_start: None,
+                column_end: None,
+                default_column_width_emu: Some(default_column_width_emu(self.default_column_width)),
+                default_row_height_emu: Some(default_row_height_emu(self.default_row_height)),
+            },
+        )?;
         (self.emit)(&ImportEvent::ChunkReady { descriptor })?;
         self.ordinal += 1;
         Ok(())
@@ -731,7 +847,7 @@ fn render_xlsx_styles(
     archive: &mut StreamingOxmlArchive,
 ) -> Result<(String, XlsxStyleCatalog), HcdError> {
     let mut css = String::from(
-        ".hcd-grid{border-collapse:collapse}.hcd-grid td{border:1px solid #ddd;padding:.2em .35em}.hcd-grid span{white-space:pre-wrap}.hcd-sheet[data-hcd-show-grid-lines=\"false\"] .hcd-grid td{border-color:transparent}.hcd-sheet-drawing-layer{position:relative;overflow:auto;background:repeating-linear-gradient(0deg,#fff 0,#fff 19px,#eef1f5 20px),repeating-linear-gradient(90deg,transparent 0,transparent 63px,#eef1f5 64px)}.hcd-sheet-picture{position:absolute;box-sizing:border-box;overflow:hidden}.hcd-sheet-picture img{display:block;width:100%;height:100%;object-fit:contain}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
+        ".hcd-sheet{overflow:auto;background:#fff}.hcd-grid{border-collapse:separate;border-spacing:0;table-layout:fixed;background:#fff}.hcd-grid td{box-sizing:border-box;min-width:64px;height:20px;border:0;border-right:1px solid #ddd;border-bottom:1px solid #ddd;padding:.2em .35em;vertical-align:middle;white-space:nowrap}.hcd-grid .hcd-empty{background:#fff}.hcd-grid td>span{white-space:inherit}.hcd-sheet[data-hcd-show-grid-lines=\"false\"] .hcd-grid td{border-color:transparent}.hcd-sheet-drawing-layer{position:relative;overflow:auto;background:repeating-linear-gradient(0deg,#fff 0,#fff 19px,#eef1f5 20px),repeating-linear-gradient(90deg,transparent 0,transparent 63px,#eef1f5 64px)}.hcd-sheet-picture,.hcd-sheet-chart{position:absolute;box-sizing:border-box;overflow:hidden;background:#fff}.hcd-sheet-picture img,.hcd-sheet-chart img{display:block;width:100%;height:100%;object-fit:contain}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id],body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-chart[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-picture[data-hcd-id]:hover,body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-sheet-chart[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
     );
     if !archive.contains("xl/styles.xml") {
         return Ok((css, XlsxStyleCatalog::default()));
@@ -1956,8 +2072,7 @@ where
             .map_err(package_error)?;
         let mut chunks = SheetChunkWriter::new(
             &options.document_id,
-            &sheet.name,
-            &sheet.part,
+            sheet,
             options,
             &view,
             &mut writer,
@@ -1985,11 +2100,7 @@ where
     // Worksheet text is the progressive primary representation. Media is
     // content-addressed afterwards so a workbook with large drawings does not
     // delay every sheet chunk even though drawings remain read-only in hcd/1.
-    let assets = import_assets(&mut archive, &writer, emit)?;
-    std::fs::write(
-        writer.root().join("assets/index.json"),
-        serde_json::to_vec(&assets)?,
-    )?;
+    let mut assets = import_assets(&mut archive, &writer, emit)?;
     let drawing_image_count = import_sheet_drawing_images(
         &mut archive,
         &workbook.sheets,
@@ -1998,11 +2109,24 @@ where
         &mut writer,
         emit,
     )?;
+    let (drawing_chart_count, chart_assets) = import_sheet_drawing_charts(
+        &mut archive,
+        &workbook.sheets,
+        &mut shared_strings,
+        &options.document_id,
+        &mut writer,
+        emit,
+    )?;
+    assets.extend(chart_assets);
+    std::fs::write(
+        writer.root().join("assets/index.json"),
+        serde_json::to_vec(&assets)?,
+    )?;
 
     let mut manifest = base_manifest(options, "xlsx", "grid", source_hash, source_size);
     manifest.warnings.push(FidelityWarning {
         code: "XLSX_ADVANCED_VISUALS_EXTERNAL".to_string(),
-        message: "HCD materializes worksheet view/frozen-pane metadata, merged ranges, direct cell styles, row/column dimensions, common numeric display formats and content-addressed worksheet pictures; conditional formatting, charts, shapes and unsupported drawing types remain authoritative in the immutable source".to_string(),
+        message: "HCD materializes worksheet view/frozen-pane metadata, merged ranges, direct cell styles, row/column dimensions, common numeric display formats, worksheet pictures and bounded chart series from caches or worksheet references; conditional formatting, shapes and unsupported drawing types remain authoritative in the immutable source".to_string(),
         node_id: None,
         source_part: Some("xl/styles.xml".to_string()),
     });
@@ -2026,7 +2150,10 @@ where
                 .to_string(),
             "merged cell ranges as bounded HTML rowspans and colspans".to_string(),
             format!(
-                "{drawing_image_count} worksheet pictures with stable visual node IDs, source anchors and bounded approximate drawing geometry"
+                "{drawing_image_count} worksheet pictures with stable visual node IDs and complete OOXML anchor metadata including cell markers, offsets and extents"
+            ),
+            format!(
+                "{drawing_chart_count} worksheet charts rendered from cached series or bounded worksheet references with stable visual node IDs and complete OOXML anchor metadata including cell markers, offsets and extents"
             ),
             "worksheet view metadata including frozen/split panes, RTL, grid/header/zero/formula flags, zoom and initial visible cells"
                 .to_string(),
@@ -2037,7 +2164,7 @@ where
             "opaque workbook parts and media in the immutable source".to_string(),
         ],
         flattened: vec![
-            "locale-dependent, conditional and advanced number formats are best-effort; conditional formatting, charts, shapes and exact Excel row/column drawing metrics are not fully materialized in HTML".to_string(),
+            "locale-dependent, conditional and advanced number formats are best-effort; chart theme/effects, conditional formatting and shapes are not fully materialized; the static HTML fallback uses approximate drawing geometry while grid-canvas clients can reconstruct anchors from exact offsets and worksheet dimensions".to_string(),
             "showFormulas is preserved as view metadata, while HCD text continues to display cached cell values and formula expressions remain read-only"
                 .to_string(),
         ],
@@ -2140,6 +2267,15 @@ where
 
     let mut sheet_picture_counts = HashMap::<String, usize>::new();
     for picture in &pictures {
+        let sheet = sheets
+            .iter()
+            .find(|sheet| sheet.part == picture.sheet_part)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "drawing {} references unknown worksheet {}",
+                    picture.drawing_part, picture.sheet_part
+                ))
+            })?;
         let identity = picture
             .anchor
             .picture_id
@@ -2180,6 +2316,7 @@ where
             from_cell.as_deref(),
         );
         push_data_attribute(&mut attributes, "data-hcd-anchor-to", to_cell.as_deref());
+        append_drawing_anchor_attributes(&mut attributes, &picture.anchor);
         push_data_attribute(
             &mut attributes,
             "data-hcd-picture-id",
@@ -2199,8 +2336,10 @@ where
         let canvas_width = x.saturating_add(width).max(DEFAULT_COLUMN_WIDTH_EMU);
         let canvas_height = y.saturating_add(height).max(DEFAULT_ROW_HEIGHT_EMU);
         let html = format!(
-            "<section class=\"hcd-sheet-drawing-layer\" data-hcd-sheet=\"{}\" style=\"width:{:.2}px;height:{:.2}px\"><div class=\"hcd-sheet-picture\"{attributes} style=\"left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px\"><img src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\" alt=\"{}\"/></div></section>",
+            "<section class=\"hcd-sheet-drawing-layer\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\" style=\"width:{:.2}px;height:{:.2}px\"><div class=\"hcd-sheet-picture\"{attributes} style=\"left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px\"><img src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\" alt=\"{}\"/></div></section>",
             escape_attribute(&picture.sheet_name),
+            sheet.index,
+            sheet.state,
             emu_to_px(canvas_width),
             emu_to_px(canvas_height),
             emu_to_px(x),
@@ -2214,9 +2353,8 @@ where
         let count = sheet_picture_counts
             .entry(picture.sheet_part.clone())
             .or_default();
-        let descriptor = writer.write_chunk(
+        let descriptor = writer.write_grid_chunk(
             chunk_id,
-            "sheet".to_string(),
             html,
             ChunkSourceMap {
                 schema_version: HCD_SCHEMA_VERSION.to_string(),
@@ -2231,11 +2369,708 @@ where
             },
             1,
             *count > 0,
+            drawing_grid_address(document_id, sheet, &picture.anchor, GridChunkKind::Picture),
         )?;
         *count += 1;
         emit(&ImportEvent::ChunkReady { descriptor })?;
     }
     Ok(pictures.len())
+}
+
+fn import_sheet_drawing_charts<F>(
+    archive: &mut StreamingOxmlArchive,
+    sheets: &[SheetPart],
+    shared_strings: &mut SharedStringStore,
+    document_id: &str,
+    writer: &mut BundleWriter,
+    emit: &mut F,
+) -> Result<(usize, Vec<AssetRecord>), HcdError>
+where
+    F: FnMut(&ImportEvent) -> Result<(), HcdError>,
+{
+    let mut charts = Vec::new();
+    for sheet in sheets {
+        let mut drawing_parts = worksheet_drawing_parts(archive, &sheet.part)?;
+        drawing_parts.sort();
+        drawing_parts.dedup();
+        for drawing_part in drawing_parts {
+            let relationships = drawing_chart_relationships(archive, &drawing_part)?;
+            if relationships.is_empty() || !archive.contains(&drawing_part) {
+                continue;
+            }
+            let remaining = MAX_DRAWING_CHARTS.saturating_sub(charts.len());
+            let mut parsed = archive
+                .with_part(&drawing_part, |source| {
+                    parse_drawing_charts(
+                        source,
+                        &sheet.name,
+                        &sheet.part,
+                        &drawing_part,
+                        &relationships,
+                        remaining,
+                    )
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                })
+                .map_err(package_error)?;
+            charts.append(&mut parsed);
+        }
+    }
+
+    let mut chart_assets = Vec::new();
+    let mut sheet_chart_counts = HashMap::<String, usize>::new();
+    for chart in &charts {
+        let sheet = sheets
+            .iter()
+            .find(|sheet| sheet.part == chart.sheet_part)
+            .ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "drawing {} references unknown worksheet {}",
+                    chart.drawing_part, chart.sheet_part
+                ))
+            })?;
+        let chart_xml = archive
+            .read_control_part(&chart.chart_part, MAX_CONTROL_BYTES)
+            .map_err(package_error)?;
+        let chart_xml = std::str::from_utf8(&chart_xml).map_err(|error| {
+            HcdError::InvalidBundle(format!("chart {} is not UTF-8: {error}", chart.chart_part))
+        })?;
+        let mut preview = oxml::chart_preview::parse_chart_preview(chart_xml).map_err(|error| {
+            HcdError::InvalidBundle(format!(
+                "cannot render cached chart {}: {error}",
+                chart.chart_part
+            ))
+        })?;
+        hydrate_chart_preview(
+            archive,
+            sheets,
+            &chart.sheet_name,
+            shared_strings,
+            &mut preview,
+        )?;
+        let svg = oxml::chart_preview::render_preview_svg(&preview);
+        let (href, asset_hash, byte_length) =
+            writer.write_asset_from_reader("svg", &mut Cursor::new(svg.as_bytes()))?;
+        emit(&ImportEvent::AssetReady {
+            hash: asset_hash.clone(),
+            href: href.clone(),
+            byte_length,
+        })?;
+        chart_assets.push(AssetRecord {
+            source_part: chart.chart_part.clone(),
+            hash: asset_hash.clone(),
+            href: href.clone(),
+            byte_length,
+        });
+
+        let identity = chart
+            .anchor
+            .picture_id
+            .clone()
+            .unwrap_or_else(|| chart.ordinal.to_string());
+        let node_id = stable_node_id(&[
+            document_id,
+            &chart.sheet_part,
+            &chart.drawing_part,
+            "chart",
+            &identity,
+        ]);
+        let chunk_id =
+            stable_node_id(&[document_id, &chart.drawing_part, "chart-chunk", &identity])
+                .replacen("n_", "c_", 1);
+        // HCD node hashes cover editable/textual node content. The chart is a
+        // read-only visual node whose element text is empty, while the source
+        // chart hash is retained separately as a preflight/fidelity signal.
+        let node_hash = hash_bytes(b"");
+        let source_hash = hash_bytes(chart_xml.as_bytes());
+        let (x, y, width, height) = drawing_geometry(&chart.anchor);
+        let source_path = format!("/chart[{}]", chart.ordinal);
+        let from_cell = drawing_cell(chart.anchor.from_col, chart.anchor.from_row);
+        let to_cell = drawing_cell(chart.anchor.to_col, chart.anchor.to_row);
+        let mut attributes = format!(
+            " data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-source-hash=\"{source_hash}\" data-hcd-node-kind=\"chart\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\" data-hcd-drawing-part=\"{}\" data-hcd-chart-part=\"{}\" data-hcd-anchor-kind=\"{}\" data-hcd-x-emu=\"{x}\" data-hcd-y-emu=\"{y}\" data-hcd-width-emu=\"{width}\" data-hcd-height-emu=\"{height}\"",
+            escape_attribute(&chart.chart_part),
+            escape_attribute(&chart.drawing_part),
+            escape_attribute(&chart.chart_part),
+            escape_attribute(&chart.anchor.kind),
+        );
+        push_data_attribute(
+            &mut attributes,
+            "data-hcd-anchor-from",
+            from_cell.as_deref(),
+        );
+        push_data_attribute(&mut attributes, "data-hcd-anchor-to", to_cell.as_deref());
+        append_drawing_anchor_attributes(&mut attributes, &chart.anchor);
+        push_data_attribute(
+            &mut attributes,
+            "data-hcd-chart-id",
+            chart.anchor.picture_id.as_deref(),
+        );
+        push_data_attribute(
+            &mut attributes,
+            "data-hcd-chart-name",
+            chart.anchor.name.as_deref(),
+        );
+        let alt = chart.anchor.name.as_deref().unwrap_or("Worksheet chart");
+        let canvas_width = x.saturating_add(width).max(DEFAULT_COLUMN_WIDTH_EMU);
+        let canvas_height = y.saturating_add(height).max(DEFAULT_ROW_HEIGHT_EMU);
+        let html = format!(
+            "<section class=\"hcd-sheet-drawing-layer\" data-hcd-sheet=\"{}\" data-hcd-sheet-index=\"{}\" data-hcd-sheet-state=\"{}\" style=\"width:{:.2}px;height:{:.2}px\"><div class=\"hcd-sheet-chart\"{attributes} style=\"left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px\"><img src=\"asset://sha256/{asset_hash}\" data-hcd-asset-href=\"{}\" alt=\"{}\"/></div></section>",
+            escape_attribute(&chart.sheet_name),
+            sheet.index,
+            sheet.state,
+            emu_to_px(canvas_width),
+            emu_to_px(canvas_height),
+            emu_to_px(x),
+            emu_to_px(y),
+            emu_to_px(width),
+            emu_to_px(height),
+            escape_attribute(&href),
+            escape_attribute(alt),
+        );
+        let map = ChunkSourceMap {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            chunk_id: chunk_id.clone(),
+            entries: vec![NodeMapEntry {
+                node_id,
+                node_hash,
+                source: SourceAnchor {
+                    part: chart.chart_part.clone(),
+                    text_ordinal: chart.ordinal,
+                    paragraph_id: Some(chart.drawing_part.clone()),
+                    text_id: chart.anchor.picture_id.clone(),
+                    node_kind: "chart".to_string(),
+                    editable: false,
+                },
+            }],
+        };
+        let count = sheet_chart_counts
+            .entry(chart.sheet_part.clone())
+            .or_default();
+        let descriptor = writer.write_grid_chunk(
+            chunk_id,
+            html,
+            map,
+            1,
+            *count > 0,
+            drawing_grid_address(document_id, sheet, &chart.anchor, GridChunkKind::Chart),
+        )?;
+        *count += 1;
+        emit(&ImportEvent::ChunkReady { descriptor })?;
+    }
+    Ok((charts.len(), chart_assets))
+}
+
+fn hydrate_chart_preview(
+    archive: &mut StreamingOxmlArchive,
+    sheets: &[SheetPart],
+    default_sheet_name: &str,
+    shared_strings: &mut SharedStringStore,
+    preview: &mut oxml::chart_preview::ChartPreview,
+) -> Result<(), HcdError> {
+    let mut requests = Vec::new();
+    for (series_index, series) in preview.series.iter().enumerate() {
+        if series.name.starts_with("Series ") {
+            push_chart_range_request(
+                &mut requests,
+                sheets,
+                default_sheet_name,
+                series_index,
+                ChartSeriesField::Name,
+                series.name_formula.as_deref(),
+            );
+        }
+        if series.categories.is_empty() {
+            push_chart_range_request(
+                &mut requests,
+                sheets,
+                default_sheet_name,
+                series_index,
+                ChartSeriesField::Categories,
+                series.categories_formula.as_deref(),
+            );
+        }
+        if series.x_values.is_empty() {
+            push_chart_range_request(
+                &mut requests,
+                sheets,
+                default_sheet_name,
+                series_index,
+                ChartSeriesField::XValues,
+                series.x_values_formula.as_deref(),
+            );
+        }
+        if series.values.is_empty() {
+            push_chart_range_request(
+                &mut requests,
+                sheets,
+                default_sheet_name,
+                series_index,
+                ChartSeriesField::Values,
+                series.values_formula.as_deref(),
+            );
+        }
+        if series.bubble_sizes.is_empty() {
+            push_chart_range_request(
+                &mut requests,
+                sheets,
+                default_sheet_name,
+                series_index,
+                ChartSeriesField::BubbleSizes,
+                series.bubble_sizes_formula.as_deref(),
+            );
+        }
+    }
+    if requests.is_empty() {
+        return Ok(());
+    }
+
+    let parts = requests
+        .iter()
+        .map(|request| request.sheet_part.clone())
+        .collect::<BTreeSet<_>>();
+    for part in parts {
+        archive
+            .with_part(&part, |source| {
+                scan_chart_reference_cells(source, &part, shared_strings, &mut requests)
+                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+            })
+            .map_err(package_error)?;
+    }
+
+    for request in requests {
+        let Some(series) = preview.series.get_mut(request.series_index) else {
+            continue;
+        };
+        if !request.values.iter().any(Option::is_some) {
+            continue;
+        }
+        let text_values = request
+            .values
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect::<Vec<_>>();
+        match request.field {
+            ChartSeriesField::Name => {
+                if let Some(name) = text_values.into_iter().find(|value| !value.is_empty()) {
+                    series.name = name;
+                }
+            }
+            ChartSeriesField::Categories => series.categories = text_values,
+            ChartSeriesField::XValues => {
+                series.x_values = chart_numeric_values(text_values);
+            }
+            ChartSeriesField::Values => {
+                series.values = chart_numeric_values(text_values);
+            }
+            ChartSeriesField::BubbleSizes => {
+                series.bubble_sizes = chart_numeric_values(text_values);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_chart_range_request(
+    requests: &mut Vec<ChartRangeRequest>,
+    sheets: &[SheetPart],
+    default_sheet_name: &str,
+    series_index: usize,
+    field: ChartSeriesField,
+    formula: Option<&str>,
+) {
+    let Some(formula) = formula else {
+        return;
+    };
+    let Some((sheet_part, range)) =
+        parse_chart_formula_reference(formula, sheets, default_sheet_name)
+    else {
+        return;
+    };
+    let rows = u64::from(range.end_row - range.start_row + 1);
+    let columns = u64::from(range.end_col - range.start_col + 1);
+    let Some(point_count) = rows.checked_mul(columns) else {
+        return;
+    };
+    if point_count == 0 || point_count > MAX_CHART_REFERENCE_POINTS as u64 {
+        return;
+    }
+    requests.push(ChartRangeRequest {
+        series_index,
+        field,
+        sheet_part,
+        range,
+        values: vec![None; point_count as usize],
+    });
+}
+
+fn parse_chart_formula_reference(
+    formula: &str,
+    sheets: &[SheetPart],
+    default_sheet_name: &str,
+) -> Option<(String, MergeRange)> {
+    let formula = formula.trim().strip_prefix('=').unwrap_or(formula.trim());
+    let (sheet_name, reference) = if let Some((sheet, reference)) = formula.rsplit_once('!') {
+        let sheet = sheet.trim();
+        if sheet.contains('[') || sheet.contains(']') {
+            return None;
+        }
+        let decoded = if sheet.starts_with('\'') && sheet.ends_with('\'') && sheet.len() >= 2 {
+            sheet[1..sheet.len() - 1].replace("''", "'")
+        } else {
+            sheet.to_string()
+        };
+        if decoded.contains(':') {
+            return None;
+        }
+        (decoded, reference)
+    } else {
+        (default_sheet_name.to_string(), formula)
+    };
+    let sheet = sheets.iter().find(|sheet| sheet.name == sheet_name)?;
+    let reference = reference.trim();
+    let range = if reference.contains(':') {
+        parse_merge_reference(reference)?
+    } else {
+        let (row, column) = cell_coordinates(reference)?;
+        MergeRange {
+            start_row: row,
+            end_row: row,
+            start_col: column,
+            end_col: column,
+        }
+    };
+    Some((sheet.part.clone(), range))
+}
+
+fn scan_chart_reference_cells(
+    source: &mut dyn Read,
+    worksheet_part: &str,
+    shared_strings: &mut SharedStringStore,
+    requests: &mut [ChartRangeRequest],
+) -> Result<(), HcdError> {
+    let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::with_capacity(64 * 1024);
+    let mut cell: Option<CellBuilder> = None;
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("worksheet {worksheet_part} XML: {error}"))
+        })?;
+        budget.observe(&event, worksheet_part)?;
+        match event {
+            Event::Start(ref start) if local_name(start.name().as_ref()) == "c" => {
+                cell = Some(CellBuilder {
+                    reference: attribute(start, "r").unwrap_or_default(),
+                    value_type: attribute(start, "t").unwrap_or_default(),
+                    ..Default::default()
+                });
+            }
+            Event::Empty(ref start) if local_name(start.name().as_ref()) == "c" => {
+                let finished = CellBuilder {
+                    reference: attribute(start, "r").unwrap_or_default(),
+                    value_type: attribute(start, "t").unwrap_or_default(),
+                    ..Default::default()
+                };
+                record_chart_reference_cell(worksheet_part, finished, shared_strings, requests)?;
+            }
+            Event::Start(ref start)
+                if cell.is_some() && local_name(start.name().as_ref()) == "v" =>
+            {
+                cell.as_mut().expect("checked cell").capture = Capture::Value;
+            }
+            Event::Start(ref start)
+                if cell.is_some() && local_name(start.name().as_ref()) == "t" =>
+            {
+                cell.as_mut().expect("checked cell").capture = Capture::InlineText;
+            }
+            Event::Text(text) if cell.is_some() => {
+                let decoded = text.unescape().map_err(|error| {
+                    HcdError::InvalidBundle(format!("worksheet chart text: {error}"))
+                })?;
+                let cell = cell.as_mut().expect("checked cell");
+                match cell.capture {
+                    Capture::Value => cell.value.push_str(&decoded),
+                    Capture::InlineText => cell.inline_text.push_str(&decoded),
+                    Capture::None => {}
+                }
+                if cell.value.len().max(cell.inline_text.len()) > MAX_CHUNK_BYTES {
+                    return Err(HcdError::ResourceLimit(format!(
+                        "NODE_TOO_LARGE: chart source cell {} exceeds 2 MiB",
+                        cell.reference
+                    )));
+                }
+            }
+            Event::End(ref end)
+                if cell.is_some() && matches!(local_name(end.name().as_ref()), "v" | "t") =>
+            {
+                cell.as_mut().expect("checked cell").capture = Capture::None;
+            }
+            Event::End(ref end) if local_name(end.name().as_ref()) == "c" => {
+                record_chart_reference_cell(
+                    worksheet_part,
+                    cell.take().unwrap_or_default(),
+                    shared_strings,
+                    requests,
+                )?;
+            }
+            Event::Eof => {
+                budget.finish(worksheet_part)?;
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(())
+}
+
+fn record_chart_reference_cell(
+    worksheet_part: &str,
+    cell: CellBuilder,
+    shared_strings: &mut SharedStringStore,
+    requests: &mut [ChartRangeRequest],
+) -> Result<(), HcdError> {
+    let Some((row, column)) = cell_coordinates(&cell.reference) else {
+        return Ok(());
+    };
+    if !requests.iter().any(|request| {
+        request.sheet_part == worksheet_part
+            && row >= request.range.start_row
+            && row <= request.range.end_row
+            && column >= request.range.start_col
+            && column <= request.range.end_col
+    }) {
+        return Ok(());
+    }
+    let value = match cell.value_type.as_str() {
+        "s" => shared_strings.get(cell.value.parse().map_err(|_| {
+            HcdError::InvalidBundle(format!(
+                "invalid shared string index in chart source cell {}",
+                cell.reference
+            ))
+        })?)?,
+        "inlineStr" => cell.inline_text,
+        "b" => match cell.value.as_str() {
+            "1" => "TRUE".to_string(),
+            "0" => "FALSE".to_string(),
+            _ => cell.value,
+        },
+        _ => cell.value,
+    };
+    for request in requests.iter_mut().filter(|request| {
+        request.sheet_part == worksheet_part
+            && row >= request.range.start_row
+            && row <= request.range.end_row
+            && column >= request.range.start_col
+            && column <= request.range.end_col
+    }) {
+        let width = request.range.end_col - request.range.start_col + 1;
+        let index = (row - request.range.start_row) * width + column - request.range.start_col;
+        if let Some(slot) = request.values.get_mut(index as usize) {
+            *slot = Some(value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn chart_numeric_values(values: Vec<String>) -> Vec<f64> {
+    values
+        .into_iter()
+        .filter_map(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .take(MAX_CHART_REFERENCE_POINTS)
+        .collect()
+}
+
+fn drawing_chart_relationships(
+    archive: &mut StreamingOxmlArchive,
+    drawing_part: &str,
+) -> Result<HashMap<String, String>, HcdError> {
+    let relationships_part = relationships_part_path(drawing_part)?;
+    if !archive.contains(&relationships_part) {
+        return Ok(HashMap::new());
+    }
+    let xml = archive
+        .read_control_part(&relationships_part, MAX_CONTROL_BYTES)
+        .map_err(package_error)?;
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut output = HashMap::new();
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("drawing relationships XML: {error}"))
+        })?;
+        budget.observe(&event, &relationships_part)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let chart = attribute(element, "Type").is_some_and(|kind| {
+                    let kind = kind.to_ascii_lowercase();
+                    kind.ends_with("/chart") || kind.ends_with("/chartex")
+                });
+                let external = attribute(element, "TargetMode")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                if chart && !external {
+                    if let (Some(id), Some(target)) =
+                        (attribute(element, "Id"), attribute(element, "Target"))
+                    {
+                        output.insert(id, resolve_part(drawing_part, &target)?);
+                    }
+                }
+            }
+            Event::Eof => {
+                budget.finish(&relationships_part)?;
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(output)
+}
+
+fn parse_drawing_charts(
+    source: &mut dyn Read,
+    sheet_name: &str,
+    sheet_part: &str,
+    drawing_part: &str,
+    relationships: &HashMap<String, String>,
+    maximum: usize,
+) -> Result<Vec<XlsxDrawingChart>, HcdError> {
+    let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::with_capacity(64 * 1024);
+    let mut charts = Vec::new();
+    let mut anchor: Option<XlsxDrawingAnchor> = None;
+    let mut marker = None;
+    let mut capture: Option<(&'static str, String)> = None;
+    let mut in_chart = false;
+    let mut ordinal = 0u64;
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("drawing {drawing_part} XML: {error}"))
+        })?;
+        budget.observe(&event, drawing_part)?;
+        match event {
+            Event::Start(ref element) => {
+                let element_name = element.name();
+                let name = local_name(element_name.as_ref());
+                match name {
+                    "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
+                        anchor = Some(XlsxDrawingAnchor {
+                            kind: match name {
+                                "twoCellAnchor" => "two-cell",
+                                "oneCellAnchor" => "one-cell",
+                                _ => "absolute",
+                            }
+                            .to_string(),
+                            ..XlsxDrawingAnchor::default()
+                        });
+                    }
+                    "from" if anchor.is_some() => marker = Some(DrawingMarker::From),
+                    "to" if anchor.is_some() => marker = Some(DrawingMarker::To),
+                    "col" | "row" | "colOff" | "rowOff" if marker.is_some() => {
+                        capture = Some((
+                            match name {
+                                "col" => "col",
+                                "row" => "row",
+                                "colOff" => "colOff",
+                                _ => "rowOff",
+                            },
+                            String::new(),
+                        ));
+                    }
+                    "graphicFrame" if anchor.is_some() => in_chart = true,
+                    "cNvPr" if in_chart => capture_picture_metadata(element, anchor.as_mut()),
+                    "chart" if in_chart => {
+                        if let Some(anchor) = anchor.as_mut() {
+                            anchor.relationship_id = attribute(element, "id");
+                        }
+                    }
+                    "pos" if anchor.is_some() => capture_anchor_position(element, anchor.as_mut()),
+                    "ext" if anchor.is_some() => capture_anchor_extent(element, anchor.as_mut()),
+                    _ => {}
+                }
+            }
+            Event::Empty(ref element) => {
+                let element_name = element.name();
+                let name = local_name(element_name.as_ref());
+                match name {
+                    "cNvPr" if in_chart => capture_picture_metadata(element, anchor.as_mut()),
+                    "chart" if in_chart => {
+                        if let Some(anchor) = anchor.as_mut() {
+                            anchor.relationship_id = attribute(element, "id");
+                        }
+                    }
+                    "pos" if anchor.is_some() => capture_anchor_position(element, anchor.as_mut()),
+                    "ext" if anchor.is_some() => capture_anchor_extent(element, anchor.as_mut()),
+                    _ => {}
+                }
+            }
+            Event::Text(ref text) => {
+                if let Some((_, value)) = &mut capture {
+                    let decoded = text.unescape().map_err(|error| {
+                        HcdError::InvalidBundle(format!(
+                            "drawing {drawing_part} anchor text: {error}"
+                        ))
+                    })?;
+                    value.push_str(&decoded);
+                }
+            }
+            Event::End(ref element) => {
+                let element_name = element.name();
+                let name = local_name(element_name.as_ref());
+                match name {
+                    "col" | "row" | "colOff" | "rowOff" => {
+                        if let Some((field, value)) = capture.take() {
+                            apply_anchor_marker(anchor.as_mut(), marker, field, &value);
+                        }
+                    }
+                    "from" | "to" => marker = None,
+                    "graphicFrame" => in_chart = false,
+                    "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
+                        let finished = anchor.take().ok_or_else(|| {
+                            HcdError::InvalidBundle(format!(
+                                "drawing {drawing_part} closes an anchor without opening it"
+                            ))
+                        })?;
+                        if let Some(chart_part) = finished
+                            .relationship_id
+                            .as_ref()
+                            .and_then(|id| relationships.get(id))
+                        {
+                            if charts.len() >= maximum {
+                                return Err(HcdError::ResourceLimit(format!(
+                                    "XLSX exceeds {MAX_DRAWING_CHARTS} worksheet charts"
+                                )));
+                            }
+                            ordinal += 1;
+                            charts.push(XlsxDrawingChart {
+                                sheet_name: sheet_name.to_string(),
+                                sheet_part: sheet_part.to_string(),
+                                drawing_part: drawing_part.to_string(),
+                                chart_part: chart_part.clone(),
+                                ordinal,
+                                anchor: finished,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Event::Eof => {
+                budget.finish(drawing_part)?;
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(charts)
 }
 
 fn worksheet_drawing_parts(
@@ -2567,6 +3402,45 @@ fn bounded_drawing_coordinate(value: i64) -> Option<i64> {
         .then_some(value)
 }
 
+fn append_drawing_anchor_attributes(output: &mut String, anchor: &XlsxDrawingAnchor) {
+    push_data_number(
+        output,
+        "data-hcd-from-column-offset-emu",
+        anchor.from_col_offset,
+    );
+    push_data_number(
+        output,
+        "data-hcd-from-row-offset-emu",
+        anchor.from_row_offset,
+    );
+    push_data_number(
+        output,
+        "data-hcd-to-column-offset-emu",
+        anchor.to_col_offset,
+    );
+    push_data_number(output, "data-hcd-to-row-offset-emu", anchor.to_row_offset);
+    push_data_number(output, "data-hcd-absolute-x-emu", anchor.x);
+    push_data_number(output, "data-hcd-absolute-y-emu", anchor.y);
+    push_data_number(output, "data-hcd-extent-width-emu", anchor.width);
+    push_data_number(output, "data-hcd-extent-height-emu", anchor.height);
+}
+
+fn default_column_width_emu(width: Option<f64>) -> u32 {
+    width
+        .map(|value| value * 7.5 * 9_525.0)
+        .unwrap_or(DEFAULT_COLUMN_WIDTH_EMU as f64)
+        .round()
+        .clamp(1.0, 100_000_000.0) as u32
+}
+
+fn default_row_height_emu(height_points: Option<f64>) -> u32 {
+    height_points
+        .map(|value| value * 12_700.0)
+        .unwrap_or(DEFAULT_ROW_HEIGHT_EMU as f64)
+        .round()
+        .clamp(1.0, 100_000_000.0) as u32
+}
+
 fn drawing_geometry(anchor: &XlsxDrawingAnchor) -> (i64, i64, i64, i64) {
     let from_x = anchor.x.unwrap_or_else(|| {
         i64::from(anchor.from_col.unwrap_or(0))
@@ -2848,6 +3722,31 @@ fn column_name(mut column: u32) -> String {
     output.iter().rev().collect()
 }
 
+fn sheet_grid_id(document_id: &str, sheet_part: &str) -> String {
+    stable_node_id(&[document_id, sheet_part, "worksheet"]).replacen("n_", "s_", 1)
+}
+
+fn drawing_grid_address(
+    document_id: &str,
+    sheet: &SheetPart,
+    anchor: &XlsxDrawingAnchor,
+    kind: GridChunkKind,
+) -> GridChunkAddress {
+    GridChunkAddress {
+        sheet_id: sheet_grid_id(document_id, &sheet.part),
+        sheet_name: sheet.name.clone(),
+        sheet_index: sheet.index,
+        sheet_state: sheet.state.to_string(),
+        kind,
+        row_start: anchor.from_row.map(|value| u64::from(value) + 1),
+        row_end: anchor.to_row.map(|value| u64::from(value) + 1),
+        column_start: anchor.from_col.map(|value| value + 1),
+        column_end: anchor.to_col.map(|value| value + 1),
+        default_column_width_emu: None,
+        default_row_height_emu: None,
+    }
+}
+
 fn begin_worksheet_row(
     element: &BytesStart<'_>,
     sheet: &SheetPart,
@@ -2894,6 +3793,9 @@ fn begin_worksheet_row(
         merge_end_row: None,
         cells: Vec::new(),
         merge_anchors: merged_ranges.current_row_anchors(),
+        merge_covers: merged_ranges.current_row_covers(),
+        first_column: None,
+        last_column: None,
     })
 }
 
@@ -2909,33 +3811,52 @@ fn merge_attributes(range: MergeRange) -> String {
 fn finish_worksheet_row(mut row: RenderedRow) -> Result<RenderedRow, HcdError> {
     for range in &row.merge_anchors {
         row.merge_end_row = Some(row.merge_end_row.unwrap_or(0).max(range.end_row));
-        if !row
-            .cells
-            .iter()
-            .any(|(column, _)| *column == range.start_col)
-        {
+        if !row.cells.iter().any(|cell| cell.column == range.start_col) {
             let reference = format!("{}{}", column_name(range.start_col), range.start_row);
-            row.cells.push((
-                range.start_col,
-                format!(
+            row.cells.push(RenderedCell {
+                column: range.start_col,
+                span: range.end_col - range.start_col + 1,
+                html: format!(
                     "<td class=\"hcd-cell hcd-merge-empty\" data-hcd-cell=\"{reference}\" data-hcd-column=\"{}\" data-hcd-editable=\"false\"{}></td>",
                     range.start_col,
                     merge_attributes(*range)
                 ),
-            ));
+            });
         }
     }
-    row.cells.sort_unstable_by_key(|(column, _)| *column);
+    row.cells.sort_unstable_by_key(|cell| cell.column);
     for pair in row.cells.windows(2) {
-        if pair[0].0 == pair[1].0 {
+        if pair[0].column == pair[1].column {
             return Err(HcdError::InvalidBundle(format!(
                 "worksheet row {} contains duplicate column {}",
-                row.number, pair[0].0
+                row.number, pair[0].column
             )));
         }
     }
-    for (_, cell_html) in row.cells.drain(..) {
-        row.html.push_str(&cell_html);
+    row.first_column = row.cells.first().map(|cell| cell.column);
+    row.last_column = row
+        .cells
+        .iter()
+        .map(|cell| cell.column.saturating_add(cell.span.max(1) - 1))
+        .max();
+    let mut logical_column = 1u32;
+    for cell in row.cells.drain(..) {
+        while logical_column < cell.column {
+            let covered = row
+                .merge_covers
+                .iter()
+                .any(|range| range.start_col <= logical_column && logical_column <= range.end_col);
+            if covered {
+                logical_column += 1;
+                continue;
+            }
+            row.html.push_str(&format!(
+                "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{logical_column}\"></td>"
+            ));
+            logical_column += 1;
+        }
+        row.html.push_str(&cell.html);
+        logical_column = cell.column.saturating_add(cell.span.max(1));
     }
     row.html.push_str("</tr>");
     Ok(row)
@@ -2989,6 +3910,9 @@ where
                 chunks.default_column_width = attribute(start, "defaultColWidth")
                     .and_then(|value| value.parse::<f64>().ok())
                     .filter(|value| (0.0..=255.0).contains(value));
+                chunks.default_row_height = attribute(start, "defaultRowHeight")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .filter(|value| (0.0..=409.0).contains(value));
             }
             Event::Start(ref start) | Event::Empty(ref start)
                 if local_name(start.name().as_ref()) == "col" =>
@@ -3231,9 +4155,14 @@ fn append_cell(
             )
         })
         .unwrap_or_default();
-    row.cells.push((
-        cell_col,
-        format!(
+    let column_span = match merged_ranges.classify(cell_row, cell_col) {
+        Some(MergePosition::Anchor(range)) => range.end_col - range.start_col + 1,
+        _ => 1,
+    };
+    row.cells.push(RenderedCell {
+        column: cell_col,
+        span: column_span,
+        html: format!(
             "<td class=\"hcd-cell{}\" data-hcd-cell=\"{}\" data-hcd-column=\"{}\"{}{}{}{}><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span></td>",
             cell.style_index
                 .map(|index| format!(" hcd-xs-{index}"))
@@ -3250,7 +4179,7 @@ fn append_cell(
             node_hash,
             escape_text(&formatted.text)
         ),
-    ));
+    });
     row.entries.push(NodeMapEntry {
         node_id,
         node_hash,
@@ -3338,7 +4267,18 @@ fn workbook_info(archive: &mut StreamingOxmlArchive) -> Result<WorkbookInfo, Hcd
                             "sheet {name} relationship {relationship_id} is missing"
                         ))
                     })?;
-                sheets.push(SheetPart { name, part });
+                let index = sheets.len();
+                let state = match attribute(start, "state").as_deref() {
+                    Some("hidden") => "hidden",
+                    Some("veryHidden") => "very-hidden",
+                    _ => "visible",
+                };
+                sheets.push(SheetPart {
+                    name,
+                    part,
+                    index,
+                    state,
+                });
             }
             Event::Eof => {
                 budget.finish("xl/workbook.xml")?;
@@ -3616,6 +4556,50 @@ mod tests {
     }
 
     #[test]
+    fn chart_formula_references_resolve_quoted_sheets_and_enforce_bounds() {
+        let sheets = vec![SheetPart {
+            name: "Sales Data's".to_string(),
+            part: "xl/worksheets/sheet7.xml".to_string(),
+            index: 0,
+            state: "visible",
+        }];
+        let (part, range) =
+            parse_chart_formula_reference("'Sales Data''s'!$B$2:$C$4", &sheets, "Sales Data's")
+                .unwrap();
+        assert_eq!(part, "xl/worksheets/sheet7.xml");
+        assert_eq!(range.start_row, 2);
+        assert_eq!(range.end_row, 4);
+        assert_eq!(range.start_col, 2);
+        assert_eq!(range.end_col, 3);
+        assert!(parse_chart_formula_reference(
+            "'[1]Sales Data''s'!$B$2:$C$4",
+            &sheets,
+            "Sales Data's"
+        )
+        .is_none());
+
+        let mut requests = Vec::new();
+        push_chart_range_request(
+            &mut requests,
+            &sheets,
+            "Sales Data's",
+            0,
+            ChartSeriesField::Values,
+            Some("'Sales Data''s'!$A$1:$A$2048"),
+        );
+        assert_eq!(requests.len(), 1);
+        push_chart_range_request(
+            &mut requests,
+            &sheets,
+            "Sales Data's",
+            0,
+            ChartSeriesField::Values,
+            Some("'Sales Data''s'!$A$1:$A$2049"),
+        );
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
     fn formats_common_excel_numbers_and_both_date_systems() {
         let mut catalog = XlsxStyleCatalog {
             cell_formats: vec![
@@ -3743,6 +4727,23 @@ mod tests {
             ".hcd-sheet[data-hcd-show-grid-lines=\"false\"] .hcd-grid td{border-color:transparent}"
         ));
         let page = bundle.read_index_page(&manifest, 0).unwrap();
+        let first_grid = page.chunks[0].grid.as_ref().unwrap();
+        assert_eq!(
+            first_grid.sheet_id,
+            sheet_grid_id("shared-string-doc", "xl/worksheets/sheet1.xml")
+        );
+        assert_eq!(first_grid.sheet_name, "Shared");
+        assert_eq!(first_grid.sheet_index, 0);
+        assert_eq!(first_grid.sheet_state, "visible");
+        assert_eq!(first_grid.kind, GridChunkKind::Cells);
+        assert_eq!(
+            (first_grid.row_start, first_grid.row_end),
+            (Some(1), Some(2))
+        );
+        assert_eq!(
+            (first_grid.column_start, first_grid.column_end),
+            (Some(1), Some(2))
+        );
         for descriptor in &page.chunks {
             let view_html = bundle.read_chunk(descriptor).unwrap();
             assert!(view_html.contains("data-hcd-sheet-view=\"page-break-preview\""));
@@ -3772,9 +4773,12 @@ mod tests {
         assert!(html.contains("data-hcd-row=\"2\""));
         assert!(!html.contains("data-hcd-row=\"3\""));
         let next_html = bundle.read_chunk(&page.chunks[1]).unwrap();
+        assert!(next_html.contains("data-hcd-sheet-index=\"0\""));
+        assert!(next_html.contains("data-hcd-sheet-state=\"visible\""));
         assert!(next_html.contains("data-hcd-row=\"3\""));
         assert!(next_html.contains("data-hcd-cell=\"C3\""));
         assert!(next_html.contains("data-hcd-cell=\"D3\""));
+        assert_eq!(next_html.matches("class=\"hcd-cell hcd-empty\"").count(), 2);
         assert!(next_html.contains("data-hcd-num-fmt-id=\"4\""));
         assert!(next_html.contains("data-hcd-display-kind=\"number\""));
         assert!(next_html.contains(">1,234.50</span>"));
@@ -3808,6 +4812,9 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         hcd_core::apply_patch(&bundle, &patch, 0).unwrap();
+        let patched_manifest = bundle.manifest().unwrap();
+        let patched_page = bundle.read_index_page(&patched_manifest, 0).unwrap();
+        assert_eq!(patched_page.chunks[0].grid.as_ref(), Some(first_grid));
         let report = export_xlsx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
         assert_eq!(report.level, FidelityLevel::High);
         let worksheet = read_zip_entry(&exported, "xl/worksheets/sheet1.xml");
@@ -3841,6 +4848,61 @@ mod tests {
     }
 
     #[test]
+    fn sparse_rows_keep_cells_in_their_excel_columns() {
+        let row = RenderedRow {
+            number: 9,
+            html: "<tr data-hcd-row=\"9\">".to_string(),
+            cells: vec![
+                RenderedCell {
+                    column: 1,
+                    span: 1,
+                    html: "<td data-hcd-column=\"1\">A9</td>".to_string(),
+                },
+                RenderedCell {
+                    column: 3,
+                    span: 1,
+                    html: "<td data-hcd-column=\"3\">C9</td>".to_string(),
+                },
+                RenderedCell {
+                    column: 6,
+                    span: 1,
+                    html: "<td data-hcd-column=\"6\">F9</td>".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let html = finish_worksheet_row(row).unwrap().html;
+        let columns = [1, 2, 3, 4, 5, 6]
+            .map(|column| html.find(&format!("data-hcd-column=\"{column}\"")))
+            .map(Option::unwrap);
+        assert!(columns.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(html.matches("class=\"hcd-cell hcd-empty\"").count(), 3);
+    }
+
+    #[test]
+    fn vertical_merge_columns_do_not_gain_duplicate_empty_cells() {
+        let row = RenderedRow {
+            number: 2,
+            html: "<tr data-hcd-row=\"2\">".to_string(),
+            cells: vec![RenderedCell {
+                column: 3,
+                span: 1,
+                html: "<td data-hcd-column=\"3\">C2</td>".to_string(),
+            }],
+            merge_covers: vec![MergeRange {
+                start_row: 1,
+                end_row: 2,
+                start_col: 1,
+                end_col: 2,
+            }],
+            ..Default::default()
+        };
+        let html = finish_worksheet_row(row).unwrap().html;
+        assert!(!html.contains("hcd-empty"));
+        assert!(html.contains("data-hcd-column=\"3\""));
+    }
+
+    #[test]
     fn worksheet_view_scan_preserves_split_positions_and_bounds_metadata() {
         let xml = r#"<worksheet><sheetViews><sheetView workbookViewId="0" view="pageLayout" topLeftCell="XFE1" rightToLeft="false" showGridLines="true" zoomScale="401"><pane xSplit="240.5" ySplit="480" topLeftCell="$D$5" activePane="topRight" state="split"/></sheetView></sheetViews><sheetData/></worksheet>"#;
         let mut source = xml.as_bytes();
@@ -3865,7 +4927,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_sheet_chunk_repeats_view_and_default_width_metadata() {
+    fn empty_sheet_chunk_repeats_view_and_default_grid_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let bundle_path = temp.path().join("bundle");
         let mut writer = BundleWriter::create(&bundle_path).unwrap();
@@ -3892,23 +4954,35 @@ mod tests {
         };
 
         {
+            let sheet = SheetPart {
+                name: "Empty".to_string(),
+                part: "xl/worksheets/sheet1.xml".to_string(),
+                index: 0,
+                state: "visible",
+            };
             let mut chunks = SheetChunkWriter::new(
                 "empty-sheet-doc",
-                "Empty",
-                "xl/worksheets/sheet1.xml",
+                &sheet,
                 &options,
                 &view,
                 &mut writer,
                 &mut emit,
             );
             chunks.default_column_width = Some(8.43);
+            chunks.default_row_height = Some(15.0);
             chunks.finish().unwrap();
         }
 
         assert_eq!(descriptors.len(), 1);
         let html = std::fs::read_to_string(bundle_path.join(&descriptors[0].html_href)).unwrap();
         assert!(html.contains("data-hcd-sheet=\"Empty\""));
+        assert!(html.contains("data-hcd-sheet-index=\"0\""));
+        assert!(html.contains("data-hcd-sheet-state=\"visible\""));
         assert!(html.contains("data-hcd-default-column-width=\"8.43\""));
+        assert!(html.contains("data-hcd-default-row-height-points=\"15.00\""));
+        let grid = descriptors[0].grid.as_ref().unwrap();
+        assert_eq!(grid.default_column_width_emu, Some(602_218));
+        assert_eq!(grid.default_row_height_emu, Some(190_500));
         assert!(html.contains("data-hcd-sheet-view=\"normal\""));
         assert!(html.contains("data-hcd-show-grid-lines=\"false\""));
         assert!(html.contains("data-hcd-pane-state=\"frozen\""));
@@ -3917,6 +4991,33 @@ mod tests {
         assert!(html.contains("data-hcd-pane-top-left-cell=\"C2\""));
         assert!(html.contains("data-hcd-active-pane=\"bottom-right\""));
         assert!(html.contains("<tbody></tbody>"));
+    }
+
+    #[test]
+    fn drawing_anchor_attributes_preserve_cell_offsets_and_extents() {
+        let anchor = XlsxDrawingAnchor {
+            kind: "two-cell".to_string(),
+            from_col_offset: Some(95_250),
+            from_row_offset: Some(190_500),
+            to_col_offset: Some(285_750),
+            to_row_offset: Some(381_000),
+            x: Some(476_250),
+            y: Some(571_500),
+            width: Some(952_500),
+            height: Some(1_905_000),
+            ..Default::default()
+        };
+        let mut attributes = String::new();
+        append_drawing_anchor_attributes(&mut attributes, &anchor);
+
+        assert!(attributes.contains("data-hcd-from-column-offset-emu=\"95250\""));
+        assert!(attributes.contains("data-hcd-from-row-offset-emu=\"190500\""));
+        assert!(attributes.contains("data-hcd-to-column-offset-emu=\"285750\""));
+        assert!(attributes.contains("data-hcd-to-row-offset-emu=\"381000\""));
+        assert!(attributes.contains("data-hcd-absolute-x-emu=\"476250\""));
+        assert!(attributes.contains("data-hcd-absolute-y-emu=\"571500\""));
+        assert!(attributes.contains("data-hcd-extent-width-emu=\"952500\""));
+        assert!(attributes.contains("data-hcd-extent-height-emu=\"1905000\""));
     }
 
     fn create_shared_string_fixture(path: &Path) {

@@ -70,6 +70,7 @@ struct ParagraphBuilder {
     nested: Vec<RenderedBlock>,
     ordinal: u64,
     run_ordinal: usize,
+    has_visible_text: bool,
 }
 
 #[derive(Default, Clone)]
@@ -87,6 +88,7 @@ struct ParagraphFormat {
     before_twips: Option<i64>,
     after_twips: Option<i64>,
     line_twips: Option<i64>,
+    line_rule: Option<String>,
     numbering_id: Option<String>,
     numbering_level: Option<String>,
     conditional_style: ConditionalStyleMask,
@@ -131,6 +133,7 @@ struct RunFormat {
 #[derive(Default)]
 struct WordStyleDefinition {
     kind: Option<String>,
+    is_default: bool,
     based_on: Option<String>,
     linked: Option<String>,
     paragraph: ParagraphFormat,
@@ -244,6 +247,7 @@ const CONDITIONAL_STYLE_FLAGS: [ConditionalStyleFlag; 12] = [
 struct RenderedWordStyles {
     css: String,
     table_bands: TableBandCatalog,
+    paragraph_numbering: BTreeMap<String, (String, Option<String>)>,
 }
 
 struct StylePropertyScope<'a> {
@@ -383,6 +387,13 @@ struct NumberLevel {
     level_text: String,
     suffix: String,
     font: Option<String>,
+    left_twips: Option<i64>,
+    hanging_twips: Option<i64>,
+    alignment: Option<String>,
+    size_half_points: Option<u32>,
+    color: Option<String>,
+    bold: bool,
+    italic: bool,
 }
 
 impl Default for NumberLevel {
@@ -393,6 +404,13 @@ impl Default for NumberLevel {
             level_text: "%1.".to_string(),
             suffix: "tab".to_string(),
             font: None,
+            left_twips: None,
+            hanging_twips: None,
+            alignment: None,
+            size_half_points: None,
+            color: None,
+            bold: false,
+            italic: false,
         }
     }
 }
@@ -435,6 +453,12 @@ struct NumberCounters {
 #[derive(Default)]
 struct NumberingState {
     instances: HashMap<String, NumberCounters>,
+    abstracts: HashMap<String, NumberCounters>,
+}
+
+struct RenderedNumberMarker {
+    html: String,
+    definition: NumberLevel,
 }
 
 fn load_word_theme(archive: &mut StreamingOxmlArchive) -> Result<WordTheme, HcdError> {
@@ -658,6 +682,7 @@ fn load_word_styles(
         return Ok(RenderedWordStyles {
             css: default_styles().to_string(),
             table_bands: BTreeMap::new(),
+            paragraph_numbering: BTreeMap::new(),
         });
     }
     let xml = archive
@@ -710,6 +735,9 @@ fn load_word_styles(
                                     style_id,
                                     WordStyleDefinition {
                                         kind: attribute_by_local_name(element, "type"),
+                                        is_default: on_off_value(
+                                            attribute_by_local_name(element, "default").as_deref(),
+                                        ),
                                         ..Default::default()
                                     },
                                 ));
@@ -800,13 +828,25 @@ fn load_word_styles(
     parse_table_style_layers(&xml, theme, &mut styles)?;
 
     let mut css = default_styles().to_string();
+    css.push_str(".hcd-empty-paragraph{min-height:1lh}");
+    css.push_str(".hcd-list-marker{box-sizing:border-box;text-indent:0}");
     let default_run_css = run_css_declarations(&default_run);
     if !default_run_css.is_empty() {
         css.push_str(".hcd-chunk{");
         css.push_str(&default_run_css.join(";"));
         css.push('}');
     }
-    let default_paragraph_css = paragraph_css_declarations(&default_paragraph);
+    let mut default_paragraph_css = paragraph_css_declarations(&default_paragraph);
+    if let Some((style_id, _)) = styles.iter().find(|(_, definition)| {
+        definition.kind.as_deref() == Some("paragraph") && definition.is_default
+    }) {
+        collect_style_declarations(
+            style_id,
+            &styles,
+            &mut HashSet::new(),
+            &mut default_paragraph_css,
+        );
+    }
     if !default_paragraph_css.is_empty() {
         css.push_str(".hcd-paragraph{");
         css.push_str(&default_paragraph_css.join(";"));
@@ -829,7 +869,46 @@ fn load_word_styles(
     append_table_style_css(&mut css, &styles);
     hcd_core::validate_css_text(&css)?;
     let table_bands = resolve_table_band_catalog(&styles);
-    Ok(RenderedWordStyles { css, table_bands })
+    let paragraph_numbering = resolve_paragraph_style_numbering(&styles);
+    Ok(RenderedWordStyles {
+        css,
+        table_bands,
+        paragraph_numbering,
+    })
+}
+
+fn resolve_paragraph_style_numbering(
+    styles: &BTreeMap<String, WordStyleDefinition>,
+) -> BTreeMap<String, (String, Option<String>)> {
+    fn resolve(
+        style_id: &str,
+        styles: &BTreeMap<String, WordStyleDefinition>,
+        visiting: &mut HashSet<String>,
+    ) -> (Option<String>, Option<String>) {
+        if !visiting.insert(style_id.to_string()) {
+            return (None, None);
+        }
+        let Some(style) = styles.get(style_id) else {
+            return (None, None);
+        };
+        let inherited = style
+            .based_on
+            .as_deref()
+            .map(|parent| resolve(parent, styles, visiting))
+            .unwrap_or_default();
+        (
+            style.paragraph.numbering_id.clone().or(inherited.0),
+            style.paragraph.numbering_level.clone().or(inherited.1),
+        )
+    }
+
+    styles
+        .keys()
+        .filter_map(|style_id| {
+            let (number_id, level) = resolve(style_id, styles, &mut HashSet::new());
+            number_id.map(|number_id| (style_id.clone(), (number_id, level)))
+        })
+        .collect()
 }
 
 fn resolve_table_band_catalog(styles: &BTreeMap<String, WordStyleDefinition>) -> TableBandCatalog {
@@ -1736,11 +1815,25 @@ fn capture_number_level_property(element: &BytesStart<'_>, level: Option<&mut Pe
         "numFmt" => level.definition.number_format = value.unwrap_or_default(),
         "lvlText" => level.definition.level_text = value.unwrap_or_default(),
         "suff" => level.definition.suffix = value.unwrap_or_default(),
+        "lvlJc" => level.definition.alignment = value,
+        "ind" => {
+            level.definition.left_twips =
+                signed_attribute(element, "left").or_else(|| signed_attribute(element, "start"));
+            level.definition.hanging_twips = signed_attribute(element, "hanging");
+        }
         "rFonts" => {
             level.definition.font = attribute_by_local_name(element, "ascii")
                 .or_else(|| attribute_by_local_name(element, "hAnsi"))
                 .or_else(|| attribute_by_local_name(element, "hint"));
         }
+        "sz" => {
+            level.definition.size_half_points = value.and_then(|value| value.parse::<u32>().ok())
+        }
+        "color" => {
+            level.definition.color = value.as_deref().and_then(normalized_hex_color);
+        }
+        "b" => level.definition.bold = on_off_value(value.as_deref()),
+        "i" => level.definition.italic = on_off_value(value.as_deref()),
         _ => {}
     }
 }
@@ -1768,12 +1861,23 @@ impl NumberingCatalog {
 }
 
 impl NumberingState {
+    #[cfg(test)]
     fn render_marker(
         &mut self,
         catalog: &NumberingCatalog,
         number_id: Option<&str>,
         level: Option<&str>,
     ) -> Option<String> {
+        self.render_marker_details(catalog, number_id, level)
+            .map(|marker| marker.html)
+    }
+
+    fn render_marker_details(
+        &mut self,
+        catalog: &NumberingCatalog,
+        number_id: Option<&str>,
+        level: Option<&str>,
+    ) -> Option<RenderedNumberMarker> {
         let number_id = number_id.filter(|value| *value != "0")?;
         let level = level
             .unwrap_or("0")
@@ -1794,17 +1898,41 @@ impl NumberingState {
         for parent in 0..=level {
             let index = usize::from(parent);
             if !counters.initialized[index] {
-                let start = instance
-                    .start_overrides
-                    .get(&parent)
-                    .copied()
-                    .or_else(|| catalog.level(instance, parent).map(|level| level.start))
-                    .unwrap_or(1);
+                let start = if let Some(start) = instance.start_overrides.get(&parent).copied() {
+                    start
+                } else if let Some(previous) = self
+                    .abstracts
+                    .get(&instance.abstract_id)
+                    .filter(|state| state.initialized[index])
+                    .map(|state| state.values[index])
+                {
+                    previous.saturating_add(1)
+                } else {
+                    catalog
+                        .level(instance, parent)
+                        .map(|level| level.start)
+                        .unwrap_or(1)
+                };
                 counters.values[index] = start;
                 counters.initialized[index] = true;
             } else if parent == level {
                 counters.values[index] = counters.values[index].saturating_add(1);
             }
+        }
+
+        let abstract_counters = self
+            .abstracts
+            .entry(instance.abstract_id.clone())
+            .or_default();
+        for index in 0..=usize::from(level) {
+            if counters.initialized[index] {
+                abstract_counters.values[index] = counters.values[index];
+                abstract_counters.initialized[index] = true;
+            }
+        }
+        for deeper in usize::from(level + 1)..abstract_counters.initialized.len() {
+            abstract_counters.values[deeper] = 0;
+            abstract_counters.initialized[deeper] = false;
         }
 
         let mut marker = definition.level_text.clone();
@@ -1828,21 +1956,56 @@ impl NumberingState {
             " class=\"hcd-list-marker\" data-hcd-editable=\"false\" data-hcd-num-format=\"{}\"",
             escape_attribute(&definition.number_format)
         );
+        let mut marker_css = Vec::new();
         if let Some(font) = definition.font.as_deref().and_then(safe_font_family) {
-            attributes.push_str(&format!(
-                " style=\"font-family:'{}'\"",
-                escape_attribute(&font.replace('\'', ""))
+            marker_css.push(format!("font-family:'{}'", font.replace('\'', "")));
+        }
+        if let Some(size) = definition.size_half_points {
+            marker_css.push(format!("font-size:{:.1}pt", f64::from(size) / 2.0));
+            marker_css.push(format!(
+                "line-height:{:.4}",
+                word_marker_line_height(definition.font.as_deref())
             ));
         }
-        let separator = if definition.suffix == "nothing" {
-            ""
-        } else {
-            "&#160;"
-        };
-        Some(format!(
-            "<span{attributes}>{}{separator}</span>",
-            escape_text(&marker)
-        ))
+        if let Some(color) = &definition.color {
+            marker_css.push(format!("color:#{color}"));
+        }
+        if definition.bold {
+            marker_css.push("font-weight:700".to_string());
+        }
+        if definition.italic {
+            marker_css.push("font-style:italic".to_string());
+        }
+        if let Some(alignment) = &definition.alignment {
+            marker_css.push(format!(
+                "text-align:{}",
+                match alignment.as_str() {
+                    "right" | "end" => "right",
+                    "center" => "center",
+                    _ => "left",
+                }
+            ));
+        }
+        if let Some(hanging) = definition.hanging_twips.filter(|value| *value > 0) {
+            marker_css.push(format!(
+                "display:inline-block;min-width:{:.1}pt",
+                hanging as f64 / 20.0
+            ));
+        }
+        match definition.suffix.as_str() {
+            "nothing" => {}
+            "space" => marker_css.push("padding-right:0.25em".to_string()),
+            _ => marker_css.push("padding-right:0.5em".to_string()),
+        }
+        if !marker_css.is_empty() {
+            attributes.push_str(" style=\"");
+            attributes.push_str(&escape_attribute(&marker_css.join(";")));
+            attributes.push('"');
+        }
+        Some(RenderedNumberMarker {
+            html: format!("<span{attributes}>{}</span>", escape_text(&marker)),
+            definition,
+        })
     }
 }
 
@@ -2122,6 +2285,7 @@ struct TextPartContext<'a> {
     part: &'a str,
     relationships: &'a PartRelationships,
     numbering: &'a NumberingCatalog,
+    paragraph_numbering: &'a BTreeMap<String, (String, Option<String>)>,
     theme: &'a WordTheme,
     table_bands: &'a TableBandCatalog,
 }
@@ -2858,6 +3022,7 @@ where
                     part: &part,
                     relationships: &relationships,
                     numbering: &numbering,
+                    paragraph_numbering: &rendered_styles.paragraph_numbering,
                     theme: &theme,
                     table_bands: &rendered_styles.table_bands,
                 };
@@ -2902,7 +3067,8 @@ where
                 "common row-level tblPrEx border, shading and cell-margin exceptions with historical snapshots ignored"
                     .to_string(),
                 "language-selected East Asian and bidirectional theme font slots".to_string(),
-                "common decimal, letter, Roman and bullet list markers".to_string(),
+                "common decimal, decimal-zero, letter, Roman and bullet list markers with level formatting, indentation, style inheritance and source continuation semantics"
+                    .to_string(),
                 "tables including bounded vertical merge row groups, hyperlinks, inline/anchored image geometry and document regions"
                     .to_string(),
                 "common DrawingML textbox geometry, independent shape grouping, nested tables, fill, border, rotation, vertical text, body insets and z-order"
@@ -3546,6 +3712,7 @@ where
                             part,
                             paragraph,
                             numbering,
+                            context.paragraph_numbering,
                             &mut numbering_state,
                         );
                         if let Some(table) = &mut table {
@@ -3867,6 +4034,7 @@ where
                                 part,
                                 paragraph,
                                 numbering,
+                                context.paragraph_numbering,
                                 &mut numbering_state,
                             );
                             if let Some(table) = &mut table {
@@ -4076,6 +4244,7 @@ fn append_text_node(
     let (canonical_text, rendered_text) =
         render_legacy_hyperlink_text(&text).unwrap_or_else(|| (text.clone(), escape_text(&text)));
     let node_hash = hash_bytes(canonical_text.as_bytes());
+    paragraph.has_visible_text |= !canonical_text.is_empty();
     paragraph.html.push_str(&format!(
         "<span data-hcd-id=\"{}\" data-hcd-node-hash=\"{}\">{}</span>",
         escape_attribute(&node_id),
@@ -4199,6 +4368,7 @@ fn append_read_only_text(paragraph: Option<&mut ParagraphBuilder>, text: &str) {
     let Some(paragraph) = paragraph else {
         return;
     };
+    paragraph.has_visible_text |= !text.is_empty();
     paragraph
         .html
         .push_str("<span class=\"hcd-revision-text\" data-hcd-editable=\"false\">");
@@ -4407,6 +4577,7 @@ fn capture_paragraph_format_property(element: &BytesStart<'_>, format: &mut Para
             format.before_twips = signed_attribute(element, "before");
             format.after_twips = signed_attribute(element, "after");
             format.line_twips = signed_attribute(element, "line");
+            format.line_rule = attribute_by_local_name(element, "lineRule");
         }
         "numId" => format.numbering_id = value,
         "ilvl" => format.numbering_level = value,
@@ -4483,14 +4654,7 @@ fn run_css_declarations(format: &RunFormat) -> Vec<String> {
     }
     let fonts = run_font_families(format);
     if !fonts.is_empty() {
-        css.push(format!(
-            "font-family:{}",
-            fonts
-                .iter()
-                .map(|font| format!("'{}'", font.replace('\'', "")))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
+        css.push(format!("font-family:{}", word_font_stack(&fonts)));
     }
     match format.vertical_align.as_deref() {
         Some("superscript") => css.push("vertical-align:super;font-size:.75em".to_string()),
@@ -4526,6 +4690,29 @@ fn run_font_families(format: &RunFormat) -> Vec<&str> {
     fonts
 }
 
+fn word_font_stack(fonts: &[&str]) -> String {
+    let mut stack = fonts
+        .iter()
+        .map(|font| format!("'{}'", font.replace('\'', "")))
+        .collect::<Vec<_>>();
+    match fonts.first().map(|font| font.to_ascii_lowercase()) {
+        Some(font) if matches!(font.as_str(), "calibri" | "arial") => {
+            stack.push("-apple-system".to_string());
+            stack.push("sans-serif".to_string());
+        }
+        Some(font) if font == "times new roman" => {
+            stack.push("Georgia".to_string());
+            stack.push("serif".to_string());
+        }
+        _ => {
+            stack.push("'Songti SC'".to_string());
+            stack.push("'STSong'".to_string());
+            stack.push("sans-serif".to_string());
+        }
+    }
+    stack.join(",")
+}
+
 fn paragraph_css_declarations(format: &ParagraphFormat) -> Vec<String> {
     let mut css = Vec::new();
     if let Some(alignment) = format.alignment.as_deref().and_then(html_alignment) {
@@ -4547,7 +4734,11 @@ fn paragraph_css_declarations(format: &ParagraphFormat) -> Vec<String> {
         .line_twips
         .filter(|value| (1..=100_000).contains(value))
     {
-        css.push(format!("line-height:{:.2}pt", line as f64 / 20.0));
+        if format.line_rule.as_deref().unwrap_or("auto") == "auto" {
+            css.push(format!("line-height:{:.4}", line as f64 / 240.0));
+        } else {
+            css.push(format!("line-height:{:.2}pt", line as f64 / 20.0));
+        }
     }
     if format.page_break_before {
         css.push("break-before:page".to_string());
@@ -5493,6 +5684,16 @@ fn safe_font_family(value: &str) -> Option<&str> {
     .then_some(value)
 }
 
+fn word_marker_line_height(font: Option<&str>) -> f64 {
+    match font.unwrap_or("Calibri").to_ascii_lowercase().as_str() {
+        "calibri" => 1.25,
+        "times new roman" | "arial" => 1.15,
+        "simsun" | "宋体" | "microsoft yahei" | "微软雅黑" => 1.30,
+        "dengxian" | "等线" => 1.20,
+        _ => 1.15,
+    }
+}
+
 fn safe_hyperlink_href(value: &str) -> Option<&str> {
     let value = value.trim();
     let lower = value.to_ascii_lowercase();
@@ -5513,6 +5714,7 @@ fn finish_paragraph(
     part: &str,
     mut paragraph: ParagraphBuilder,
     numbering: &NumberingCatalog,
+    paragraph_numbering: &BTreeMap<String, (String, Option<String>)>,
     numbering_state: &mut NumberingState,
 ) -> RenderedBlock {
     let identity = paragraph
@@ -5520,24 +5722,46 @@ fn finish_paragraph(
         .clone()
         .unwrap_or_else(|| paragraph.ordinal.to_string());
     let block_id = stable_node_id(&[document_id, part, "paragraph", &identity]);
-    let format_attributes = paragraph_html_attributes(&paragraph.format);
+    let mut effective_format = paragraph.format.clone();
+    if let Some((number_id, level)) = effective_format
+        .style_id
+        .as_deref()
+        .and_then(|style_id| paragraph_numbering.get(style_id))
+    {
+        if effective_format.numbering_id.is_none() {
+            effective_format.numbering_id = Some(number_id.clone());
+        }
+        if effective_format.numbering_level.is_none() {
+            effective_format.numbering_level = level.clone().or_else(|| Some("0".to_string()));
+        }
+    }
     let style_class = paragraph
         .format
         .style_id
         .as_deref()
         .map(|style_id| format!(" {}", word_style_class(style_id)))
         .unwrap_or_default();
-    let marker = numbering_state
-        .render_marker(
-            numbering,
-            paragraph.format.numbering_id.as_deref(),
-            paragraph.format.numbering_level.as_deref(),
-        )
-        .unwrap_or_default();
+    let marker = numbering_state.render_marker_details(
+        numbering,
+        effective_format.numbering_id.as_deref(),
+        effective_format.numbering_level.as_deref(),
+    );
+    if let Some(marker) = &marker {
+        if effective_format.left_twips.is_none() {
+            effective_format.left_twips = marker.definition.left_twips;
+        }
+        if effective_format.hanging_twips.is_none() && effective_format.first_line_twips.is_none() {
+            effective_format.hanging_twips = marker.definition.hanging_twips;
+        }
+    }
+    let format_attributes = paragraph_html_attributes(&effective_format);
+    let is_empty = !paragraph.has_visible_text && marker.is_none() && paragraph.nested.is_empty();
+    let empty_class = if is_empty { " hcd-empty-paragraph" } else { "" };
+    let marker = marker.map(|marker| marker.html).unwrap_or_default();
     let mut requires_overflow_visible = false;
     let html = if paragraph.nested.is_empty() {
         format!(
-            "<p class=\"hcd-paragraph{style_class}\" data-hcd-id=\"{}\"{}>{marker}{}</p>",
+            "<p class=\"hcd-paragraph{style_class}{empty_class}\" data-hcd-id=\"{}\"{}>{marker}{}</p>",
             escape_attribute(&block_id),
             format_attributes,
             paragraph.html
@@ -5568,7 +5792,7 @@ fn finish_paragraph(
             )
         };
         format!(
-            "<div class=\"hcd-paragraph-group\" data-hcd-id=\"{}\"><p class=\"hcd-paragraph{style_class}\"{}>{marker}{}</p>{canvas}{flow_html}</div>",
+            "<div class=\"hcd-paragraph-group\" data-hcd-id=\"{}\"><p class=\"hcd-paragraph{style_class}{empty_class}\"{}>{marker}{}</p>{canvas}{flow_html}</div>",
             escape_attribute(&block_id),
             format_attributes,
             paragraph.html
@@ -6247,7 +6471,7 @@ fn escape_attribute(text: &str) -> String {
 }
 
 fn default_styles() -> &'static str {
-    r#"article,.hcd-chunk{display:block}.hcd-chunk-overflow{content-visibility:visible;contain:none;overflow:visible}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{border:1px solid #d9d9d9;padding:.25em .4em;vertical-align:top}.hcd-paragraph-group{min-width:0}.hcd-textbox-canvas{position:relative;max-width:100%}.hcd-textbox{box-sizing:border-box;margin:0}.hcd-textbox-content>.hcd-table{margin:0;max-width:100%}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
+    r#"article,.hcd-chunk{display:block}.hcd-chunk-overflow{content-visibility:visible;contain:none;overflow:visible}.hcd-paragraph{white-space:pre-wrap;min-height:1em;margin:0}.hcd-list-marker{display:inline-block;min-width:2em;white-space:nowrap}.hcd-table{border-collapse:collapse;margin:.6em 0}.hcd-table td{padding:.25em .4em;vertical-align:top}.hcd-paragraph-group{min-width:0}.hcd-textbox-canvas{position:relative;max-width:100%}.hcd-textbox{box-sizing:border-box;margin:0}.hcd-textbox-content>.hcd-table{margin:0;max-width:100%}.hcd-revision-insert{text-decoration:underline}.hcd-revision-delete{text-decoration:line-through;opacity:.65}.hcd-chunk img{max-width:100%;height:auto}.hcd-drawing-wrap-left{float:right}.hcd-drawing-wrap-right,.hcd-drawing-wrap-both{float:left}.hcd-drawing-wrap-top-bottom{display:block;clear:both}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) img.hcd-drawing[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}"#
 }
 
 #[cfg(test)]
@@ -6374,6 +6598,81 @@ mod tests {
 
         assert!(matches!(error, HcdError::ResourceLimit(_)));
         assert!(error.to_string().contains("tblStyleColBandSize"));
+    }
+
+    #[test]
+    fn default_paragraph_style_applies_auto_line_spacing_to_unstyled_paragraphs() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("default-paragraph-style.docx");
+        let styles_xml = r#"<w:styles xmlns:w="w">
+          <w:docDefaults><w:pPrDefault/></w:docDefaults>
+          <w:style w:type="paragraph" w:styleId="Normal" w:default="true">
+            <w:pPr><w:spacing w:after="0" w:line="276" w:lineRule="auto"/></w:pPr>
+          </w:style>
+        </w:styles>"#;
+        let file = std::fs::File::create(&source).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("word/styles.xml", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(styles_xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+
+        let mut archive = StreamingOxmlArchive::open(&source).unwrap();
+        let rendered = load_word_styles(&mut archive, &WordTheme::default()).unwrap();
+
+        assert!(
+            rendered
+                .css
+                .contains(".hcd-paragraph{margin-bottom:0.00pt;line-height:1.1500}"),
+            "{}",
+            rendered.css
+        );
+        assert!(!rendered.css.contains("line-height:13.80pt"));
+        assert!(rendered
+            .css
+            .contains(".hcd-empty-paragraph{min-height:1lh}"));
+        assert!(rendered
+            .css
+            .contains(".hcd-list-marker{box-sizing:border-box;text-indent:0}"));
+    }
+
+    #[test]
+    fn paragraph_line_rule_distinguishes_auto_from_fixed_spacing() {
+        let auto = ParagraphFormat {
+            line_twips: Some(360),
+            line_rule: Some("auto".to_string()),
+            ..Default::default()
+        };
+        let exact = ParagraphFormat {
+            line_twips: Some(360),
+            line_rule: Some("exact".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            paragraph_css_declarations(&auto),
+            vec!["line-height:1.5000"]
+        );
+        assert_eq!(
+            paragraph_css_declarations(&exact),
+            vec!["line-height:18.00pt"]
+        );
+    }
+
+    #[test]
+    fn default_docx_table_css_does_not_invent_grid_borders() {
+        let css = default_styles();
+        let cell_rule = css
+            .split(".hcd-table td{")
+            .nth(1)
+            .and_then(|tail| tail.split('}').next())
+            .unwrap();
+
+        assert!(!cell_rule.contains("border"), "{cell_rule}");
+        assert!(cell_rule.contains("padding:.25em .4em"));
+        assert!(
+            css.contains(".hcd-list-marker{display:inline-block;min-width:2em;white-space:nowrap}")
+        );
     }
 
     #[test]
@@ -6513,26 +6812,79 @@ mod tests {
 
     #[test]
     fn word_numbering_materializes_multilevel_markers_and_start_overrides() {
-        let xml = br#"<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%1.%2)"/></w:lvl></w:abstractNum><w:num w:numId="42"><w:abstractNumId w:val="7"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"/></w:lvlOverride></w:num></w:numbering>"#;
+        let xml = br#"<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%1.%2)"/></w:lvl></w:abstractNum><w:num w:numId="42"><w:abstractNumId w:val="7"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"/></w:lvlOverride></w:num><w:num w:numId="43"><w:abstractNumId w:val="7"/></w:num></w:numbering>"#;
         let catalog = parse_word_numbering(xml).unwrap();
         let mut state = NumberingState::default();
 
         assert!(state
             .render_marker(&catalog, Some("42"), Some("0"))
             .unwrap()
-            .contains(">3.&#160;</span>"));
+            .contains(">3.</span>"));
         assert!(state
             .render_marker(&catalog, Some("42"), Some("1"))
             .unwrap()
-            .contains(">3.a)&#160;</span>"));
+            .contains(">3.a)</span>"));
         assert!(state
             .render_marker(&catalog, Some("42"), Some("1"))
             .unwrap()
-            .contains(">3.b)&#160;</span>"));
+            .contains(">3.b)</span>"));
         assert!(state
             .render_marker(&catalog, Some("42"), Some("0"))
             .unwrap()
-            .contains(">4.&#160;</span>"));
+            .contains(">4.</span>"));
+        assert!(state
+            .render_marker(&catalog, Some("43"), Some("0"))
+            .unwrap()
+            .contains(">5.</span>"));
+    }
+
+    #[test]
+    fn word_numbering_preserves_marker_formatting_indent_and_style_inheritance() {
+        let xml = br#"<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="right"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="28"/><w:color w:val="C00000"/><w:b/><w:i/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="42"><w:abstractNumId w:val="7"/></w:num></w:numbering>"#;
+        let catalog = parse_word_numbering(xml).unwrap();
+        let marker = NumberingState::default()
+            .render_marker_details(&catalog, Some("42"), Some("0"))
+            .unwrap();
+        assert!(
+            marker.html.contains("font-family:&apos;Arial&apos;"),
+            "{}",
+            marker.html
+        );
+        assert!(marker.html.contains("font-size:14.0pt"));
+        assert!(marker.html.contains("line-height:1.1500"));
+        assert!(marker.html.contains("color:#C00000"));
+        assert!(marker.html.contains("font-weight:700"));
+        assert!(marker.html.contains("font-style:italic"));
+        assert!(marker.html.contains("text-align:right"));
+        assert!(marker.html.contains("min-width:18.0pt"));
+        assert!(marker.html.contains("padding-right:0.5em"));
+        assert!(!marker.html.contains(";width:18.0pt"));
+        assert_eq!(marker.definition.left_twips, Some(720));
+        assert_eq!(marker.definition.hanging_twips, Some(360));
+
+        let mut styles = BTreeMap::new();
+        styles.insert(
+            "BaseList".to_string(),
+            WordStyleDefinition {
+                paragraph: ParagraphFormat {
+                    numbering_id: Some("42".to_string()),
+                    numbering_level: Some("0".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        styles.insert(
+            "DerivedList".to_string(),
+            WordStyleDefinition {
+                based_on: Some("BaseList".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve_paragraph_style_numbering(&styles).get("DerivedList"),
+            Some(&("42".to_string(), Some("0".to_string())))
+        );
     }
 
     #[test]
@@ -6590,6 +6942,7 @@ mod tests {
                     part: "word/document.xml",
                     relationships: &relationships,
                     numbering: &numbering,
+                    paragraph_numbering: &BTreeMap::new(),
                     theme: &WordTheme::default(),
                     table_bands: &BTreeMap::new(),
                 },
@@ -6604,7 +6957,7 @@ mod tests {
         assert!(html.contains("data-hcd-word-style=\"Heading1\""));
         assert!(html.contains("data-hcd-num-id=\"42\""));
         assert!(html.contains("data-hcd-num-format=\"upperRoman\""));
-        assert!(html.contains(">III.&#160;</span>"));
+        assert!(html.contains(">III.</span>"));
         assert!(html.contains("text-align:center"));
         assert!(html.contains("margin-left:36.00pt"));
         assert!(html.contains("font-weight:700"));
@@ -6936,6 +7289,22 @@ mod tests {
     }
 
     #[test]
+    fn word_font_stacks_keep_metric_compatible_fallbacks() {
+        assert_eq!(
+            word_font_stack(&["Calibri"]),
+            "'Calibri',-apple-system,sans-serif"
+        );
+        assert_eq!(
+            word_font_stack(&["Times New Roman"]),
+            "'Times New Roman',Georgia,serif"
+        );
+        assert_eq!(
+            word_font_stack(&["等线", "Aptos Display"]),
+            "'等线','Aptos Display','Songti SC','STSong',sans-serif"
+        );
+    }
+
+    #[test]
     fn first_chunk_is_emitted_before_source_part_eof() {
         let mut xml = String::from(
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
@@ -6982,6 +7351,7 @@ mod tests {
                 part: "word/document.xml",
                 relationships: &PartRelationships::default(),
                 numbering: &NumberingCatalog::default(),
+                paragraph_numbering: &BTreeMap::new(),
                 theme: &WordTheme::default(),
                 table_bands: &BTreeMap::new(),
             },
@@ -7146,6 +7516,7 @@ mod tests {
                     part: "word/document.xml",
                     relationships: &relationships,
                     numbering: &numbering,
+                    paragraph_numbering: &BTreeMap::new(),
                     theme,
                     table_bands,
                 },
@@ -7188,6 +7559,7 @@ mod tests {
                 part: "word/document.xml",
                 relationships: &PartRelationships::default(),
                 numbering: &NumberingCatalog::default(),
+                paragraph_numbering: &BTreeMap::new(),
                 theme: &WordTheme::default(),
                 table_bands: &BTreeMap::new(),
             },

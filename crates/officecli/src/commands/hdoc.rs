@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_SEMANTIC_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEMANTIC_ASSETS_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PREVIEW_STYLESHEET_BYTES: u64 = 1024 * 1024;
 
 #[derive(Args)]
 pub struct HdocCommand {
@@ -94,6 +95,18 @@ pub struct HdocRenderHtmlCommand {
     /// Image/form-node hover-outline state in the generated preview
     #[arg(long, value_enum, default_value_t = HdocHitboxState::On)]
     pub image_hitboxes: HdocHitboxState,
+    /// CSS file appended after HCD styles; preview-only and excluded from HCD hashes
+    #[arg(long, value_name = "CSS_FILE")]
+    pub style: Option<PathBuf>,
+    /// Optional PNG screenshot of the rendered HCD page for visual regression review
+    #[arg(long, value_name = "PNG_FILE")]
+    pub screenshot: Option<PathBuf>,
+    /// Screenshot viewport width (capped by the screenshot backend)
+    #[arg(long, default_value_t = 1600)]
+    pub screenshot_width: u32,
+    /// Screenshot viewport height (capped by the screenshot backend)
+    #[arg(long, default_value_t = 1200)]
+    pub screenshot_height: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -255,6 +268,12 @@ fn render_html(
         )));
     }
     let output = Path::new(&command.output);
+    let style_path = command.style.clone();
+    let override_stylesheet = command
+        .style
+        .as_deref()
+        .map(read_preview_stylesheet)
+        .transpose()?;
     let parent = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -272,6 +291,7 @@ fn render_html(
             asset_base_href: Some(asset_base_href),
             text_hitboxes_enabled: command.text_hitboxes == HdocHitboxState::On,
             image_hitboxes_enabled: command.image_hitboxes == HdocHitboxState::On,
+            override_stylesheet,
             ..HtmlPresentationOptions::default()
         },
         temporary.as_file_mut(),
@@ -280,6 +300,27 @@ fn render_html(
     .map_err(handler_error)?;
     temporary.as_file_mut().flush()?;
     temporary.persist(output).map_err(|error| error.error)?;
+    let screenshot = command
+        .screenshot
+        .as_deref()
+        .map(|screenshot| {
+            crate::screenshot::capture(
+                &output.to_string_lossy(),
+                &screenshot.to_string_lossy(),
+                command.screenshot_width,
+                command.screenshot_height,
+            )
+            .map(|result| {
+                serde_json::json!({
+                    "output": result.output_path,
+                    "backend": result.backend,
+                    "width": command.screenshot_width,
+                    "height": command.screenshot_height,
+                })
+            })
+            .map_err(HandlerError::OperationFailed)
+        })
+        .transpose()?;
     let result = serde_json::json!({
         "documentId": report.document_id,
         "revision": report.revision,
@@ -287,6 +328,8 @@ fn render_html(
         "chunkCount": report.chunk_count,
         "bytes": report.bytes_written,
         "output": output,
+        "style": style_path,
+        "screenshot": screenshot,
     });
     render(
         &result,
@@ -298,6 +341,32 @@ fn render_html(
             output.display()
         ),
     )
+}
+
+fn read_preview_stylesheet(path: &Path) -> Result<String, HandlerError> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(MAX_PREVIEW_STYLESHEET_BYTES.min(64 * 1024) as usize);
+    file.take(MAX_PREVIEW_STYLESHEET_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PREVIEW_STYLESHEET_BYTES {
+        return Err(HandlerError::InvalidArgument(format!(
+            "preview stylesheet {} exceeds the {MAX_PREVIEW_STYLESHEET_BYTES} byte limit",
+            path.display()
+        )));
+    }
+    let stylesheet = String::from_utf8(bytes).map_err(|error| {
+        HandlerError::InvalidArgument(format!(
+            "preview stylesheet {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })?;
+    hcd_core::validate_css_text(&stylesheet).map_err(|error| {
+        HandlerError::InvalidArgument(format!(
+            "preview stylesheet {} is unsafe: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(stylesheet)
 }
 
 fn relative_directory_href(from: &Path, to: &Path) -> Result<String, HandlerError> {
@@ -726,5 +795,13 @@ mod tests {
         let error = read_patch_json_from(input, "test input").unwrap_err();
         assert!(error.to_string().contains("exceeds the"));
         assert!(error.to_string().contains("byte limit"));
+    }
+
+    #[test]
+    fn preview_stylesheet_reader_rejects_active_content() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), ".hcd-grid{background:url(javascript:x)}").unwrap();
+        let error = read_preview_stylesheet(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("unsafe"));
     }
 }

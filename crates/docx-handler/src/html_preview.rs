@@ -600,62 +600,30 @@ fn get_page_layout_for(sect_pr: Option<&roxmltree::Node>) -> PageLayout {
 
     if let Some(sect) = sect_pr {
         if let Some(sz) = sect.children().find(|n| n.has_tag_name("pgSz")) {
-            if let Some(w) = sz
-                .attribute((W_NS, "w"))
-                .or_else(|| sz.attribute("w:w"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(w) = get_node_attr(&sz, "w").and_then(|s| s.parse::<f64>().ok()) {
                 layout.width_pt = w / 20.0;
             }
-            if let Some(h) = sz
-                .attribute((W_NS, "h"))
-                .or_else(|| sz.attribute("w:h"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(h) = get_node_attr(&sz, "h").and_then(|s| s.parse::<f64>().ok()) {
                 layout.height_pt = h / 20.0;
             }
         }
         if let Some(mar) = sect.children().find(|n| n.has_tag_name("pgMar")) {
-            if let Some(t) = mar
-                .attribute((W_NS, "top"))
-                .or_else(|| mar.attribute("w:top"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(t) = get_node_attr(&mar, "top").and_then(|s| s.parse::<f64>().ok()) {
                 layout.margin_top_pt = t / 20.0;
             }
-            if let Some(b) = mar
-                .attribute((W_NS, "bottom"))
-                .or_else(|| mar.attribute("w:bottom"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(b) = get_node_attr(&mar, "bottom").and_then(|s| s.parse::<f64>().ok()) {
                 layout.margin_bottom_pt = b / 20.0;
             }
-            if let Some(l) = mar
-                .attribute((W_NS, "left"))
-                .or_else(|| mar.attribute("w:left"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(l) = get_node_attr(&mar, "left").and_then(|s| s.parse::<f64>().ok()) {
                 layout.margin_left_pt = l / 20.0;
             }
-            if let Some(r) = mar
-                .attribute((W_NS, "right"))
-                .or_else(|| mar.attribute("w:right"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(r) = get_node_attr(&mar, "right").and_then(|s| s.parse::<f64>().ok()) {
                 layout.margin_right_pt = r / 20.0;
             }
-            if let Some(hd) = mar
-                .attribute((W_NS, "header"))
-                .or_else(|| mar.attribute("w:header"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(hd) = get_node_attr(&mar, "header").and_then(|s| s.parse::<f64>().ok()) {
                 layout.header_distance_pt = hd / 20.0;
             }
-            if let Some(fd) = mar
-                .attribute((W_NS, "footer"))
-                .or_else(|| mar.attribute("w:footer"))
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(fd) = get_node_attr(&mar, "footer").and_then(|s| s.parse::<f64>().ok()) {
                 layout.footer_distance_pt = fd / 20.0;
             }
         }
@@ -1443,8 +1411,13 @@ body {{
 p, h1, h2, h3, h4, h5, h6 {{
     margin: 0;
     margin-bottom: {space_after}pt;
+    font-size: {sz}pt;
     line-height: {lh};
     word-wrap: break-word;
+}}
+ol, ul, li {{
+    font-size: {sz}pt;
+    line-height: {lh};
 }}
 table {{
     border-collapse: collapse;
@@ -1559,7 +1532,12 @@ fn render_drawing_html(
     drawing_node: &roxmltree::Node,
     rels: &oxml::rels::Relationships,
     package: &OxmlPackage,
+    styles: &HashMap<String, DocxStyle>,
+    doc_defaults: &DocDefaults,
 ) {
+    if render_textbox_drawing_html(output, drawing_node, rels, package, styles, doc_defaults) {
+        return;
+    }
     let blip = drawing_node.descendants().find(|n| n.has_tag_name("blip"));
     if let Some(blip_node) = blip {
         let embed_r_id = blip_node
@@ -1619,6 +1597,337 @@ fn render_drawing_html(
     output.push_str("<span class=\"img-error\">[Drawing]</span>");
 }
 
+fn render_textbox_drawing_html(
+    output: &mut String,
+    drawing_node: &roxmltree::Node,
+    rels: &oxml::rels::Relationships,
+    package: &OxmlPackage,
+    styles: &HashMap<String, DocxStyle>,
+    doc_defaults: &DocDefaults,
+) -> bool {
+    let Some(textbox) = drawing_node
+        .descendants()
+        .find(|node| node.has_tag_name("txbxContent"))
+    else {
+        return false;
+    };
+
+    let extent = drawing_node
+        .descendants()
+        .find(|node| node.has_tag_name("extent"));
+    let width_pt = extent
+        .and_then(|node| node.attribute("cx"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| (1.0..=100_000_000.0).contains(value))
+        .map(|value| value / 12_700.0)
+        .unwrap_or(144.0);
+    let height_pt = extent
+        .and_then(|node| node.attribute("cy"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| (1.0..=100_000_000.0).contains(value))
+        .map(|value| value / 12_700.0)
+        .unwrap_or(72.0);
+
+    let shape_properties = drawing_node
+        .descendants()
+        .find(|node| node.has_tag_name("spPr"));
+    let body_properties = drawing_node
+        .descendants()
+        .find(|node| node.has_tag_name("bodyPr"));
+    let mut box_css = vec![
+        "display:inline-block".to_string(),
+        "position:relative".to_string(),
+        "vertical-align:top".to_string(),
+        "box-sizing:border-box".to_string(),
+        format!("width:{width_pt:.2}pt"),
+        format!("height:{height_pt:.2}pt"),
+        "overflow:hidden".to_string(),
+    ];
+
+    if let Some(shape_properties) = shape_properties {
+        if let Some(transform) = shape_properties
+            .children()
+            .find(|node| node.has_tag_name("xfrm"))
+        {
+            if let Some(rotation) = transform
+                .attribute("rot")
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.abs() <= 21_600_000.0)
+            {
+                box_css.push(format!("transform:rotate({:.3}deg)", rotation / 60_000.0));
+                box_css.push("transform-origin:center".to_string());
+            }
+        }
+        if let Some(geometry) = shape_properties
+            .children()
+            .find(|node| node.has_tag_name("prstGeom"))
+            .and_then(|node| node.attribute("prst"))
+        {
+            match geometry {
+                "roundRect" => box_css.push("border-radius:9pt".to_string()),
+                "ellipse" => box_css.push("border-radius:50%".to_string()),
+                _ => {}
+            }
+        }
+
+        if shape_properties
+            .children()
+            .any(|node| node.has_tag_name("noFill"))
+        {
+            box_css.push("background-color:transparent".to_string());
+        } else if let Some(gradient) = shape_properties
+            .children()
+            .find(|node| node.has_tag_name("gradFill"))
+        {
+            let colors: Vec<_> = gradient
+                .descendants()
+                .filter_map(drawing_hex_color)
+                .collect();
+            if colors.len() >= 2 {
+                let angle = gradient
+                    .descendants()
+                    .find(|node| node.has_tag_name("lin"))
+                    .and_then(|node| node.attribute("ang"))
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .map(|value| value / 60_000.0 + 90.0)
+                    .unwrap_or(90.0);
+                box_css.push(format!(
+                    "background-image:linear-gradient({angle:.2}deg,#{},#{})",
+                    colors[0],
+                    colors[colors.len() - 1]
+                ));
+            }
+        } else if let Some(color) = shape_properties
+            .children()
+            .find(|node| node.has_tag_name("solidFill"))
+            .and_then(|node| node.descendants().find_map(drawing_hex_color))
+        {
+            box_css.push(format!("background-color:#{color}"));
+        }
+
+        if let Some(line) = shape_properties
+            .children()
+            .find(|node| node.has_tag_name("ln"))
+        {
+            if line.children().any(|node| node.has_tag_name("noFill")) {
+                box_css.push("border:none".to_string());
+            } else {
+                let width = line
+                    .attribute("w")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .filter(|value| (0.0..=10_000_000.0).contains(value))
+                    .map(|value| value / 12_700.0)
+                    .unwrap_or(1.0);
+                let color = line
+                    .descendants()
+                    .find_map(drawing_hex_color)
+                    .unwrap_or_else(|| "000000".to_string());
+                let line_style = line
+                    .descendants()
+                    .find(|node| node.has_tag_name("prstDash"))
+                    .and_then(|node| node.attribute("val"))
+                    .map(|value| match value {
+                        "dot" => "dotted",
+                        "dash" | "lgDash" | "dashDot" | "lgDashDot" => "dashed",
+                        _ => "solid",
+                    })
+                    .unwrap_or("solid");
+                box_css.push(format!("border:{width:.2}pt {line_style} #{color}"));
+            }
+        } else {
+            box_css.push("border:none".to_string());
+        }
+        if shape_properties
+            .descendants()
+            .any(|node| node.has_tag_name("outerShdw"))
+        {
+            box_css.push("box-shadow:3pt 3pt 6pt rgba(0,0,0,.35)".to_string());
+        }
+    }
+
+    if let Some(body) = body_properties {
+        for (attribute, property, fallback) in [
+            ("tIns", "padding-top", 0.0),
+            ("rIns", "padding-right", 0.0),
+            ("bIns", "padding-bottom", 0.0),
+            ("lIns", "padding-left", 0.0),
+        ] {
+            let value = body
+                .attribute(attribute)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| (0.0..=100_000_000.0).contains(value))
+                .map(|value| value / 12_700.0)
+                .unwrap_or(fallback);
+            box_css.push(format!("{property}:{value:.2}pt"));
+        }
+        match body.attribute("vert") {
+            Some("vert" | "eaVert" | "wordArtVert") => {
+                box_css.push("writing-mode:vertical-rl".to_string());
+                box_css.push("text-orientation:mixed".to_string());
+            }
+            Some("vert270") => {
+                box_css.push("writing-mode:vertical-lr".to_string());
+                box_css.push("text-orientation:mixed".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    output.push_str(&format!(
+        "<span class=\"docx-textbox\" data-docx-drawing=\"textbox\" style=\"{}\">",
+        box_css.join(";")
+    ));
+    let mut child_index = 0usize;
+    for child in textbox.children().filter(|node| node.is_element()) {
+        child_index += 1;
+        if child.has_tag_name("p") {
+            render_textbox_paragraph(
+                &child,
+                child_index,
+                output,
+                rels,
+                package,
+                styles,
+                doc_defaults,
+            );
+        } else if child.has_tag_name("tbl") {
+            render_textbox_table(
+                &child,
+                child_index,
+                output,
+                rels,
+                package,
+                styles,
+                doc_defaults,
+            );
+        }
+    }
+    output.push_str("</span>");
+    true
+}
+
+fn drawing_hex_color(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    if !node.has_tag_name("srgbClr") {
+        return None;
+    }
+    node.attribute("val")
+        .filter(|value| is_hex_color(value))
+        .map(|value| value.trim_start_matches('#').to_ascii_uppercase())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_textbox_paragraph(
+    paragraph: &roxmltree::Node,
+    index: usize,
+    output: &mut String,
+    rels: &oxml::rels::Relationships,
+    package: &OxmlPackage,
+    styles: &HashMap<String, DocxStyle>,
+    doc_defaults: &DocDefaults,
+) {
+    let metrics = resolve_paragraph_metrics(paragraph, styles, doc_defaults);
+    let mut css = vec!["display:block".to_string()];
+    if metrics.align != "left" {
+        css.push(format!("text-align:{}", metrics.align));
+    }
+    if metrics.space_before_pt > 0.0 {
+        css.push(format!("margin-top:{:.1}pt", metrics.space_before_pt));
+    }
+    if metrics.space_after_pt > 0.0 {
+        css.push(format!("margin-bottom:{:.1}pt", metrics.space_after_pt));
+    }
+    if let Some(exact) = metrics.line_spacing_exact {
+        css.push(format!("line-height:{exact:.1}pt"));
+    } else if let Some(multiplier) = metrics.line_spacing_mult {
+        css.push(format!("line-height:{multiplier:.2}"));
+    }
+    output.push_str(&format!(
+        "<span class=\"docx-textbox-paragraph\" style=\"{}\">",
+        css.join(";")
+    ));
+    let before = output.len();
+    render_paragraph_content(
+        paragraph,
+        &format!("/textbox/p[{index}]"),
+        output,
+        styles,
+        doc_defaults,
+        rels,
+        package,
+    );
+    if output.len() == before {
+        output.push_str("&#160;");
+    }
+    output.push_str("</span>");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_textbox_table(
+    table: &roxmltree::Node,
+    index: usize,
+    output: &mut String,
+    rels: &oxml::rels::Relationships,
+    package: &OxmlPackage,
+    styles: &HashMap<String, DocxStyle>,
+    doc_defaults: &DocDefaults,
+) {
+    output.push_str("<span class=\"docx-textbox-table\" style=\"display:table;width:100%;border-collapse:collapse\">");
+    for (row_index, row) in table
+        .children()
+        .filter(|node| node.has_tag_name("tr"))
+        .enumerate()
+    {
+        output.push_str("<span style=\"display:table-row\">");
+        for (cell_index, cell) in row
+            .children()
+            .filter(|node| node.has_tag_name("tc"))
+            .enumerate()
+        {
+            let fill = cell
+                .children()
+                .find(|node| node.has_tag_name("tcPr"))
+                .and_then(|properties| properties.children().find(|node| node.has_tag_name("shd")))
+                .and_then(|shading| get_node_attr(&shading, "fill"))
+                .filter(|value| is_hex_color(value));
+            let mut cell_css = vec![
+                "display:table-cell".to_string(),
+                "border:1px solid #333".to_string(),
+                "padding:2pt 4pt".to_string(),
+                "vertical-align:top".to_string(),
+            ];
+            if let Some(fill) = fill {
+                cell_css.push(format!(
+                    "background-color:#{}",
+                    fill.trim_start_matches('#')
+                ));
+            }
+            output.push_str(&format!("<span style=\"{}\">", cell_css.join(";")));
+            for (paragraph_index, paragraph) in cell
+                .children()
+                .filter(|node| node.has_tag_name("p"))
+                .enumerate()
+            {
+                render_textbox_paragraph(
+                    &paragraph,
+                    (index * 10_000)
+                        + ((row_index + 1) * 100)
+                        + ((cell_index + 1) * 10)
+                        + paragraph_index
+                        + 1,
+                    output,
+                    rels,
+                    package,
+                    styles,
+                    doc_defaults,
+                );
+            }
+            output.push_str("</span>");
+        }
+        output.push_str("</span>");
+    }
+    output.push_str("</span>");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_run(
     node: &roxmltree::Node,
@@ -1631,7 +1940,7 @@ fn render_run(
     rels: &oxml::rels::Relationships,
 ) {
     if let Some(drawing) = node.descendants().find(|n| n.has_tag_name("drawing")) {
-        render_drawing_html(output, &drawing, rels, package);
+        render_drawing_html(output, &drawing, rels, package, styles, doc_defaults);
         return;
     }
 
@@ -2208,20 +2517,6 @@ fn get_marker_inline_css(lvl: &NumLevel) -> String {
     parts.join(";")
 }
 
-fn count_percent_digits(s: &str) -> usize {
-    let bytes = s.as_bytes();
-    let mut count = 0;
-    if bytes.len() < 2 {
-        return 0;
-    }
-    for i in 0..bytes.len() - 1 {
-        if bytes[i] == b'%' && bytes[i + 1].is_ascii_digit() {
-            count += 1;
-        }
-    }
-    count
-}
-
 fn get_custom_list_style_string(
     num_id: &str,
     ilvl: usize,
@@ -2513,6 +2808,23 @@ fn get_list_level_indent(
     get_list_level_indent_full(num_id, ilvl, num_maps).0
 }
 
+fn get_list_container_indent(
+    num_id: &str,
+    ilvl: usize,
+    num_maps: &HashMap<String, HashMap<String, NumLevel>>,
+) -> (f64, f64) {
+    let (left_pt, hanging_pt) = get_list_level_indent_full(num_id, ilvl, num_maps);
+    let marker_pt = (left_pt - hanging_pt).max(0.0);
+    let parent_marker_pt = if ilvl > 0 {
+        let (parent_left_pt, parent_hanging_pt) =
+            get_list_level_indent_full(num_id, ilvl - 1, num_maps);
+        (parent_left_pt - parent_hanging_pt).max(0.0)
+    } else {
+        0.0
+    };
+    ((marker_pt - parent_marker_pt).max(18.0), hanging_pt)
+}
+
 fn get_start_value(
     num_id: &str,
     ilvl: usize,
@@ -2761,20 +3073,7 @@ fn render_paragraph(
             *pending_li_close = false;
         }
 
-        let (lvl_left, lvl_hanging) = get_list_level_indent_full(&num_id, ilvl, num_maps);
-        let parent_left = if ilvl > 0 {
-            get_list_level_indent(&num_id, ilvl - 1, num_maps)
-        } else {
-            0.0
-        };
-        let is_multi_level = count_percent_digits(&lvl_text) > 1;
-        let indent_pt = if is_multi_level {
-            (lvl_left - lvl_hanging - parent_left) / 20.0
-        } else {
-            (lvl_left - parent_left) / 20.0
-        };
-        let indent_pt = if indent_pt < 18.0 { 18.0 } else { indent_pt };
-        let hanging_pt = lvl_hanging / 20.0;
+        let (indent_pt, hanging_pt) = get_list_container_indent(&num_id, ilvl, num_maps);
 
         let mut list_style_parts = format!("padding-left:{:.1}pt;margin:0", indent_pt);
         if tag == "ol" {
@@ -2940,6 +3239,7 @@ fn render_paragraph(
                                 counter.to_string()
                             }
                         }
+                        "decimalZero" if counter <= 9 => format!("0{counter}"),
                         _ => counter.to_string(),
                     };
                     marker_str = marker_str.replace(&pattern, &glyph);
@@ -3712,5 +4012,88 @@ fn omml_to_latex(node: &roxmltree::Node) -> String {
             }
             result
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_layout_reads_unqualified_ooxml_geometry_attributes() {
+        let xml = r#"<w:sectPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pgSz w="11906" h="16838"/><w:pgMar top="1440" right="1800" bottom="1440" left="1800" header="720" footer="720"/></w:sectPr>"#;
+        let document = roxmltree::Document::parse(xml).unwrap();
+        let layout = get_page_layout_for(Some(&document.root_element()));
+
+        assert!((layout.width_pt - 595.3).abs() < 0.01);
+        assert!((layout.height_pt - 841.9).abs() < 0.01);
+        assert!((layout.margin_top_pt - 72.0).abs() < 0.01);
+        assert!((layout.margin_left_pt - 90.0).abs() < 0.01);
+        assert!((layout.margin_right_pt - 90.0).abs() < 0.01);
+        assert!((layout.header_distance_pt - 36.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn list_container_indent_uses_point_units_and_hanging_marker_origin() {
+        let level = |left_pt| NumLevel {
+            num_fmt: "decimal".to_string(),
+            lvl_text: "%1.".to_string(),
+            left_pt,
+            hanging_pt: 18.0,
+            start: 1,
+            jc: "left".to_string(),
+            font_name: None,
+            font_size_pt: None,
+            color: None,
+            bold: false,
+            italic: false,
+        };
+        let mut levels = HashMap::new();
+        levels.insert("0".to_string(), level(36.0));
+        levels.insert("1".to_string(), level(72.0));
+        levels.insert("2".to_string(), level(108.0));
+        let maps = HashMap::from([("7".to_string(), levels)]);
+
+        assert_eq!(get_list_container_indent("7", 0, &maps), (18.0, 18.0));
+        assert_eq!(get_list_container_indent("7", 1, &maps), (36.0, 18.0));
+        assert_eq!(get_list_container_indent("7", 2, &maps), (36.0, 18.0));
+    }
+
+    #[test]
+    fn drawingml_textbox_renders_content_and_shape_instead_of_placeholder() {
+        let xml = r#"<w:drawing xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps">
+          <wp:anchor><wp:extent cx="1270000" cy="635000"/><a:graphic><a:graphicData><wps:wsp>
+            <wps:spPr><a:xfrm rot="2700000"/><a:prstGeom prst="roundRect"/><a:solidFill><a:srgbClr val="E6F3FF"/></a:solidFill><a:ln w="25400"><a:solidFill><a:srgbClr val="0070C0"/></a:solidFill></a:ln></wps:spPr>
+            <wps:txbx><w:txbxContent><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:color w:val="C00000"/></w:rPr><w:t>Editable textbox</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+            <wps:bodyPr lIns="12700" tIns="12700" rIns="12700" bIns="12700"/>
+          </wps:wsp></a:graphicData></a:graphic></wp:anchor>
+        </w:drawing>"#;
+        let document = roxmltree::Document::parse(xml).unwrap();
+        let package = OxmlPackage::create("preview.docx");
+        let relationships = oxml::rels::Relationships::empty();
+        let defaults = DocDefaults {
+            font: "Arial".to_string(),
+            size_pt: 11.0,
+            line_height: 1.15,
+            color: "#000000".to_string(),
+            space_after_pt: 0.0,
+            default_align: "left".to_string(),
+        };
+        let mut html = String::new();
+        render_drawing_html(
+            &mut html,
+            &document.root_element(),
+            &relationships,
+            &package,
+            &HashMap::new(),
+            &defaults,
+        );
+
+        assert!(html.contains("data-docx-drawing=\"textbox\""));
+        assert!(html.contains("Editable textbox"));
+        assert!(html.contains("background-color:#E6F3FF"));
+        assert!(html.contains("border:2.00pt solid #0070C0"));
+        assert!(html.contains("transform:rotate(45.000deg)"));
+        assert!(!html.contains("[Drawing]"));
     }
 }

@@ -18,6 +18,7 @@ Thumbs.db
 *.exe
 /officecli
 dist/
+**/node_modules/
 
 # Local custom folders / reference code / build output
 source/
@@ -28,4 +29,6 @@ examples/hdoc/real-documents/output*/
 examples/hdoc/docx-suite/output*/
 examples/hdoc/pptx-suite/output*/
 examples/hdoc/text-suite/output*/
+examples/hdoc/xlsx-suite/output*/
+examples/hdoc/fidelity-audit/output*/
 **/.hcd-write-lock

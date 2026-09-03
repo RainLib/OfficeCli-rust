@@ -68,6 +68,41 @@ pub struct HcdManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridChunkAddress {
+    /// Stable HCD identity for a worksheet. It is derived from documentId and
+    /// the OOXML worksheet part, rather than from the display name.
+    pub sheet_id: String,
+    pub sheet_name: String,
+    pub sheet_index: usize,
+    pub sheet_state: String,
+    pub kind: GridChunkKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_start: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_end: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_end: Option<u32>,
+    /// Worksheet default grid dimensions in EMU. Cell-window descriptors
+    /// carry these values so a virtualized canvas can establish the same
+    /// coordinate system before it downloads drawing chunks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_column_width_emu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_row_height_emu: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GridChunkKind {
+    Cells,
+    Picture,
+    Chart,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChunkDescriptor {
     pub sequence: usize,
     pub chunk_id: String,
@@ -87,6 +122,10 @@ pub struct ChunkDescriptor {
     pub last_node_id: Option<String>,
     #[serde(default)]
     pub continuation: bool,
+    /// Optional format-specific random-access address. Grid clients can select
+    /// visible worksheet windows without downloading every HTML fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<GridChunkAddress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

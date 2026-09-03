@@ -44,6 +44,8 @@ fn hdoc_cli_import_patch_validate_export_roundtrip() {
     let bundle = temp.path().join("bundle");
     let patch_path = temp.path().join("patch.json");
     let preview = temp.path().join("preview.html");
+    let preview_style = temp.path().join("preview.css");
+    let preview_custom_style = temp.path().join("preview-custom-style.html");
     let preview_independent_hitboxes = temp.path().join("preview-independent-hitboxes.html");
     let exported = temp.path().join("exported.docx");
     let report = temp.path().join("fidelity.json");
@@ -82,10 +84,10 @@ fn hdoc_cli_import_patch_validate_export_roundtrip() {
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""valid": true"#));
-    let manifest: Value =
+    let bundle_manifest: Value =
         serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["fidelity"]["level"], "HIGH");
-    assert_eq!(manifest["capabilities"]["stylePatch"], false);
+    assert_eq!(bundle_manifest["fidelity"]["level"], "HIGH");
+    assert_eq!(bundle_manifest["capabilities"]["stylePatch"], false);
 
     officecli()
         .args([
@@ -105,6 +107,29 @@ fn hdoc_cli_import_patch_validate_export_roundtrip() {
     assert!(preview_html.contains("data-hcd-image-hitboxes=\"on\""));
     assert!(preview_html.contains("data-hcd-id="));
     assert!(preview_html.contains("Secret 123"));
+
+    let root_before_preview_style = bundle_manifest["rootHash"].as_str().unwrap().to_string();
+    std::fs::write(&preview_style, ".hcd-chunk{color:#123456}").unwrap();
+    officecli()
+        .args([
+            "hdoc",
+            "render-html",
+            bundle_arg.as_ref(),
+            "--output",
+            preview_custom_style.to_string_lossy().as_ref(),
+            "--style",
+            preview_style.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("preview.css"));
+    let custom_preview_html = std::fs::read_to_string(&preview_custom_style).unwrap();
+    assert!(custom_preview_html.contains(".hcd-chunk{color:#123456}"));
+    assert_eq!(
+        manifest(&bundle)["rootHash"].as_str().unwrap(),
+        root_before_preview_style
+    );
 
     officecli()
         .args([

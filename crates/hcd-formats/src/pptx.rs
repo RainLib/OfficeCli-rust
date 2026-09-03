@@ -14,7 +14,7 @@ use quick_xml::{Reader, Writer};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 const MAX_PPTX_TABLE_COLUMNS: usize = 16_384;
@@ -47,6 +47,7 @@ where
     entries: Vec<NodeMapEntry>,
     slide_width_emu: u64,
     slide_height_emu: u64,
+    background: SlidePaint,
 }
 
 #[derive(Default)]
@@ -65,8 +66,45 @@ struct ShapeBuilder {
     width: Option<u64>,
     height: Option<u64>,
     rotation: Option<i64>,
+    geometry: Option<String>,
+    fill: SlidePaint,
+    line: SlideLine,
+    vertical_anchor: Option<&'static str>,
+    margin_left: Option<u64>,
+    margin_right: Option<u64>,
+    margin_top: Option<u64>,
+    margin_bottom: Option<u64>,
     content: String,
     entries: Vec<NodeMapEntry>,
+}
+
+#[derive(Default)]
+struct SlideLine {
+    width: Option<u64>,
+    paint: SlidePaint,
+}
+
+#[derive(Default)]
+struct SlidePaint {
+    none: bool,
+    color: Option<String>,
+    alpha: Option<u32>,
+    gradient_stops: Vec<SlideGradientStop>,
+    gradient_angle: Option<i64>,
+}
+
+#[derive(Default)]
+struct SlideGradientStop {
+    position: u32,
+    color: Option<String>,
+    alpha: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+enum PaintTarget {
+    Background,
+    ShapeFill,
+    ShapeLine,
 }
 
 #[derive(Default)]
@@ -91,6 +129,7 @@ struct GraphicFrameBuilder {
     width: Option<u64>,
     height: Option<u64>,
     table: Option<SlideTableBuilder>,
+    chart_relationship_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -170,6 +209,7 @@ struct SlideRunBuilder {
 #[derive(Default)]
 struct SlideRunFormat {
     size_hundredth_points: Option<u32>,
+    spacing_hundredth_points: Option<i32>,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -258,8 +298,11 @@ where
         };
         let width_px = emu_to_px(self.slide_width_emu);
         let height_px = emu_to_px(self.slide_height_emu);
+        let background_style = paint_background_css(&self.background)
+            .map(|style| format!(";{style}"))
+            .unwrap_or_default();
         let html = format!(
-            "<section class=\"hcd-slide\" data-hcd-source-part=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\" style=\"position:relative;width:{width_px:.2}px;height:{height_px:.2}px\">{}</section>",
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\" style=\"position:relative;width:{width_px:.2}px;height:{height_px:.2}px{background_style}\">{}</section>",
             escape_attribute(self.part),
             self.slide_width_emu,
             self.slide_height_emu,
@@ -321,11 +364,13 @@ where
         ));
     }
     let (slide_width_emu, slide_height_emu) = presentation_size(&mut archive)?;
+    let theme_colors = presentation_theme_colors(&mut archive)?;
     let mut writer = BundleWriter::create(output)?;
     writer.write_styles(
-        ".hcd-slide{display:block;overflow:hidden;background:#fff}.hcd-slide-shape{box-sizing:border-box;white-space:pre-wrap}.hcd-slide-picture{box-sizing:border-box;overflow:hidden}.hcd-slide-picture img{display:block;width:100%;height:100%;object-fit:contain}.hcd-slide-table-frame{box-sizing:border-box;overflow:hidden}.hcd-ppt-table{border-collapse:collapse}.hcd-ppt-table td{box-sizing:border-box;overflow:hidden;vertical-align:top}.hcd-slide-text{white-space:pre-wrap;margin:0}.hcd-ppt-run{white-space:pre-wrap}.hcd-empty-slide{min-height:10em}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-slide-picture[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-slide-picture[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
+        ".hcd-slide{display:block;overflow:hidden;background:#fff;font-family:Arial,'Helvetica Neue','PingFang SC','Microsoft YaHei',sans-serif}.hcd-slide-shape{box-sizing:border-box;white-space:pre-wrap}.hcd-slide-picture,.hcd-slide-chart{box-sizing:border-box;overflow:hidden}.hcd-slide-picture img,.hcd-slide-chart img{display:block;width:100%;height:100%;object-fit:contain}.hcd-slide-table-frame{box-sizing:border-box;overflow:hidden}.hcd-ppt-table{border-collapse:collapse}.hcd-ppt-table td{box-sizing:border-box;overflow:hidden;vertical-align:top}.hcd-slide-text{white-space:pre-wrap;margin:0}.hcd-ppt-run{white-space:pre-wrap}.hcd-empty-slide{min-height:10em}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]{cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) :is(.hcd-slide-picture,.hcd-slide-chart)[data-hcd-id]:hover{outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) [data-hcd-node-hash]:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8)}",
     )?;
-    let assets = import_assets(&mut archive, &writer, emit)?;
+    let mut assets = import_assets(&mut archive, &writer, emit)?;
+    assets.extend(import_chart_assets(&mut archive, &writer, emit)?);
     let asset_records: HashMap<String, AssetRecord> = assets
         .iter()
         .map(|asset| (asset.source_part.clone(), asset.clone()))
@@ -357,6 +402,7 @@ where
     parts.extend(notes);
     for (part, region) in parts {
         let part_assets = part_asset_relationships(&mut archive, &part, &asset_records)?;
+        let part_charts = part_chart_relationships(&mut archive, &part, &asset_records)?;
         let mut chunks = SlideChunkWriter {
             document_id: &options.document_id,
             part: &part,
@@ -371,11 +417,18 @@ where
             entries: Vec::new(),
             slide_width_emu,
             slide_height_emu,
+            background: SlidePaint::default(),
         };
         archive
             .with_part(&part, |source| {
-                parse_text_part(source, &part_assets, &mut chunks)
-                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                parse_text_part(
+                    source,
+                    &part_assets,
+                    &part_charts,
+                    &theme_colors,
+                    &mut chunks,
+                )
+                .map_err(|error| PackageError::ReadPartError(error.to_string()))
             })
             .map_err(package_error)?;
         chunks.flush()?;
@@ -384,7 +437,7 @@ where
     let mut manifest = base_manifest(options, "pptx", "slide-canvas", source_hash, source_size);
     manifest.warnings.push(FidelityWarning {
         code: "PPTX_PARTIAL_VISUAL_LAYOUT".to_string(),
-        message: "HCD materializes direct text-shape geometry, run formatting, relationship-bound embedded pictures and bounded progressive DrawingML table row-group fragments with repeated geometry/grid, merges and direct cell formatting; inherited masters/themes and table styles, grouped transforms, picture cropping/effects, charts, SmartArt and animations remain authoritative in the immutable source".to_string(),
+        message: "HCD materializes direct slide backgrounds, shape geometry/fills/outlines/rotation, text layout and run formatting, relationship-bound embedded pictures, cached-data chart SVG previews and bounded progressive DrawingML table row-group fragments with repeated geometry/grid, merges and direct cell formatting; inherited masters/layouts and table styles, grouped transforms, picture cropping/effects, native chart styling, SmartArt and animations remain authoritative in the immutable source".to_string(),
         node_id: None,
         source_part: Some("ppt/presentation.xml".to_string()),
     });
@@ -392,14 +445,15 @@ where
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: FidelityLevel::Visual,
         preserved: vec![
-            "slide order, editable DrawingML text and direct text-shape geometry".to_string(),
+            "slide order, direct solid/gradient backgrounds, editable DrawingML text and direct text-shape geometry/fills/outlines/rotation".to_string(),
             "direct paragraph alignment, font, size, color and emphasis".to_string(),
             "relationship-bound embedded pictures with direct position and size".to_string(),
+            "relationship-bound chart placement with bounded pure-Rust SVG previews generated from cached OOXML series data".to_string(),
             "DrawingML table position, size, row heights, column widths, merged cells, direct cell fill/margins/borders/alignment and editable anchor-cell text in bounded progressive row-group fragments".to_string(),
             "opaque presentation parts and media in the immutable source".to_string(),
         ],
         flattened: vec![
-            "master/theme and table-style inheritance, grouped shape transforms, picture cropping/effects, charts, SmartArt and animations are not fully rendered in HCD HTML".to_string(),
+            "master/layout and table-style inheritance, grouped shape transforms, picture cropping/effects, native chart styling/interactivity, SmartArt and animations are not fully rendered in HCD HTML".to_string(),
             "text found in merged table continuation cells is preserved as hidden read-only source text; the merge anchor remains the editable visible cell".to_string(),
             "clients reconstruct a large table canvas from repeated-geometry fragments sharing data-hcd-table-node-id and contiguous row ranges".to_string(),
         ],
@@ -412,6 +466,8 @@ where
 fn parse_text_part<F>(
     source: &mut dyn Read,
     asset_relationships: &HashMap<String, AssetRecord>,
+    chart_relationships: &HashMap<String, AssetRecord>,
+    theme_colors: &HashMap<String, String>,
     chunks: &mut SlideChunkWriter<'_, F>,
 ) -> Result<(), HcdError>
 where
@@ -432,6 +488,11 @@ where
     let mut run: Option<SlideRunBuilder> = None;
     let mut xml_depth = 0usize;
     let mut transform_depth = None;
+    let mut background_properties_depth = None;
+    let mut shape_properties_depth = None;
+    let mut shape_line_depth = None;
+    let mut paint_state: Option<(usize, PaintTarget)> = None;
+    let mut gradient_stop: Option<(usize, usize)> = None;
     let mut run_properties_depth = None;
     let mut table_depth = None;
     let mut table_cell_properties_depth = None;
@@ -484,6 +545,81 @@ where
                                 attribute(start, "rot").and_then(|value| value.parse::<i64>().ok());
                         }
                     }
+                    "bgPr" if shape.is_none() => background_properties_depth = Some(xml_depth),
+                    "spPr" if shape.is_some() => shape_properties_depth = Some(xml_depth),
+                    "prstGeom" if shape_properties_depth.is_some() => {
+                        if let Some(shape) = shape.as_mut() {
+                            shape.geometry = attribute(start, "prst");
+                        }
+                    }
+                    "bodyPr" if shape.is_some() => {
+                        capture_shape_body_properties(start, shape.as_mut())
+                    }
+                    "ln" if shape_properties_depth.is_some() => {
+                        shape_line_depth = Some(xml_depth);
+                        if let Some(shape) = shape.as_mut() {
+                            shape.line.width =
+                                attribute(start, "w").and_then(|value| value.parse::<u64>().ok());
+                        }
+                    }
+                    "solidFill" | "gradFill"
+                        if background_properties_depth.is_some()
+                            || shape_properties_depth.is_some() =>
+                    {
+                        let target = if background_properties_depth.is_some() && shape.is_none() {
+                            PaintTarget::Background
+                        } else if shape_line_depth.is_some() {
+                            PaintTarget::ShapeLine
+                        } else {
+                            PaintTarget::ShapeFill
+                        };
+                        reset_paint_for_start(
+                            paint_mut(target, &mut chunks.background, shape.as_mut()),
+                            name == "gradFill",
+                        );
+                        paint_state = Some((xml_depth, target));
+                    }
+                    "noFill" if shape_line_depth.is_some() => {
+                        if let Some(shape) = shape.as_mut() {
+                            shape.line.paint.none = true;
+                        }
+                    }
+                    "noFill" if shape_properties_depth.is_some() => {
+                        if let Some(shape) = shape.as_mut() {
+                            shape.fill.none = true;
+                        }
+                    }
+                    "noFill" if background_properties_depth.is_some() && shape.is_none() => {
+                        chunks.background.none = true;
+                    }
+                    "gs" if paint_state.is_some() => {
+                        if let Some((_, target)) = paint_state {
+                            let position = attribute(start, "pos")
+                                .and_then(|value| value.parse::<u32>().ok())
+                                .unwrap_or(0)
+                                .min(100_000);
+                            let paint = paint_mut(target, &mut chunks.background, shape.as_mut());
+                            paint.gradient_stops.push(SlideGradientStop {
+                                position,
+                                ..Default::default()
+                            });
+                            gradient_stop = Some((xml_depth, paint.gradient_stops.len() - 1));
+                        }
+                    }
+                    "lin" if paint_state.is_some() => {
+                        if let Some((_, target)) = paint_state {
+                            paint_mut(target, &mut chunks.background, shape.as_mut())
+                                .gradient_angle =
+                                attribute(start, "ang").and_then(|value| value.parse::<i64>().ok());
+                        }
+                    }
+                    "alpha" if paint_state.is_some() => capture_paint_alpha(
+                        start,
+                        paint_state,
+                        gradient_stop,
+                        &mut chunks.background,
+                        shape.as_mut(),
+                    ),
                     "off" if transform_depth.is_some() => {
                         capture_shape_offset(start, shape.as_mut());
                         capture_picture_offset(start, picture.as_mut());
@@ -500,6 +636,11 @@ where
                     "tbl" if graphic_frame.is_some() => {
                         start_slide_table(graphic_frame.as_mut(), chunks.part)?;
                         table_depth = Some(xml_depth);
+                    }
+                    "chart" if graphic_frame.is_some() => {
+                        if let Some(frame) = graphic_frame.as_mut() {
+                            frame.chart_relationship_id = relationship_id_attribute(start);
+                        }
                     }
                     "tblPr" if table_depth.is_some() => {
                         capture_slide_table_properties(start, graphic_frame.as_mut());
@@ -560,6 +701,12 @@ where
                             run.format.color = attribute(start, "val").and_then(strict_rgb);
                         }
                     }
+                    "schemeClr" if run_properties_depth.is_some() => {
+                        if let Some(run) = run.as_mut() {
+                            run.format.color = attribute(start, "val")
+                                .and_then(|value| theme_colors.get(&value).cloned());
+                        }
+                    }
                     "srgbClr" if table_border.is_some() => {
                         capture_slide_table_border_color(
                             start,
@@ -570,6 +717,21 @@ where
                     "srgbClr" if table_fill_depth.is_some() => {
                         capture_slide_table_fill_color(start, graphic_frame.as_mut());
                     }
+                    "srgbClr" if paint_state.is_some() => capture_paint_color(
+                        start,
+                        paint_state,
+                        gradient_stop,
+                        &mut chunks.background,
+                        shape.as_mut(),
+                    ),
+                    "schemeClr" if paint_state.is_some() => capture_paint_scheme_color(
+                        start,
+                        paint_state,
+                        gradient_stop,
+                        theme_colors,
+                        &mut chunks.background,
+                        shape.as_mut(),
+                    ),
                     "t" => current = Some(String::new()),
                     _ => {}
                 }
@@ -583,6 +745,16 @@ where
                     }
                     "cNvPr" if graphic_frame.is_some() => {
                         capture_graphic_frame_identity(empty, graphic_frame.as_mut())
+                    }
+                    "bgPr" if shape.is_none() => {}
+                    "spPr" if shape.is_some() => {}
+                    "prstGeom" if shape_properties_depth.is_some() => {
+                        if let Some(shape) = shape.as_mut() {
+                            shape.geometry = attribute(empty, "prst");
+                        }
+                    }
+                    "bodyPr" if shape.is_some() => {
+                        capture_shape_body_properties(empty, shape.as_mut())
                     }
                     "off" if transform_depth.is_some() => {
                         capture_shape_offset(empty, shape.as_mut());
@@ -599,6 +771,11 @@ where
                     }
                     "tblPr" if table_depth.is_some() => {
                         capture_slide_table_properties(empty, graphic_frame.as_mut());
+                    }
+                    "chart" if graphic_frame.is_some() => {
+                        if let Some(frame) = graphic_frame.as_mut() {
+                            frame.chart_relationship_id = relationship_id_attribute(empty);
+                        }
                     }
                     "gridCol" if table_depth.is_some() => {
                         push_slide_table_grid_column(empty, graphic_frame.as_mut(), chunks.part)?;
@@ -635,6 +812,12 @@ where
                             run.format.color = attribute(empty, "val").and_then(strict_rgb);
                         }
                     }
+                    "schemeClr" if run_properties_depth.is_some() => {
+                        if let Some(run) = run.as_mut() {
+                            run.format.color = attribute(empty, "val")
+                                .and_then(|value| theme_colors.get(&value).cloned());
+                        }
+                    }
                     "srgbClr" if table_border.is_some() => {
                         capture_slide_table_border_color(
                             empty,
@@ -644,6 +827,48 @@ where
                     }
                     "srgbClr" if table_fill_depth.is_some() => {
                         capture_slide_table_fill_color(empty, graphic_frame.as_mut());
+                    }
+                    "srgbClr" if paint_state.is_some() => capture_paint_color(
+                        empty,
+                        paint_state,
+                        gradient_stop,
+                        &mut chunks.background,
+                        shape.as_mut(),
+                    ),
+                    "schemeClr" if paint_state.is_some() => capture_paint_scheme_color(
+                        empty,
+                        paint_state,
+                        gradient_stop,
+                        theme_colors,
+                        &mut chunks.background,
+                        shape.as_mut(),
+                    ),
+                    "alpha" if paint_state.is_some() => capture_paint_alpha(
+                        empty,
+                        paint_state,
+                        gradient_stop,
+                        &mut chunks.background,
+                        shape.as_mut(),
+                    ),
+                    "lin" if paint_state.is_some() => {
+                        if let Some((_, target)) = paint_state {
+                            paint_mut(target, &mut chunks.background, shape.as_mut())
+                                .gradient_angle =
+                                attribute(empty, "ang").and_then(|value| value.parse::<i64>().ok());
+                        }
+                    }
+                    "noFill" if shape_line_depth.is_some() => {
+                        if let Some(shape) = shape.as_mut() {
+                            shape.line.paint.none = true;
+                        }
+                    }
+                    "noFill" if shape_properties_depth.is_some() => {
+                        if let Some(shape) = shape.as_mut() {
+                            shape.fill.none = true;
+                        }
+                    }
+                    "noFill" if background_properties_depth.is_some() && shape.is_none() => {
+                        chunks.background.none = true;
                     }
                     "t" => {
                         ordinal += 1;
@@ -704,6 +929,22 @@ where
                         }
                     }
                     "solidFill" if table_fill_depth == Some(xml_depth) => table_fill_depth = None,
+                    "gs" if gradient_stop.is_some_and(|(depth, _)| depth == xml_depth) => {
+                        gradient_stop = None
+                    }
+                    "solidFill" | "gradFill"
+                        if paint_state.is_some_and(|(depth, _)| depth == xml_depth) =>
+                    {
+                        paint_state = None;
+                        gradient_stop = None;
+                    }
+                    "ln" if shape_line_depth == Some(xml_depth) => shape_line_depth = None,
+                    "spPr" if shape_properties_depth == Some(xml_depth) => {
+                        shape_properties_depth = None
+                    }
+                    "bgPr" if background_properties_depth == Some(xml_depth) => {
+                        background_properties_depth = None
+                    }
                     "lnL" | "lnR" | "lnT" | "lnB"
                         if table_border.is_some_and(|(depth, _)| depth == xml_depth) =>
                     {
@@ -745,6 +986,13 @@ where
                         if let Some(mut graphic_frame) = graphic_frame.take() {
                             if graphic_frame.table.is_some() {
                                 finish_slide_table(&mut graphic_frame, chunks)?;
+                            } else if graphic_frame.chart_relationship_id.is_some() {
+                                chunks.push_block(finish_chart(
+                                    chunks.document_id,
+                                    chunks.part,
+                                    graphic_frame,
+                                    chart_relationships,
+                                ))?;
                             }
                         }
                     }
@@ -918,6 +1166,9 @@ fn slide_run_start(format: &SlideRunFormat) -> String {
     {
         css.push(format!("font-size:{:.2}pt", size as f64 / 100.0));
     }
+    if let Some(spacing) = format.spacing_hundredth_points {
+        css.push(format!("letter-spacing:{:.2}pt", spacing as f64 / 100.0));
+    }
     if format.bold {
         css.push("font-weight:700".to_string());
     }
@@ -938,7 +1189,10 @@ fn slide_run_start(format: &SlideRunFormat) -> String {
         css.push(format!("color:#{color}"));
     }
     if let Some(font) = format.font.as_deref().and_then(safe_css_font) {
-        css.push(format!("font-family:'{}'", font.replace('\'', "")));
+        css.push(format!(
+            "font-family:'{}',Arial,'Helvetica Neue',sans-serif",
+            font.replace('\'', "")
+        ));
     }
     if format.rtl {
         css.push("direction:rtl".to_string());
@@ -977,6 +1231,121 @@ fn capture_shape_extent(element: &BytesStart<'_>, shape: Option<&mut ShapeBuilde
     };
     shape.width = attribute(element, "cx").and_then(|value| value.parse().ok());
     shape.height = attribute(element, "cy").and_then(|value| value.parse().ok());
+}
+
+fn capture_shape_body_properties(element: &BytesStart<'_>, shape: Option<&mut ShapeBuilder>) {
+    let Some(shape) = shape else {
+        return;
+    };
+    shape.vertical_anchor = attribute(element, "anchor").and_then(|value| match value.as_str() {
+        "ctr" => Some("center"),
+        "b" => Some("flex-end"),
+        "t" => Some("flex-start"),
+        _ => None,
+    });
+    shape.margin_left = attribute(element, "lIns").and_then(|value| value.parse().ok());
+    shape.margin_right = attribute(element, "rIns").and_then(|value| value.parse().ok());
+    shape.margin_top = attribute(element, "tIns").and_then(|value| value.parse().ok());
+    shape.margin_bottom = attribute(element, "bIns").and_then(|value| value.parse().ok());
+}
+
+fn paint_mut<'a>(
+    target: PaintTarget,
+    background: &'a mut SlidePaint,
+    shape: Option<&'a mut ShapeBuilder>,
+) -> &'a mut SlidePaint {
+    match target {
+        PaintTarget::Background => background,
+        PaintTarget::ShapeFill => &mut shape.expect("shape fill target requires a shape").fill,
+        PaintTarget::ShapeLine => {
+            &mut shape
+                .expect("shape line target requires a shape")
+                .line
+                .paint
+        }
+    }
+}
+
+fn reset_paint_for_start(paint: &mut SlidePaint, gradient: bool) {
+    paint.none = false;
+    paint.color = None;
+    paint.alpha = None;
+    paint.gradient_stops.clear();
+    paint.gradient_angle = gradient.then_some(0);
+}
+
+fn capture_paint_color(
+    element: &BytesStart<'_>,
+    state: Option<(usize, PaintTarget)>,
+    gradient_stop: Option<(usize, usize)>,
+    background: &mut SlidePaint,
+    shape: Option<&mut ShapeBuilder>,
+) {
+    let Some((_, target)) = state else {
+        return;
+    };
+    let Some(color) = attribute(element, "val").and_then(strict_rgb) else {
+        return;
+    };
+    let paint = paint_mut(target, background, shape);
+    if let Some((_, index)) = gradient_stop {
+        if let Some(stop) = paint.gradient_stops.get_mut(index) {
+            stop.color = Some(color);
+        }
+    } else {
+        paint.color = Some(color);
+    }
+}
+
+fn capture_paint_scheme_color(
+    element: &BytesStart<'_>,
+    state: Option<(usize, PaintTarget)>,
+    gradient_stop: Option<(usize, usize)>,
+    theme_colors: &HashMap<String, String>,
+    background: &mut SlidePaint,
+    shape: Option<&mut ShapeBuilder>,
+) {
+    let Some((_, target)) = state else {
+        return;
+    };
+    let Some(color) = attribute(element, "val").and_then(|value| theme_colors.get(&value).cloned())
+    else {
+        return;
+    };
+    let paint = paint_mut(target, background, shape);
+    if let Some((_, index)) = gradient_stop {
+        if let Some(stop) = paint.gradient_stops.get_mut(index) {
+            stop.color = Some(color);
+        }
+    } else {
+        paint.color = Some(color);
+    }
+}
+
+fn capture_paint_alpha(
+    element: &BytesStart<'_>,
+    state: Option<(usize, PaintTarget)>,
+    gradient_stop: Option<(usize, usize)>,
+    background: &mut SlidePaint,
+    shape: Option<&mut ShapeBuilder>,
+) {
+    let Some((_, target)) = state else {
+        return;
+    };
+    let Some(alpha) = attribute(element, "val")
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(|value| value.min(100_000))
+    else {
+        return;
+    };
+    let paint = paint_mut(target, background, shape);
+    if let Some((_, index)) = gradient_stop {
+        if let Some(stop) = paint.gradient_stops.get_mut(index) {
+            stop.alpha = Some(alpha);
+        }
+    } else {
+        paint.alpha = Some(alpha);
+    }
 }
 
 fn capture_picture_identity(element: &BytesStart<'_>, picture: Option<&mut PictureBuilder>) {
@@ -1311,6 +1680,8 @@ fn capture_slide_run_property(element: &BytesStart<'_>, run: Option<&mut SlideRu
     };
     run.format.size_hundredth_points =
         attribute(element, "sz").and_then(|value| value.parse().ok());
+    run.format.spacing_hundredth_points =
+        attribute(element, "spc").and_then(|value| value.parse().ok());
     run.format.bold =
         attribute(element, "b").is_some_and(|value| matches!(value.as_str(), "1" | "true"));
     run.format.italic =
@@ -1379,15 +1750,70 @@ fn finish_shape(document_id: &str, part: &str, shape: ShapeBuilder) -> RenderedS
             attributes.push_str(&format!(" {name}=\"{value}\""));
         }
     }
-    let style = match (shape.x, shape.y, shape.width, shape.height) {
-        (Some(x), Some(y), Some(width), Some(height)) => format!(
-            " style=\"position:absolute;left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px;overflow:hidden\"",
-            emu_to_px_signed(x),
-            emu_to_px_signed(y),
-            emu_to_px(width),
-            emu_to_px(height)
-        ),
-        _ => String::new(),
+    let mut css = Vec::new();
+    if let (Some(x), Some(y), Some(width), Some(height)) =
+        (shape.x, shape.y, shape.width, shape.height)
+    {
+        css.extend([
+            "position:absolute".to_string(),
+            format!("left:{:.2}px", emu_to_px_signed(x)),
+            format!("top:{:.2}px", emu_to_px_signed(y)),
+            format!("width:{:.2}px", emu_to_px(width)),
+            format!("height:{:.2}px", emu_to_px(height)),
+            "overflow:hidden".to_string(),
+        ]);
+    }
+    if let Some(background) = paint_background_css(&shape.fill) {
+        css.push(background);
+    }
+    if !shape.line.paint.none {
+        let width_pt = shape
+            .line
+            .width
+            .map_or(0.75, emu_to_points)
+            .clamp(0.1, 100.0);
+        if let Some(color) = paint_representative_color(&shape.line.paint) {
+            for side in ["top", "right", "bottom", "left"] {
+                css.push(format!("border-{side}:{width_pt:.2}pt solid {color}"));
+            }
+        }
+    }
+    if let Some(geometry) = shape.geometry.as_deref() {
+        if geometry == "ellipse" {
+            css.push("border-radius:50%".to_string());
+        } else if matches!(
+            geometry,
+            "roundRect" | "round1Rect" | "round2SameRect" | "round2DiagRect"
+        ) {
+            css.push("border-radius:12px".to_string());
+        }
+    }
+    if let Some(rotation) = shape.rotation {
+        css.push(format!(
+            "transform:rotate({:.4}deg)",
+            rotation as f64 / 60_000.0
+        ));
+        css.push("transform-origin:center".to_string());
+    }
+    if let Some(anchor) = shape.vertical_anchor {
+        css.push("display:flex".to_string());
+        css.push("flex-direction:column".to_string());
+        css.push(format!("justify-content:{anchor}"));
+    }
+    for (property, value) in [
+        ("padding-left", shape.margin_left),
+        ("padding-right", shape.margin_right),
+        ("padding-top", shape.margin_top),
+        ("padding-bottom", shape.margin_bottom),
+    ] {
+        if let Some(value) = value {
+            css.push(format!("{property}:{:.2}pt", emu_to_points(value)));
+        }
+    }
+    let style = if css.is_empty() {
+        String::new()
+    } else {
+        format!(" style=\"{}\"", css.join(";"))
     };
     RenderedSlideBlock {
         html: format!(
@@ -1396,6 +1822,59 @@ fn finish_shape(document_id: &str, part: &str, shape: ShapeBuilder) -> RenderedS
         ),
         entries: shape.entries,
     }
+}
+
+fn paint_background_css(paint: &SlidePaint) -> Option<String> {
+    if paint.none {
+        return None;
+    }
+    let stops = paint
+        .gradient_stops
+        .iter()
+        .filter_map(|stop| {
+            stop.color.as_deref().map(|color| {
+                format!(
+                    "{} {:.2}%",
+                    css_hex_alpha(color, stop.alpha),
+                    stop.position as f64 / 1000.0
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if stops.len() >= 2 {
+        let angle = paint.gradient_angle.unwrap_or(0) as f64 / 60_000.0 + 90.0;
+        return Some(format!(
+            "background-image:linear-gradient({angle:.2}deg,{})",
+            stops.join(",")
+        ));
+    }
+    paint
+        .color
+        .as_deref()
+        .map(|color| format!("background-color:{}", css_hex_alpha(color, paint.alpha)))
+}
+
+fn paint_representative_color(paint: &SlidePaint) -> Option<String> {
+    paint
+        .color
+        .as_deref()
+        .map(|color| css_hex_alpha(color, paint.alpha))
+        .or_else(|| {
+            paint.gradient_stops.iter().find_map(|stop| {
+                stop.color
+                    .as_deref()
+                    .map(|color| css_hex_alpha(color, stop.alpha))
+            })
+        })
+}
+
+fn css_hex_alpha(color: &str, alpha: Option<u32>) -> String {
+    let mut output = format!("#{color}");
+    if let Some(alpha) = alpha.filter(|alpha| *alpha < 100_000) {
+        let byte = ((alpha as u64 * 255 + 50_000) / 100_000) as u8;
+        output.push_str(&format!("{byte:02X}"));
+    }
+    output
 }
 
 fn finish_picture(
@@ -1477,6 +1956,89 @@ fn finish_picture(
         .unwrap_or_default();
     RenderedSlideBlock {
         html: format!("<div class=\"hcd-slide-picture\"{attributes}{style}>{image}</div>"),
+        entries: Vec::new(),
+    }
+}
+
+fn finish_chart(
+    document_id: &str,
+    part: &str,
+    frame: GraphicFrameBuilder,
+    chart_relationships: &HashMap<String, AssetRecord>,
+) -> RenderedSlideBlock {
+    let identity = frame
+        .source_id
+        .clone()
+        .unwrap_or_else(|| frame.ordinal.to_string());
+    let node_id = stable_node_id(&[document_id, part, "chart", &identity]);
+    let source_path = frame
+        .source_id
+        .as_deref()
+        .map(|source_id| format!("/chart[@id={}]", escape_attribute(source_id)))
+        .unwrap_or_else(|| format!("/chart[{}]", frame.ordinal));
+    let mut attributes = format!(
+        " data-hcd-id=\"{node_id}\" data-hcd-node-kind=\"chart\" data-hcd-editable=\"false\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\"",
+        escape_attribute(part)
+    );
+    if let Some(source_id) = &frame.source_id {
+        attributes.push_str(&format!(
+            " data-hcd-chart-id=\"{}\"",
+            escape_attribute(source_id)
+        ));
+    }
+    if let Some(name) = &frame.name {
+        attributes.push_str(&format!(
+            " data-hcd-chart-name=\"{}\"",
+            escape_attribute(name)
+        ));
+    }
+    if let Some(relationship_id) = &frame.chart_relationship_id {
+        attributes.push_str(&format!(
+            " data-hcd-chart-relationship=\"{}\"",
+            escape_attribute(relationship_id)
+        ));
+    }
+    for (name, value) in [
+        ("data-hcd-x-emu", frame.x.map(|value| value.to_string())),
+        ("data-hcd-y-emu", frame.y.map(|value| value.to_string())),
+        (
+            "data-hcd-width-emu",
+            frame.width.map(|value| value.to_string()),
+        ),
+        (
+            "data-hcd-height-emu",
+            frame.height.map(|value| value.to_string()),
+        ),
+    ] {
+        if let Some(value) = value {
+            attributes.push_str(&format!(" {name}=\"{value}\""));
+        }
+    }
+    let style = match (frame.x, frame.y, frame.width, frame.height) {
+        (Some(x), Some(y), Some(width), Some(height)) => format!(
+            " style=\"position:absolute;left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px;overflow:hidden\"",
+            emu_to_px_signed(x),
+            emu_to_px_signed(y),
+            emu_to_px(width),
+            emu_to_px(height)
+        ),
+        _ => String::new(),
+    };
+    let image = frame
+        .chart_relationship_id
+        .as_ref()
+        .and_then(|id| chart_relationships.get(id))
+        .map(|asset| {
+            format!(
+                "<img src=\"asset://sha256/{}\" data-hcd-asset-href=\"{}\" alt=\"{}\"/>",
+                asset.hash,
+                escape_attribute(&asset.href),
+                escape_attribute(frame.name.as_deref().unwrap_or("Chart"))
+            )
+        })
+        .unwrap_or_default();
+    RenderedSlideBlock {
+        html: format!("<div class=\"hcd-slide-chart\"{attributes}{style}>{image}</div>"),
         entries: Vec::new(),
     }
 }
@@ -1992,6 +2554,107 @@ fn presentation_size(archive: &mut StreamingOxmlArchive) -> Result<(u64, u64), H
     }
 }
 
+fn presentation_theme_colors(
+    archive: &mut StreamingOxmlArchive,
+) -> Result<HashMap<String, String>, HcdError> {
+    let mut colors = HashMap::from([
+        ("dk1".to_string(), "000000".to_string()),
+        ("lt1".to_string(), "ffffff".to_string()),
+        ("dk2".to_string(), "1f497d".to_string()),
+        ("lt2".to_string(), "e5e0ec".to_string()),
+        ("accent1".to_string(), "4f81bd".to_string()),
+        ("accent2".to_string(), "c0504d".to_string()),
+        ("accent3".to_string(), "9bbb59".to_string()),
+        ("accent4".to_string(), "8064a2".to_string()),
+        ("accent5".to_string(), "4bacc6".to_string()),
+        ("accent6".to_string(), "f79646".to_string()),
+        ("hlink".to_string(), "0000ff".to_string()),
+        ("folHlink".to_string(), "800080".to_string()),
+    ]);
+    let mut themes = archive
+        .entries()
+        .iter()
+        .filter(|entry| entry.name.starts_with("ppt/theme/theme") && entry.name.ends_with(".xml"))
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    themes.sort_by_key(|part| numeric_suffix(part));
+    let Some(theme) = themes.first() else {
+        return Ok(colors);
+    };
+    let xml = archive
+        .read_control_part(theme, 16 * 1024 * 1024)
+        .map_err(package_error)?;
+    let mut reader = Reader::from_reader(xml.as_slice());
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut current: Option<(usize, String)> = None;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(ref element)) => {
+                depth += 1;
+                let qualified_name = element.name();
+                let name = local_name(qualified_name.as_ref());
+                if matches!(
+                    name,
+                    "dk1"
+                        | "lt1"
+                        | "dk2"
+                        | "lt2"
+                        | "accent1"
+                        | "accent2"
+                        | "accent3"
+                        | "accent4"
+                        | "accent5"
+                        | "accent6"
+                        | "hlink"
+                        | "folHlink"
+                ) {
+                    current = Some((depth, name.to_string()));
+                } else if let Some((_, key)) = current.as_ref() {
+                    let value = match name {
+                        "srgbClr" => attribute(element, "val").and_then(strict_rgb),
+                        "sysClr" => attribute(element, "lastClr").and_then(strict_rgb),
+                        _ => None,
+                    };
+                    if let Some(value) = value {
+                        colors.insert(key.clone(), value);
+                    }
+                }
+            }
+            Ok(Event::Empty(ref element)) => {
+                if let Some((_, key)) = current.as_ref() {
+                    let value = match local_name(element.name().as_ref()) {
+                        "srgbClr" => attribute(element, "val").and_then(strict_rgb),
+                        "sysClr" => attribute(element, "lastClr").and_then(strict_rgb),
+                        _ => None,
+                    };
+                    if let Some(value) = value {
+                        colors.insert(key.clone(), value);
+                    }
+                }
+            }
+            Ok(Event::End(_)) => {
+                if current.as_ref().is_some_and(|(start, _)| *start == depth) {
+                    current = None;
+                }
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    HcdError::InvalidBundle(format!("unbalanced theme XML in {theme}"))
+                })?;
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(HcdError::InvalidBundle(format!(
+                    "presentation theme XML: {error}"
+                )))
+            }
+        }
+        buffer.clear();
+    }
+    Ok(colors)
+}
+
 fn presentation_slides(
     archive: &mut StreamingOxmlArchive,
 ) -> Result<Vec<(String, &'static str)>, HcdError> {
@@ -2145,6 +2808,125 @@ fn part_asset_relationships(
         buffer.clear();
     }
     Ok(relationships)
+}
+
+fn part_chart_relationships(
+    archive: &mut StreamingOxmlArchive,
+    source_part: &str,
+    asset_records: &HashMap<String, AssetRecord>,
+) -> Result<HashMap<String, AssetRecord>, HcdError> {
+    let source_path = Path::new(source_part);
+    let file_name = source_path.file_name().ok_or_else(|| {
+        HcdError::InvalidBundle(format!("invalid presentation part path {source_part}"))
+    })?;
+    let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
+    let relationships_part = parent
+        .join("_rels")
+        .join(format!("{}.rels", file_name.to_string_lossy()))
+        .to_string_lossy()
+        .replace('\\', "/");
+    if !archive.contains(&relationships_part) {
+        return Ok(HashMap::new());
+    }
+    let xml = archive
+        .read_control_part(&relationships_part, 16 * 1024 * 1024)
+        .map_err(package_error)?;
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut relationships = HashMap::new();
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(|error| {
+            HcdError::InvalidBundle(format!("part chart relationships XML: {error}"))
+        })?;
+        budget.observe(&event, &relationships_part)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let is_chart = attribute(element, "Type")
+                    .is_some_and(|kind| kind.ends_with("/chart") || kind.ends_with("/chartEx"));
+                let is_external = attribute(element, "TargetMode")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                if is_chart && !is_external {
+                    if let (Some(id), Some(target)) =
+                        (attribute(element, "Id"), attribute(element, "Target"))
+                    {
+                        let target_part = resolve_part(source_part, &target)?;
+                        if let Some(asset) = asset_records.get(&target_part) {
+                            relationships.insert(id, asset.clone());
+                        }
+                    }
+                }
+            }
+            Event::Eof => {
+                budget.finish(&relationships_part)?;
+                break;
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(relationships)
+}
+
+fn import_chart_assets<F>(
+    archive: &mut StreamingOxmlArchive,
+    writer: &BundleWriter,
+    emit: &mut F,
+) -> Result<Vec<AssetRecord>, HcdError>
+where
+    F: FnMut(&ImportEvent) -> Result<(), HcdError>,
+{
+    let mut parts = archive
+        .entries()
+        .iter()
+        .filter(|entry| !entry.is_dir && is_presentation_chart_part(&entry.name))
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    parts.sort_by_key(|part| numeric_suffix(part));
+    let mut assets = Vec::new();
+    for part in parts {
+        let xml = archive
+            .read_control_part(&part, 16 * 1024 * 1024)
+            .map_err(package_error)?;
+        let xml = std::str::from_utf8(&xml).map_err(|error| {
+            HcdError::InvalidBundle(format!("chart {part} is not UTF-8: {error}"))
+        })?;
+        let svg = oxml::chart_preview::render_chart_svg(xml).map_err(|error| {
+            HcdError::InvalidBundle(format!("cannot render cached chart {part}: {error}"))
+        })?;
+        let (href, hash, byte_length) =
+            writer.write_asset_from_reader("svg", &mut Cursor::new(svg.as_bytes()))?;
+        emit(&ImportEvent::AssetReady {
+            hash: hash.clone(),
+            href: href.clone(),
+            byte_length,
+        })?;
+        assets.push(AssetRecord {
+            source_part: part,
+            hash,
+            href,
+            byte_length,
+        });
+    }
+    Ok(assets)
+}
+
+fn is_presentation_chart_part(part: &str) -> bool {
+    let lower = part.to_ascii_lowercase();
+    if !lower.starts_with("ppt/") || !lower.contains("/charts/") || !lower.ends_with(".xml") {
+        return false;
+    }
+    let stem = Path::new(&lower)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    stem.strip_prefix("chartex")
+        .or_else(|| stem.strip_prefix("chart"))
+        .is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn import_assets<F>(
@@ -2481,6 +3263,7 @@ mod tests {
         assert!(html.contains("width:192.00px"));
         assert!(html.contains("text-align:center"));
         assert!(html.contains("font-size:24.00pt"));
+        assert!(html.contains("letter-spacing:1.50pt"));
         assert!(html.contains("font-weight:700"));
         assert!(html.contains("font-style:italic"));
         assert!(html.contains("text-decoration:underline"));
@@ -2500,6 +3283,60 @@ mod tests {
         let assets = bundle.read_asset_index().unwrap();
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].source_part, "ppt/media/image1.png");
+    }
+
+    #[test]
+    fn renders_direct_slide_background_and_shape_paint_geometry() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = temp.path().join("bundle");
+        let mut writer = BundleWriter::create(&bundle_path).unwrap();
+        let mut descriptors = Vec::new();
+        let mut emit = |event: &ImportEvent| {
+            if let ImportEvent::ChunkReady { descriptor } = event {
+                descriptors.push(descriptor.clone());
+            }
+            Ok(())
+        };
+        let mut chunks = SlideChunkWriter {
+            document_id: "painted-pptx",
+            part: "ppt/slides/slide1.xml",
+            region: "slide",
+            writer: &mut writer,
+            emit: &mut emit,
+            soft_bytes: MAX_CHUNK_BYTES,
+            max_blocks: DEFAULT_CHUNK_BLOCKS,
+            ordinal: 0,
+            blocks: 0,
+            html: String::new(),
+            entries: Vec::new(),
+            slide_width_emu: 12_192_000,
+            slide_height_emu: 6_858_000,
+            background: SlidePaint::default(),
+        };
+        let xml = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="0D1B2A"/></a:gs><a:gs pos="100000"><a:srgbClr val="0A1628"/></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="7" name="Painted ellipse"/></p:nvSpPr><p:spPr><a:xfrm rot="2700000"><a:off x="914400" y="457200"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="ellipse"/><a:solidFill><a:schemeClr val="accent1"><a:alpha val="8000"/></a:schemeClr></a:solidFill><a:ln w="25400"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr anchor="b" lIns="12700"/><a:p><a:r><a:t>styled</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+        let mut source = xml.as_bytes();
+        let theme = HashMap::from([("accent1".to_string(), "00b4d8".to_string())]);
+        parse_text_part(
+            &mut source,
+            &HashMap::new(),
+            &HashMap::new(),
+            &theme,
+            &mut chunks,
+        )
+        .unwrap();
+        chunks.flush().unwrap();
+        drop(chunks);
+
+        assert_eq!(descriptors.len(), 1);
+        let html = std::fs::read_to_string(bundle_path.join(&descriptors[0].html_href)).unwrap();
+        assert!(html
+            .contains("background-image:linear-gradient(180.00deg,#0d1b2a 0.00%,#0a1628 100.00%)"));
+        assert!(html.contains("background-color:#00b4d814"));
+        assert!(html.contains("border-top:2.00pt solid #ffffff"));
+        assert!(html.contains("border-radius:50%"));
+        assert!(html.contains("transform:rotate(45.0000deg)"));
+        assert!(html.contains("justify-content:flex-end"));
+        assert!(html.contains("padding-left:1.00pt"));
     }
 
     #[test]
@@ -2652,13 +3489,21 @@ mod tests {
             entries: Vec::new(),
             slide_width_emu: 12_192_000,
             slide_height_emu: 6_858_000,
+            background: SlidePaint::default(),
         };
         let xml = format!(
             r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="9" name="Oversized"/></p:nvGraphicFramePr><a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w="1"/></a:tblGrid><a:tr h="1"><a:tc gridSpan="{}"><a:txBody><a:p><a:r><a:t>x</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
             MAX_PPTX_TABLE_COLUMNS + 1
         );
         let mut source = xml.as_bytes();
-        let error = parse_text_part(&mut source, &HashMap::new(), &mut chunks).unwrap_err();
+        let error = parse_text_part(
+            &mut source,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut chunks,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("gridSpan"));
         assert!(error
             .to_string()
@@ -2700,6 +3545,7 @@ mod tests {
             entries: Vec::new(),
             slide_width_emu: 12_192_000,
             slide_height_emu: 6_858_000,
+            background: SlidePaint::default(),
         };
         let payload = "x".repeat(2_048);
         let mut xml = String::from(
@@ -2719,7 +3565,14 @@ mod tests {
             max_read: 4 * 1024,
         };
 
-        parse_text_part(&mut source, &HashMap::new(), &mut chunks).unwrap();
+        parse_text_part(
+            &mut source,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut chunks,
+        )
+        .unwrap();
         drop(chunks);
 
         assert!(first_chunk_before_eof);
@@ -2778,6 +3631,7 @@ mod tests {
             entries: Vec::new(),
             slide_width_emu: 12_192_000,
             slide_height_emu: 6_858_000,
+            background: SlidePaint::default(),
         };
         // Keep every XML text node comfortably below the node limit while making the
         // indivisible three-row merge group larger than a single HCD chunk.
@@ -2787,7 +3641,14 @@ mod tests {
         );
         let mut source = xml.as_bytes();
 
-        let error = parse_text_part(&mut source, &HashMap::new(), &mut chunks).unwrap_err();
+        let error = parse_text_part(
+            &mut source,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut chunks,
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("merged row group"),
             "unexpected error: {error}"
@@ -2864,7 +3725,7 @@ mod tests {
             ),
             (
                 "ppt/slides/slide2.xml",
-                r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title &amp; More"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm rot="5400000"><a:off x="914400" y="457200"/><a:ext cx="1828800" cy="914400"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="zh-CN" sz="2400" b="1" i="1" u="sng"><a:solidFill><a:srgbClr val="112233"/></a:solidFill><a:latin typeface="Arial"/></a:rPr><a:t>样式 😀</a:t></a:r></a:p></p:txBody></p:sp><p:pic><p:nvPicPr><p:cNvPr id="4" name="Picture &amp; One"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rIdImage1"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="3657600" y="914400"/><a:ext cx="1828800" cy="1371600"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#,
+                r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title &amp; More"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm rot="5400000"><a:off x="914400" y="457200"/><a:ext cx="1828800" cy="914400"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="zh-CN" sz="2400" spc="150" b="1" i="1" u="sng"><a:solidFill><a:srgbClr val="112233"/></a:solidFill><a:latin typeface="Arial"/></a:rPr><a:t>样式 😀</a:t></a:r></a:p></p:txBody></p:sp><p:pic><p:nvPicPr><p:cNvPr id="4" name="Picture &amp; One"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rIdImage1"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="3657600" y="914400"/><a:ext cx="1828800" cy="1371600"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#,
             ),
             (
                 "ppt/slides/_rels/slide2.xml.rels",

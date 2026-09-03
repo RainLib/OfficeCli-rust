@@ -921,6 +921,65 @@ fn validate_descriptor(descriptor: &crate::ChunkDescriptor, issues: &mut Vec<Val
             path,
         ));
     }
+    if let Some(grid) = &descriptor.grid {
+        if descriptor.region != "sheet" {
+            issues.push(issue(
+                "GRID_CHUNK_REGION_INVALID",
+                "grid metadata is only valid on sheet chunks".to_string(),
+                path,
+            ));
+        }
+        if !valid_prefixed_id(&grid.sheet_id, "s_", 32) {
+            issues.push(issue(
+                "GRID_SHEET_ID_INVALID",
+                format!("invalid grid sheetId {}", grid.sheet_id),
+                path,
+            ));
+        }
+        if grid.sheet_name.is_empty() || grid.sheet_name.chars().count() > 31 {
+            issues.push(issue(
+                "GRID_SHEET_NAME_INVALID",
+                "grid sheetName must contain 1 to 31 Unicode scalar values".to_string(),
+                path,
+            ));
+        }
+        if !matches!(
+            grid.sheet_state.as_str(),
+            "visible" | "hidden" | "veryHidden"
+        ) {
+            issues.push(issue(
+                "GRID_SHEET_STATE_INVALID",
+                format!("invalid grid sheetState {}", grid.sheet_state),
+                path,
+            ));
+        }
+        if matches!((grid.row_start, grid.row_end), (Some(start), Some(end)) if start > end) {
+            issues.push(issue(
+                "GRID_ROW_RANGE_INVALID",
+                "grid rowStart must not exceed rowEnd".to_string(),
+                path,
+            ));
+        }
+        if matches!((grid.column_start, grid.column_end), (Some(start), Some(end)) if start > end) {
+            issues.push(issue(
+                "GRID_COLUMN_RANGE_INVALID",
+                "grid columnStart must not exceed columnEnd".to_string(),
+                path,
+            ));
+        }
+        for (name, value) in [
+            ("defaultColumnWidthEmu", grid.default_column_width_emu),
+            ("defaultRowHeightEmu", grid.default_row_height_emu),
+        ] {
+            if value.is_some_and(|value| !(1..=100_000_000).contains(&value)) {
+                issues.push(issue(
+                    "GRID_DEFAULT_DIMENSION_INVALID",
+                    format!("grid {name} must be between 1 and 100000000 EMU"),
+                    path,
+                ));
+            }
+        }
+    }
     if descriptor.byte_length as usize > MAX_CHUNK_BYTES {
         issues.push(issue(
             "CHUNK_TOO_LARGE",

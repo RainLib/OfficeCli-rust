@@ -2,6 +2,8 @@ use handler_common::{HandlerError, ViewOptions};
 use oxml::OxmlPackage;
 use std::collections::HashMap;
 
+const DRAWING_RELATIONSHIP_SUFFIX: &str = "/drawing";
+
 struct MergeInfo {
     is_anchor: bool,
     row_span: usize,
@@ -489,7 +491,7 @@ pub fn view_as_html(package: &OxmlPackage, opts: &ViewOptions) -> Result<String,
         ));
 
         // Generate Colgroup
-        sheets_html.push_str("<colgroup><col style=\"width:40px\"></colgroup>");
+        sheets_html.push_str("<colgroup><col class=\"row-header-col\" style=\"width:40px\">");
         for col in min_col..=max_col {
             if hidden_cols.contains(&col) {
                 continue;
@@ -497,6 +499,7 @@ pub fn view_as_html(package: &OxmlPackage, opts: &ViewOptions) -> Result<String,
             let width = col_widths.get(&col).copied().unwrap_or(default_col_width);
             sheets_html.push_str(&format!("<col style=\"width:{:.1}px\">", width));
         }
+        sheets_html.push_str("</colgroup>");
 
         // Generate Header Row
         sheets_html.push_str("<thead><tr><th class=\"corner-cell\"");
@@ -749,7 +752,20 @@ pub fn view_as_html(package: &OxmlPackage, opts: &ViewOptions) -> Result<String,
             sheets_html.push_str("</tr>\n");
         }
 
-        sheets_html.push_str("</tbody>\n</table>\n</div>\n</div>\n");
+        sheets_html.push_str("</tbody>\n</table>\n</div>\n");
+        let charts = sheet_chart_previews(package, &ws.part_path);
+        if !charts.is_empty() {
+            sheets_html.push_str("<div class=\"chart-gallery\" aria-label=\"Worksheet charts\">\n");
+            for (chart_part, svg) in charts {
+                sheets_html.push_str(&format!(
+                    "<figure class=\"chart-container\" data-chart-part=\"{}\">{}</figure>\n",
+                    html_escape(&chart_part),
+                    svg
+                ));
+            }
+            sheets_html.push_str("</div>\n");
+        }
+        sheets_html.push_str("</div>\n");
     }
 
     let mut tabs_html = String::new();
@@ -908,14 +924,21 @@ tbody tr:first-child td:first-of-type {{ box-shadow: inset -1px -1px 0 #e0e0e0, 
     font-size: 14px;
 }}
 .chart-container {{
-    margin: 16px auto;
+    margin: 0;
     background: #fff;
     border: 1px solid #e0e0e0;
     border-radius: 6px;
     padding: 12px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.08);
 }}
-.chart-container svg {{ display: block; }}
+.chart-gallery {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 14px;
+    padding: 16px;
+    overflow: auto;
+}}
+.chart-container svg {{ display: block; width: 100%; height: auto; }}
 .truncation-warning {{
     padding: 8px 16px;
     background: #FFF3CD;
@@ -976,6 +999,60 @@ adjustStickyHeights();
         sheets_html = sheets_html,
         tabs_html = tabs_html
     ))
+}
+
+fn sheet_chart_previews(package: &OxmlPackage, worksheet_part: &str) -> Vec<(String, String)> {
+    let Ok(sheet_relationships) = package.part_rels(worksheet_part) else {
+        return Vec::new();
+    };
+    let mut drawing_parts = sheet_relationships
+        .all()
+        .values()
+        .filter(|relationship| {
+            relationship.type_uri.ends_with(DRAWING_RELATIONSHIP_SUFFIX)
+                && !relationship.target_mode.eq_ignore_ascii_case("External")
+        })
+        .map(|relationship| package.resolve_rel_target(worksheet_part, &relationship.target))
+        .collect::<Vec<_>>();
+    drawing_parts.sort();
+    let mut previews = Vec::new();
+    for drawing_part in drawing_parts {
+        let Ok(drawing_xml) = package.read_part_xml(&drawing_part) else {
+            continue;
+        };
+        let Ok(document) = roxmltree::Document::parse(&drawing_xml) else {
+            continue;
+        };
+        let relationship_ids = document
+            .descendants()
+            .filter(|node| node.is_element() && node.tag_name().name() == "chart")
+            .filter_map(|node| {
+                node.attributes()
+                    .iter()
+                    .find(|attribute| attribute.name() == "id")
+                    .map(|attribute| attribute.value().to_string())
+            })
+            .collect::<Vec<_>>();
+        let Ok(drawing_relationships) = package.part_rels(&drawing_part) else {
+            continue;
+        };
+        for relationship_id in relationship_ids {
+            let Some(relationship) = drawing_relationships.get(&relationship_id) else {
+                continue;
+            };
+            if relationship.target_mode.eq_ignore_ascii_case("External") {
+                continue;
+            }
+            let chart_part = package.resolve_rel_target(&drawing_part, &relationship.target);
+            let Ok(chart_xml) = package.read_part_xml(&chart_part) else {
+                continue;
+            };
+            if let Ok(svg) = oxml::chart_preview::render_chart_svg(&chart_xml) {
+                previews.push((chart_part, svg));
+            }
+        }
+    }
+    previews
 }
 
 fn parse_range(range_ref: &str) -> Option<(crate::dom_types::CellRef, crate::dom_types::CellRef)> {

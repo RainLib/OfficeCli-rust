@@ -178,8 +178,10 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "margin-bottom"
                 | "text-indent"
                 | "line-height"
+                | "letter-spacing"
                 | "break-before"
                 | "width"
+                | "min-width"
                 | "height"
                 | "min-height"
                 | "table-layout"
@@ -354,7 +356,7 @@ mod tests {
         )
         .is_ok());
         assert!(validate_inline_style(
-            "table-layout:fixed;min-height:18pt;break-inside:avoid;border-top:1pt solid #123456;padding-left:5pt"
+            "table-layout:fixed;min-width:18pt;min-height:18pt;break-inside:avoid;border-top:1pt solid #123456;padding-left:5pt"
         )
         .is_ok());
         assert!(validate_inline_style(
